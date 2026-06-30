@@ -23,7 +23,8 @@
   .stat .n { font-size:24px; font-weight:600; color:var(--blue-d); }
   .stat .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .card .go { margin-top:14px; font-size:12px; color:var(--blue-d); }
-  .card-updated { margin-top:8px; font-size:11px; color:var(--faint); }
+  .head-right { display:flex; align-items:center; gap:12px; }
+  .dash-updated { font-size:11px; color:var(--faint); white-space:nowrap; }
   .cap-bar { margin-top:14px; }
   .cap-bar .track { height:8px; background:var(--panel2); border-radius:5px; overflow:hidden; }
   .cap-bar .fill { height:100%; background:var(--green); border-radius:5px; }
@@ -41,6 +42,9 @@
   .sidebar { flex:0 0 210px; position:sticky; top:32px; background:var(--panel); border-radius:12px;
              padding:14px 12px; box-shadow:0 1px 3px rgba(0,0,0,.4); border:1px solid var(--border); }
   .sidebar .brand { font-size:15px; font-weight:600; padding:6px 12px 14px; color:var(--text); }
+  .nav-section { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+                 color:var(--faint); padding:14px 12px 6px; }
+  .nav-section:first-of-type { padding-top:4px; }
   .nav-item { display:block; padding:10px 12px; margin-bottom:4px; border-radius:8px;
               font-size:14px; color:var(--muted); text-decoration:none; cursor:pointer; }
   .nav-item:hover { background:var(--panel2); color:var(--text); }
@@ -51,6 +55,17 @@
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
   .card.june:hover { border-color:var(--green); }
   .card.june .stat .n, .card.june .go { color:var(--green-d); }
+  .card.june .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
+  .grp-card { grid-column: 1 / -1; }   /* combined buckets (e.g. CMD) span the whole row */
+  /* combined budget-group card: per-project breakdown rows */
+  .grp-tag { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.05em;
+             color:var(--muted); background:var(--panel2); border-radius:8px; padding:2px 7px; vertical-align:middle; }
+  .grp-members { margin-top:16px; border-top:1px solid var(--border); padding-top:6px; }
+  .grp-row { display:flex; justify-content:space-between; align-items:center; gap:10px;
+             padding:7px 6px; border-radius:7px; font-size:13px; cursor:pointer; }
+  .grp-row:hover { background:var(--panel2); }
+  .grp-row .grp-name { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .grp-row .grp-h { color:var(--green-d); font-variant-numeric:tabular-nums; white-space:nowrap; }
   /* detail */
   .head { display:flex; align-items:center; justify-content:space-between; gap:16px; }
   .left { display:flex; align-items:center; gap:14px; }
@@ -76,6 +91,7 @@
   table.tasks { width:100%; border-collapse:collapse; font-size:14px; }
   table.tasks th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
                    color:var(--muted); border-bottom:2px solid var(--border); padding:8px 10px; }
+  table.tasks th.hours { text-align:right; }
   table.tasks td { padding:9px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
   table.tasks tr.parent td { font-weight:600; }
   table.tasks tr.sub td { font-weight:400; color:var(--muted); }
@@ -111,8 +127,9 @@ const ASANA_API = 'https://app.asana.com/api/1.0';
 const EST_FIELD = "Estimated time";
 const EXCLUDE_SECTIONS = new Set(["completed"]);
 const ASSIGNEE_HOURS_CAP = 128;
-const TEAM_MEMBERS = ["Wallace Norman", "Miranda Osborn", "Linh Trinh", "Julia McKinney", "Grant Roach"];
-const PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 40}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40}, {"gid": "1214228966572508", "name": "Firebird MSA", "cap": 15}, {"gid": "1214228966572503", "name": "Myrick Marine"}, {"gid": "1214228966572429", "name": "CLICR - Internal"}, {"gid": "1214229029715234", "name": "Savannah Bee: Zendesk"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic"}, {"gid": "1214228966572541", "name": "DocSmith.md"}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2026"}, {"gid": "1214755322546416", "name": "Project Twilight"}, {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"}, {"gid": "1214228966572573", "name": "Autotask Reporting"}, {"gid": "1214228966572568", "name": "Brain Dump"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}];
+const TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia McKinney", "Grant Roach"];
+const PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 40}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40}, {"gid": "1214228966572508", "name": "Firebird MSA", "cap": 15}, {"gid": "1214228966572503", "name": "Myrick Marine"}, {"gid": "1214229029715234", "name": "Savannah Bee: Zendesk"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic"}, {"gid": "1214228966572541", "name": "DocSmith.md"}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2026"}, {"gid": "1214755322546416", "name": "Project Twilight"}, {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"}, {"gid": "1214228966572573", "name": "Autotask Reporting"}, {"gid": "1214228966572568", "name": "Brain Dump"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}];
+const GROUPS = [{"name": "CMD", "cap": 108, "gids": ["1214228966572536", "1214228966572531", "1214228966572526"]}];
 const DEF_START = "2026-06-01", DEF_END = "2026-06-30";
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
 const PROJECT_CAPS  = Object.fromEntries(PROJECTS.map(p => [p.gid, p.cap == null ? null : p.cap]));
@@ -123,7 +140,8 @@ const _realFetch = window.fetch.bind(window);
 function round2(x){ return Math.round((x + Number.EPSILON) * 100) / 100; }
 function sum(arr){ return arr.reduce((a, b) => a + b, 0); }
 function nowStr(){ const d = new Date(), p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+  const h24 = d.getHours(), ap = h24 < 12 ? 'AM' : 'PM', h12 = h24 % 12 || 12;
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(h12)}:${p(d.getMinutes())}:${p(d.getSeconds())} ${ap}`; }
 
 // Bound real network concurrency (Asana rate limits + browser per-host caps).
 let _active = 0; const _waiters = [];
@@ -215,6 +233,20 @@ async function getSummaries(refresh){
   const details = await mapAll(PROJECTS, p => getDetail(p.gid, refresh));
   return (CACHE.summaries = details.map(summaryFromDetail));
 }
+// Task/subtask rows assigned to `name` within one project detail (est/actual/remaining + status).
+function assigneeProjectTasks(d, name){
+  const rows = [];
+  for (const t of d.tasks){
+    if (t.assignee === name)
+      rows.push({ name: t.name, type: 'task', status: t.section, estimated: t.hours, actual: t.actual, remaining: round2(t.hours - t.actual), context: '' });
+    for (const s of t.subtasks){
+      if (s.assignee === name)
+        rows.push({ name: s.name, type: 'subtask', status: t.section, estimated: s.hours, actual: s.actual, remaining: round2(s.hours - s.actual),
+          context: t.assignee === name ? '' : `under "${t.name}" · ${t.assignee}` });
+    }
+  }
+  return rows;
+}
 async function getAssigneeLoad(refresh){
   const details = await mapAll(PROJECTS, p => getDetail(p.gid, refresh));
   const est = {}, act = {}, counts = {}, breakdown = {};
@@ -222,7 +254,7 @@ async function getAssigneeLoad(refresh){
     d.labels.forEach((name, i) => {
       const e = d.hours[i], aa = d.actual_hours[i], cnt = d.counts[i];
       est[name] = (est[name] || 0) + e; act[name] = (act[name] || 0) + aa; counts[name] = (counts[name] || 0) + cnt;
-      if (e || aa) (breakdown[name] = breakdown[name] || []).push({ project: d.name, estimated: round2(e), actual: round2(aa), remaining: round2(e - aa) });
+      if (e || aa) (breakdown[name] = breakdown[name] || []).push({ project: d.name, estimated: round2(e), actual: round2(aa), remaining: round2(e - aa), tasks: assigneeProjectTasks(d, name) });
     });
   }
   const ordered = TEAM_MEMBERS.filter(n => n in est).sort((x, y) => (est[y] - act[y]) - (est[x] - act[x]));
@@ -234,39 +266,56 @@ async function getAssigneeLoad(refresh){
 }
 
 // ---- Logged-hours layer for a date range (mirrors june_detail / get_june_summaries) ----
-function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`); }
-function fetchSubtasksTime(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=name,actual_time_minutes&limit=100`); }
+function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name,billable_status&limit=100`); }
+function fetchSubtasksTime(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=name,actual_time_minutes,completed,completed_at&limit=100`); }
 
 async function entriesForItem(name, gid, start, end){
   const res = [];
   for (const e of await fetchTimeEntries(gid)){
     const entered = e.entered_on || '';
     if (entered && start <= entered && entered <= end)
-      res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered, minutes: e.duration_minutes || 0 });
+      res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
+        minutes: e.duration_minutes || 0, billable: e.billable_status === 'billable' });
   }
   return res;
 }
 async function juneDetail(gid, start, end){
-  const tasks = await asanaGet(`/projects/${gid}/tasks?opt_fields=name,actual_time_minutes,num_subtasks&limit=100`);
+  const tasks = await asanaGet(`/projects/${gid}/tasks?opt_fields=name,actual_time_minutes,num_subtasks,completed,completed_at&limit=100`);
+  // Tasks/subtasks completed within the date range (by completed_at), deduped by gid.
+  const completedDates = {};
+  const noteCompleted = it => {
+    if (it.completed && it.completed_at){ const day = it.completed_at.slice(0, 10);
+      if (start <= day && day <= end) completedDates[it.gid] = day; }
+  };
   const cand = {};
-  for (const t of tasks) if ((t.actual_time_minutes || 0) > 0) cand[t.gid] = t.name || '(untitled)';
+  for (const t of tasks){ noteCompleted(t); if ((t.actual_time_minutes || 0) > 0) cand[t.gid] = t.name || '(untitled)'; }
   const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
   for (const subs of await mapAll(parents, fetchSubtasksTime))
-    for (const s of subs) if ((s.actual_time_minutes || 0) > 0) cand[s.gid] = s.name || '(untitled)';
+    for (const s of subs){ noteCompleted(s); if ((s.actual_time_minutes || 0) > 0) cand[s.gid] = s.name || '(untitled)'; }
   const candidates = Object.entries(cand);   // [gid, name]
   const seen = new Set(), entries = [];
   for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end)))
     for (const e of lst){ if (e.entry_gid && seen.has(e.entry_gid)) continue; if (e.entry_gid) seen.add(e.entry_gid); entries.push(e); }
-  const totals = {}, counts = {};
-  for (const e of entries){ totals[e.by] = (totals[e.by] || 0) + e.minutes; counts[e.by] = (counts[e.by] || 0) + 1; }
+  const totals = {}, counts = {}, bill = {}, unbill = {};
+  for (const e of entries){
+    totals[e.by] = (totals[e.by] || 0) + e.minutes; counts[e.by] = (counts[e.by] || 0) + 1;
+    const b = e.billable ? bill : unbill; b[e.by] = (b[e.by] || 0) + e.minutes;
+  }
   const ordered = Object.keys(totals).sort((x, y) => totals[y] - totals[x]);
   entries.sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
   return { gid, name: PROJECT_NAMES[gid] || gid, start, end, labels: ordered,
-    hours: ordered.map(n => round2(totals[n] / 60)), counts: ordered.map(n => counts[n]),
-    total_hours: round2(sum(Object.values(totals)) / 60), nentries: entries.length,
-    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60) })), updated: nowStr() };
+    hours: ordered.map(n => round2(totals[n] / 60)),
+    billable: ordered.map(n => round2((bill[n] || 0) / 60)),
+    unbillable: ordered.map(n => round2((unbill[n] || 0) / 60)),
+    counts: ordered.map(n => counts[n]),
+    total_hours: round2(sum(Object.values(totals)) / 60),
+    billable_hours: round2(sum(Object.values(bill)) / 60),
+    unbillable_hours: round2(sum(Object.values(unbill)) / 60),
+    completed: Object.keys(completedDates).length,
+    nentries: entries.length,
+    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable })), updated: nowStr() };
 }
-function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, billable_hours: d.billable_hours, unbillable_hours: d.unbillable_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
 
 async function getJuneDetail(gid, refresh, start, end){
   const key = start + ':' + end;
@@ -292,6 +341,7 @@ async function handleApi(p){
   if (path === '/api/projects') return getSummaries(refresh);
   if (path === '/api/june') return getJuneSummaries(refresh, start, end);
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
+  if (path === '/api/groups') return GROUPS;
   if (path.startsWith('/api/june/')) return getJuneDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
   throw new Error('Unknown API ' + path);
@@ -382,14 +432,14 @@ const capLinePlugin = {
     ctx.beginPath(); ctx.setLineDash([6, 4]); ctx.lineWidth = 2; ctx.strokeStyle = '#8fc0ee';
     ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
     ctx.setLineDash([]); ctx.fillStyle = '#8fc0ee'; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'right';
-    ctx.fillText(cfg.value + ' h target', right - 6, y - 6);
+    ctx.fillText(h2(cfg.value) + ' h target', right - 6, y - 6);
     ctx.restore();
   }
 };
 Chart.register(capLinePlugin);
 
-// Draws a per-bar monthly-budget marker: a short amber line across each bar that has a cap.
-// Enable via options.plugins.capMarks = { caps: [<cap or null per bar>] }.
+// Draws a per-bar monthly-budget marker: a short amber line across each billable bar that
+// has a cap. Enable via options.plugins.capMarks = { caps: [<cap or null per bar>] }.
 const capMarksPlugin = {
   id: 'capMarks',
   afterDatasetsDraw(c) {
@@ -418,7 +468,7 @@ function capBar(hours, cap){
   const over = pct > 100;
   return `<div class="cap-bar${over ? ' over' : ''}">
       <div class="track"><div class="fill" style="width:${Math.min(pct,100)}%"></div></div>
-      <div class="lab">${h2(hours)} / ${cap} h used · ${pct.toFixed(0)}%${over ? ' — over capacity' : ''}</div>
+      <div class="lab">${h2(hours)} / ${h2(cap)} h used · ${pct.toFixed(0)}%${over ? ' — over capacity' : ''}</div>
     </div>`;
 }
 function setCrumbs(items) {
@@ -452,15 +502,43 @@ function rangePicker(){
 const TABS = {
   team: { label:'Team Capacity', title:'Team Capacity',
     sub:'Remaining hours (estimated − actual) per assignee across all projects vs. the 128 h target. Click a bar for the per-project breakdown.' },
-  actualproj: { label:'Actual Hours', title:'Actual Hours',
-    sub:'Actual hours logged per project in the selected date range. Click a bar to drill into that project.' },
-  estimated: { label:'Estimated Hours', title:'Estimated Hours',
+  actualproj: { label:'Bar Chart', title:'Bar Chart',
+    sub:'Billable vs. unbillable hours logged per project in the selected date range — only billable counts toward budget. Click a bar to drill into that project.' },
+  estimated: { label:'Statistics', title:'Statistics',
     sub:'Estimated hours per project (excludes Completed). Click a widget to drill in.' },
-  june: { label:'Hours Logged', title:'Hours Logged',
-    sub:'Actual time-tracking entries logged in the selected date range. Click a widget to drill in.' },
-  capacity: { label:'Monthly Capacity', title:'Monthly Capacity',
-    sub:'Projects with a monthly hour budget — selected range’s usage vs. capacity. Click to drill in.' },
+  june: { label:'Statistics', title:'Statistics',
+    sub:'Time-tracking entries logged in the selected date range, split billable / unbillable. Click a widget to drill in.' },
+  capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity',
+    sub:'Projects with a monthly hour budget — selected range’s billable usage vs. capacity (unbillable excluded). Click to drill in.' },
 };
+// Sidebar groups: estimated/planned views vs. logged-hours & progress views.
+const NAV_SECTIONS = [
+  { title: 'Estimated Hours', tabs: ['team', 'estimated'] },
+  { title: 'Actual Hours', tabs: ['actualproj', 'june', 'capacity'] },
+];
+
+// Shared left nav, reused by the dashboard and the drill-in detail pages so the
+// sidebar always stays put. The active item tracks the last-opened tab (dashTab).
+function sidebarHtml() {
+  return `<nav class="sidebar">
+      <div class="brand">Asana Dashboard</div>
+      ${NAV_SECTIONS.map(sec =>
+        `<div class="nav-section">${sec.title}</div>` +
+        sec.tabs.map(k => `<a href="#" class="nav-item${k === dashTab ? ' active' : ''}" data-tab="${k}">${TABS[k].label}</a>`).join('')
+      ).join('')}
+    </nav>`;
+}
+// Wire nav clicks. onSwitch (dashboard) switches tab in place; on a detail page we
+// set the tab and navigate home, where the dashboard renders it.
+function wireSidebar(onSwitch) {
+  document.querySelectorAll('.nav-item').forEach(a => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      dashTab = a.dataset.tab;
+      if (onSwitch) onSwitch(); else location.hash = '';
+    };
+  });
+}
 
 function estCard(w) {
   const c = document.createElement('div');
@@ -469,10 +547,8 @@ function estCard(w) {
     <div class="stats">
       <div class="stat"><div class="n">${h2(w.hours)}</div><div class="l">Est. Hours</div></div>
       <div class="stat"><div class="n">${w.ntasks}</div><div class="l">Tasks</div></div>
-      ${w.cap != null ? `<div class="stat"><div class="n">${w.cap}</div><div class="l">Capacity h/mo</div></div>` : ''}
-    </div>
-    <div class="go">Open chart →</div>
-    <div class="card-updated">Updated ${esc(w.updated)}</div>`;
+      ${w.cap != null ? `<div class="stat"><div class="n">${h2(w.cap)}</div><div class="l">Capacity h/mo</div></div>` : ''}
+    </div>`;
   c.onclick = () => { location.hash = '#/p/' + w.gid; };
   return c;
 }
@@ -482,32 +558,70 @@ function juneCard(w) {
   c.className = 'card june';
   c.innerHTML = `<h3>${esc(w.name)}</h3>
     <div class="stats">
-      <div class="stat"><div class="n">${h2(w.hours)}</div><div class="l">Hours Logged</div></div>
-      <div class="stat"><div class="n">${w.nentries}</div><div class="l">Entries</div></div>
-      ${w.cap != null ? `<div class="stat"><div class="n">${w.cap}</div><div class="l">Capacity h/mo</div></div>` : ''}
-    </div>
-    ${capBar(w.hours, w.cap)}
-    <div class="go">Open chart →</div>
-    <div class="card-updated">Updated ${esc(w.updated)}</div>`;
+      <div class="stat"><div class="n">${h2(w.billable_hours)}</div><div class="l">Billable</div></div>
+      <div class="stat"><div class="n">${h2(w.unbillable_hours)}</div><div class="l">Unbillable</div></div>
+      <div class="stat"><div class="n">${w.completed}</div><div class="l">Completed Tasks</div></div>
+    </div>`;
   c.onclick = () => { location.hash = '#/june/' + w.gid; };
   return c;
 }
 
 function capCard(w) {
-  const used = Number(w.hours || 0), cap = Number(w.cap || 0);
+  // Only billable hours count against a project's monthly capacity.
+  const used = Number(w.billable_hours || 0), cap = Number(w.cap || 0);
+  const unbill = Number(w.unbillable_hours || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
   c.className = 'card june';
   c.innerHTML = `<h3>${esc(w.name)}</h3>
     <div class="stats">
-      <div class="stat"><div class="n">${w.cap}</div><div class="l">Capacity h/mo</div></div>
-      <div class="stat"><div class="n">${h2(used)}</div><div class="l">Used</div></div>
+      <div class="stat"><div class="n">${h2(w.cap)}</div><div class="l">Capacity h/mo</div></div>
+      <div class="stat"><div class="n">${h2(used)}</div><div class="l">Billable used</div></div>
       <div class="stat"><div class="n"${remaining < 0 ? ' style="color:#e26b66"' : ''}>${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
     ${capBar(used, cap)}
-    <div class="go">Open chart →</div>
-    <div class="card-updated">Updated ${esc(w.updated)}</div>`;
+    ${unbill > 0 ? `<div class="cap-bar"><div class="lab">+ ${h2(unbill)} h unbillable (not counted)</div></div>` : ''}`;
   c.onclick = () => { location.hash = '#/june/' + w.gid; };
+  return c;
+}
+
+// Roll up a budget group's member projects (from the current Hours-Logged data)
+// into one combined bucket: summed billable/unbillable, plus the per-member rows.
+function buildGroupSummary(g, jd) {
+  const members = g.gids.map(gid => jd.find(w => w.gid === gid)).filter(Boolean);
+  return {
+    name: g.name, cap: g.cap, members,
+    billable_hours: members.reduce((a, w) => a + (w.billable_hours || 0), 0),
+    unbillable_hours: members.reduce((a, w) => a + (w.unbillable_hours || 0), 0),
+    nentries: members.reduce((a, w) => a + (w.nentries || 0), 0),
+    updated: members.length ? members[0].updated : '',
+  };
+}
+
+function groupCard(g) {
+  // Combined monthly bucket shared by several projects; billable hours only.
+  const used = Number(g.billable_hours || 0), cap = Number(g.cap || 0);
+  const unbill = Number(g.unbillable_hours || 0);
+  const remaining = cap - used;
+  const c = document.createElement('div');
+  c.className = 'card june grp-card';
+  const rows = g.members.map(m =>
+    `<div class="grp-row" data-gid="${m.gid}" title="Open ${esc(m.name)}">
+       <span class="grp-name">${esc(m.name)}</span>
+       <span class="grp-h">${h2(m.billable_hours)} h</span>
+     </div>`).join('') || '<div class="grp-row"><span class="grp-name muted">No member data in range.</span></div>';
+  c.innerHTML = `<h3>${esc(g.name)} <span class="grp-tag">combined bucket</span></h3>
+    <div class="stats">
+      <div class="stat"><div class="n">${h2(g.cap)}</div><div class="l">Capacity h/mo</div></div>
+      <div class="stat"><div class="n">${h2(used)}</div><div class="l">Billable used</div></div>
+      <div class="stat"><div class="n"${remaining < 0 ? ' style="color:#e26b66"' : ''}>${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
+    </div>
+    ${capBar(used, cap)}
+    ${unbill > 0 ? `<div class="cap-bar"><div class="lab">+ ${h2(unbill)} h unbillable (not counted)</div></div>` : ''}
+    <div class="grp-members">${rows}</div>`;
+  // Each member row opens that project's own Hours-Logged detail.
+  c.querySelectorAll('.grp-row[data-gid]').forEach(r =>
+    r.onclick = (e) => { e.stopPropagation(); location.hash = '#/june/' + r.dataset.gid; });
   return c;
 }
 
@@ -515,14 +629,14 @@ async function renderDashboard() {
   if (chart) { chart.destroy(); chart = null; }
   app.innerHTML = `
     <div class="layout">
-      <nav class="sidebar">
-        <div class="brand">Asana Dashboard</div>
-        ${Object.keys(TABS).map(k => `<a href="#" class="nav-item" data-tab="${k}">${TABS[k].label}</a>`).join('')}
-      </nav>
+      ${sidebarHtml()}
       <main class="content">
         <div class="head">
           <h1 id="tab-title"></h1>
-          <button class="btn" id="dash-refresh">Refresh</button>
+          <div class="head-right">
+            <span id="dash-updated" class="dash-updated"></span>
+            <button class="btn" id="dash-refresh">Refresh</button>
+          </div>
         </div>
         <p class="sub" id="tab-sub"></p>
         <div id="tabview"><p class="muted">Loading widgets…</p></div>
@@ -531,6 +645,8 @@ async function renderDashboard() {
   const view = document.getElementById('tabview');
   const btn = document.getElementById('dash-refresh');
   let estData = null, juneData = null, teamData = null;   // cached so switching tabs is instant
+  let groupsConfig = null;   // budget-group definitions (loaded once); combined per current range
+  let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
 
   // Wire the date-range Search button (if the current tab rendered one). Editing the date
   // fields does nothing until Search is clicked (or Enter is pressed in a field).
@@ -563,38 +679,132 @@ async function renderDashboard() {
     // Bar chart of actual hours logged per project for the selected date range.
     const picker = rangePicker();
     if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
+    // Roll grouped projects (e.g. CMD) into one combined bucket with the group's cap;
+    // every other project stays on its own bar. Then drop anything with no hours.
+    const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
+    const groupItems = (groupsConfig || []).map(g => {
+      const s = buildGroupSummary(g, juneData);
+      return { name: g.name, gid: null, isGroup: true, cap: g.cap, members: s.members,
+        billable_hours: s.billable_hours, unbillable_hours: s.unbillable_hours,
+        hours: s.billable_hours + s.unbillable_hours, nentries: s.nentries };
+    });
+    const projItems = juneData.filter(w => !memberGids.has(w.gid)).map(w => Object.assign({ isGroup: false }, w));
+    const rows = [...groupItems, ...projItems]
+      .filter(w => w.hours > 0)
+      .sort((a, b) => b.billable_hours - a.billable_hours);
+    if (!rows.length) {
+      view.innerHTML = picker + `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+      wireRangeSel(); return;
+    }
     view.innerHTML = picker + '<div class="chart-box"><canvas id="chart"></canvas></div>' +
-      `<p class="hint">Actual hours logged per project, ${rangeLabel(dateStart, dateEnd)}. The amber line marks a project’s monthly budget; the bar turns red when logged hours exceed it. Click a bar to drill into that project.</p>`;
+      `<p class="hint">Billable vs. unbillable hours logged per project, ${rangeLabel(dateStart, dateEnd)}. CMD is one combined bucket — hover it to see each sub-project. Only billable counts toward the monthly budget (amber line); the billable bar turns red when over budget. Click a bar to drill in.</p>` +
+      '<div id="actual-summary"></div>';
     wireRangeSel();
     if (chart) { chart.destroy(); chart = null; }
-    const rows = juneData.slice().sort((a, b) => b.hours - a.hours);
-    const labels = rows.map(w => w.name), data = rows.map(w => w.hours);
+    const labels = rows.map(w => w.name);
+    const billData = rows.map(w => w.billable_hours);
+    const unbillData = rows.map(w => w.unbillable_hours);
     const gids = rows.map(w => w.gid), ents = rows.map(w => w.nentries);
+    const isGrp = rows.map(w => !!w.isGroup);
     const caps = rows.map(w => (w.cap == null ? null : w.cap));
-    const colors = rows.map(w => (w.cap != null && w.hours > w.cap) ? '#e26b66' : '#4cc085');
-    const borders = rows.map(w => (w.cap != null && w.hours > w.cap) ? '#e98e8a' : '#6cd49d');
+    const members = rows.map(w => w.members || null);   // member breakdown for combined buckets
+    // Billable bar turns red only when *billable* hours blow the budget.
+    const billColors = rows.map(w => (w.cap != null && w.billable_hours > w.cap) ? '#e26b66' : '#4cc085');
+    const billBorders = rows.map(w => (w.cap != null && w.billable_hours > w.cap) ? '#e98e8a' : '#6cd49d');
     // Keep every budget marker visible even if it sits above the tallest bar.
-    const top = Math.max(...data, ...caps.filter(c => c != null), 1);
+    const top = Math.max(...billData, ...unbillData, ...caps.filter(c => c != null), 1);
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
-      data: { labels, datasets: [{ label: 'Actual hours', data,
-        backgroundColor: colors, borderColor: borders, borderWidth: 1, _ents: ents, _caps: caps }] },
+      data: { labels, datasets: [
+        { label: 'Billable', data: billData, backgroundColor: billColors, borderColor: billBorders, borderWidth: 1 },
+        { label: 'Unbillable', data: unbillData, backgroundColor: '#8a929c', borderColor: '#a3aab4', borderWidth: 1 } ] },
       options: { responsive: true, maintainAspectRatio: false,
-        onClick: (evt, els) => { if (els.length) location.hash = '#/june/' + gids[els[0].index]; },
-        onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+        // Single projects drill into their detail; combined buckets (gid null) don't navigate.
+        onClick: (evt, els) => { if (els.length) { const g = gids[els[0].index]; if (g) location.hash = '#/june/' + g; } },
+        onHover: (evt, els) => { evt.native.target.style.cursor = (els.length && gids[els[0].index]) ? 'pointer' : 'default'; },
         scales: { x: { title: { display: true, text: 'Project' } },
                   y: { beginAtZero: true, suggestedMax: top * 1.05,
-                       title: { display: true, text: 'Actual hours logged' }, ticks: { callback: v => h2(v) } } },
-        plugins: { legend: { display: false }, capMarks: { caps },
+                       title: { display: true, text: 'Hours logged' }, ticks: { callback: v => h2(v) } } },
+        plugins: { legend: { display: true }, capMarks: { caps },
           tooltip: { callbacks: {
-            label: ctx => `Logged: ${h2(ctx.parsed.y)} h`,
-            afterLabel: ctx => {
-              const cap = ctx.dataset._caps[ctx.dataIndex];
-              let s = `Entries: ${ctx.dataset._ents[ctx.dataIndex]}`;
-              if (cap != null) s += ` · Budget ${cap} h (${(ctx.parsed.y / cap * 100).toFixed(0)}%)`;
-              return s + ' · click to drill in';
+            label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
+            afterBody: items => {
+              const i = items[0].dataIndex, lines = [`Entries: ${ents[i]}`];
+              if (caps[i] != null) lines.push(`Budget ${h2(caps[i])} h billable (${(billData[i] / caps[i] * 100).toFixed(0)}%)`);
+              const mem = members[i];
+              if (mem && mem.length) {
+                lines.push('— by sub-project (billable) —');
+                mem.slice().sort((a, b) => b.billable_hours - a.billable_hours)
+                   .forEach(m => lines.push(`${m.name}: ${h2(m.billable_hours)} h`));
+              }
+              return lines;
             } } } } }
     });
+    renderActualSummary();
+  }
+
+  // Bottom-of-page summary tables for Actual Hours: totals per project and per person.
+  function renderActualSummary() {
+    const box = document.getElementById('actual-summary');
+    if (!box) return;
+    const statRow = (name, b, u, cls) =>
+      `<tr${cls ? ' class="' + cls + '"' : ''}><td>${esc(name)}</td>` +
+      `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td></tr>`;
+
+    // By project — straight from the loaded range summaries (individual projects).
+    const projRows = juneData.filter(w => w.hours > 0).slice().sort((a, b) => b.hours - a.hours);
+    const pjB = projRows.reduce((a, w) => a + w.billable_hours, 0);
+    const pjU = projRows.reduce((a, w) => a + w.unbillable_hours, 0);
+    const projTable =
+      `<h2 class="section-h">By project</h2>
+       <table class="tasks">
+         <thead><tr><th>Project</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+         <tbody>${projRows.map(w => statRow(w.name, w.billable_hours, w.unbillable_hours)).join('')}
+           ${statRow('All projects', pjB, pjU, 'parent')}</tbody>
+       </table>`;
+
+    // By person — aggregated across every project's detail for this range (loaded on demand).
+    const key = dateStart + ':' + dateEnd, people = personStatsCache[key];
+    let personTable;
+    if (!people) {
+      personTable = '<h2 class="section-h">By person</h2><p class="muted" id="person-loading">Loading per-person totals…</p>';
+    } else {
+      const ppB = people.reduce((a, p) => a + p.billable, 0);
+      const ppU = people.reduce((a, p) => a + p.unbillable, 0);
+      personTable =
+        `<h2 class="section-h">By person</h2>
+         <table class="tasks">
+           <thead><tr><th>Person</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+           <tbody>${people.map(p => statRow(p.name, p.billable, p.unbillable)).join('')}
+             ${statRow('Everyone', ppB, ppU, 'parent')}</tbody>
+         </table>`;
+    }
+    box.innerHTML = projTable + personTable;
+    if (!people) loadPersonStats(key);
+  }
+
+  // Pull each logged project's detail and sum billable/unbillable per person, then cache + re-render.
+  async function loadPersonStats(key) {
+    const gids = juneData.filter(w => w.hours > 0).map(w => w.gid);
+    let details;
+    try {
+      details = await Promise.all(gids.map(g =>
+        fetch(`/api/june/${g}?start=${dateStart}&end=${dateEnd}`).then(r => r.json())));
+    } catch (e) {
+      const el = document.getElementById('person-loading');
+      if (el) el.innerHTML = fmtErr(e);
+      return;
+    }
+    if (key !== dateStart + ':' + dateEnd) return;   // range changed while loading
+    const agg = {};
+    details.forEach(d => (d.labels || []).forEach((name, i) => {
+      const a = agg[name] || (agg[name] = { billable: 0, unbillable: 0 });
+      a.billable += d.billable[i]; a.unbillable += d.unbillable[i];
+    }));
+    personStatsCache[key] = Object.keys(agg)
+      .map(name => ({ name, billable: agg[name].billable, unbillable: agg[name].unbillable }))
+      .sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
+    if (dashTab === 'actualproj') renderActualSummary();
   }
 
   function renderTeam() {
@@ -618,8 +828,8 @@ async function renderDashboard() {
                        title: { display: true, text: 'Remaining hours' }, ticks: { callback: v => h2(v) } } },
         plugins: { legend: { display: false }, capLine: { value: d.cap },
           tooltip: { callbacks: {
-            label: ctx => `Remaining: ${h2(ctx.parsed.y)} h of ${d.cap} (${(ctx.parsed.y / d.cap * 100).toFixed(0)}%)`,
-            afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} − actual ${h2(ctx.dataset._act[ctx.dataIndex])} · ${ctx.dataset._counts[ctx.dataIndex]} items · click for breakdown` } } } }
+            label: ctx => `Remaining: ${h2(ctx.parsed.y)} h of ${h2(d.cap)} (${(ctx.parsed.y / d.cap * 100).toFixed(0)}%)`,
+            afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} − actual ${h2(ctx.dataset._act[ctx.dataIndex])} · ${ctx.dataset._counts[ctx.dataIndex]} items` } } } }
     });
   }
 
@@ -630,32 +840,63 @@ async function renderDashboard() {
     const totAct = rows_.reduce((a, r) => a + r.actual, 0);
     const totRem = totEst - totAct;
     const pct = (totRem / teamData.cap * 100).toFixed(0);
-    let rows = rows_.map(r => `<tr><td>${esc(r.project)}</td>` +
-      `<td class="hours">${h2(r.estimated)} h</td>` +
-      `<td class="hours">${h2(r.actual)} h</td>` +
-      `<td class="hours">${h2(r.remaining)} h</td></tr>`).join('');
-    if (!rows_.length) rows = '<tr><td colspan="4" class="muted">No estimated or actual hours.</td></tr>';
+    // Each project is a bold header row, with that person's tasks/subtasks listed beneath it.
+    let rows = rows_.map(r => {
+      let body = `<tr class="parent"><td>${esc(r.project)}</td><td></td>` +
+        `<td class="hours">${h2(r.estimated)} h</td>` +
+        `<td class="hours">${h2(r.actual)} h</td>` +
+        `<td class="hours">${h2(r.remaining)} h</td></tr>`;
+      const tasks = r.tasks || [];
+      if (!tasks.length) {
+        body += `<tr class="sub"><td class="sub-name" colspan="5">No tasks.</td></tr>`;
+      } else {
+        body += tasks.map(t => {
+          const ctx = t.context ? ` <span class="muted">(${esc(t.context)})</span>` : '';
+          const indent = t.type === 'subtask' ? 'padding-left:34px' : 'padding-left:22px';
+          return `<tr class="sub"><td class="${t.type === 'subtask' ? 'sub-name' : ''}" style="${indent}">${esc(t.name)}${ctx}</td>` +
+            `<td>${t.status ? `<span class="badge">${esc(t.status)}</span>` : '—'}</td>` +
+            `<td class="hours">${h2(t.estimated)} h</td>` +
+            `<td class="hours">${h2(t.actual)} h</td>` +
+            `<td class="hours">${h2(t.remaining)} h</td></tr>`;
+        }).join('');
+      }
+      return body;
+    }).join('');
+    if (!rows_.length) rows = '<tr><td colspan="5" class="muted">No estimated or actual hours.</td></tr>';
     view.innerHTML =
       `<div class="drill-head">
          <h2>${esc(name)}</h2>
          <button class="btn back" id="tochart">← Back to chart</button>
        </div>
-       <p class="drill-total">${h2(totRem)} h remaining of ${teamData.cap} (${pct}%) · ${h2(totEst)} est − ${h2(totAct)} actual · ${rows_.length} project(s)</p>
+       <p class="drill-total">${h2(totRem)} h remaining of ${h2(teamData.cap)} (${pct}%) · ${h2(totEst)} est − ${h2(totAct)} actual · ${rows_.length} project(s)</p>
        <table class="tasks">
-         <thead><tr><th>Project</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
+         <thead><tr><th>Project / Task</th><th>Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>`;
     document.getElementById('tochart').onclick = renderTeam;
+  }
+
+  // One central "Updated" label by the Refresh button, reflecting the data behind the
+  // active tab (estimated pull for team/estimated; logged-hours pull for the rest).
+  function setUpdatedLabel() {
+    const el = document.getElementById('dash-updated');
+    if (!el) return;
+    let u = null;
+    if (dashTab === 'team') u = teamData && teamData.updated;
+    else if (dashTab === 'estimated') u = estData && estData[0] && estData[0].updated;
+    else u = juneData && juneData[0] && juneData[0].updated;
+    el.textContent = u ? ('Updated ' + u) : '';
   }
 
   function renderTab() {
     if (chart) { chart.destroy(); chart = null; }   // leaving any chart tab
     document.querySelectorAll('.nav-item').forEach(a =>
       a.classList.toggle('active', a.dataset.tab === dashTab));
+    setUpdatedLabel();
     // Range-based tabs put the selected date range in the title.
     let title = TABS[dashTab].title;
-    if (dashTab === 'june') title = `Hours Logged · ${rangeLabel(dateStart, dateEnd)}`;
-    else if (dashTab === 'actualproj') title = `Actual Hours · ${rangeLabel(dateStart, dateEnd)}`;
+    if (dashTab === 'june') title = `Statistics · ${rangeLabel(dateStart, dateEnd)}`;
+    else if (dashTab === 'actualproj') title = `Bar Chart · ${rangeLabel(dateStart, dateEnd)}`;
     document.getElementById('tab-title').textContent = title;
     document.getElementById('tab-sub').textContent = TABS[dashTab].sub;
     const loading = '<p class="muted">Loading widgets…</p>';
@@ -670,18 +911,36 @@ async function renderDashboard() {
       cardGrid(juneData || [], juneCard,
         juneData ? `No hours logged in ${rangeLabel(dateStart, dateEnd)}.` : 'Loading widgets…', rangePicker());
     } else if (dashTab === 'capacity') {
-      cardGrid((juneData || []).filter(w => w.cap != null), capCard,
-        juneData ? 'No projects have a monthly capacity set.' : 'Loading widgets…', rangePicker());
+      const picker = rangePicker();
+      if (!juneData) { view.innerHTML = picker + loading; wireRangeSel(); }
+      else {
+        // Combined budget buckets first, then any standalone capped project that
+        // isn't part of a group (group members are rolled into their bucket).
+        const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
+        const groups = (groupsConfig || []).map(g => buildGroupSummary(g, juneData))
+                         .filter(g => g.members.length);
+        const standalone = juneData.filter(w => w.cap != null && !memberGids.has(w.gid));
+        view.innerHTML = picker;
+        if (!groups.length && !standalone.length) {
+          view.insertAdjacentHTML('beforeend', '<p class="muted">No projects have a monthly capacity set.</p>');
+        } else {
+          const grid = document.createElement('div');
+          grid.className = 'grid';
+          groups.forEach(g => grid.appendChild(groupCard(g)));
+          standalone.forEach(w => grid.appendChild(capCard(w)));
+          view.appendChild(grid);
+        }
+        wireRangeSel();
+      }
     }
   }
 
-  document.querySelectorAll('.nav-item').forEach(a => {
-    a.onclick = (e) => { e.preventDefault(); dashTab = a.dataset.tab; renderTab(); };
-  });
+  wireSidebar(renderTab);
 
   // Loads the selected range's "Actual Hours" widgets (used on its own when the range changes).
   async function loadJune(refresh) {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
+    personStatsCache = {};   // range/refresh changed — recompute per-person totals
     try {
       const url = `/api/june?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await fetch(url).then(r => r.json());
@@ -695,11 +954,12 @@ async function renderDashboard() {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     const q = refresh ? '?refresh=1' : '';
     try {
-      const [e] = await Promise.all([
+      const [e, grp] = await Promise.all([
         fetch('/api/projects' + q).then(r => r.json()),
+        groupsConfig ? Promise.resolve(groupsConfig) : fetch('/api/groups').then(r => r.json()),
         loadJune(refresh),
       ]);
-      estData = e;
+      estData = e; groupsConfig = grp;
       // Team load derives from the per-project detail that /api/projects just (re)built,
       // so it reads the warm cache — no refresh flag, no duplicate Asana pulls.
       teamData = await fetch('/api/assignees').then(r => r.json());
@@ -714,15 +974,21 @@ async function renderDashboard() {
 
 async function renderDetail(gid) {
   app.innerHTML = `
-    <div class="head">
-      <div id="crumbs" class="crumbs">Loading…</div>
-      <button class="btn" id="refresh">Refresh</button>
-    </div>
-    <p class="sub" id="sub"></p>
-    <div class="panel">
-      <div id="view"></div>
-      <p id="updated">Loading…</p>
+    <div class="layout">
+      ${sidebarHtml()}
+      <main class="content">
+        <div class="head">
+          <div id="crumbs" class="crumbs">Loading…</div>
+          <button class="btn" id="refresh">Refresh</button>
+        </div>
+        <p class="sub" id="sub"></p>
+        <div class="panel">
+          <div id="view"></div>
+          <p id="updated">Loading…</p>
+        </div>
+      </main>
     </div>`;
+  wireSidebar(null);
   const toDash = () => { location.hash = ''; };
   const btn = document.getElementById('refresh');
   let detailData = null;
@@ -743,7 +1009,7 @@ async function renderDetail(gid) {
         onHover:(evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
         plugins:{ legend:{display:false}, tooltip:{ callbacks:{
           label: ctx => `Estimated: ${h2(ctx.parsed.y)} h`,
-          afterLabel: ctx => `Items: ${ctx.dataset._counts[ctx.dataIndex]} · click to view` } } },
+          afterLabel: ctx => `Items: ${ctx.dataset._counts[ctx.dataIndex]}` } } },
         scales:{ x:{ title:{display:true,text:'Assignee'}, ticks:{ callback:(v,i) => [d.labels[i], h2(d.hours[i]) + ' h'] } },
                  y:{ beginAtZero:true, title:{display:true,text:'Estimated hours'}, ticks:{ callback:v => h2(v) } } } }
     });
@@ -808,15 +1074,21 @@ async function renderDetail(gid) {
 
 async function renderJuneDetail(gid) {
   app.innerHTML = `
-    <div class="head">
-      <div id="crumbs" class="crumbs">Loading…</div>
-      <button class="btn" id="refresh">Refresh</button>
-    </div>
-    <p class="sub" id="sub"></p>
-    <div class="panel">
-      <div id="view"></div>
-      <p id="updated">Loading…</p>
+    <div class="layout">
+      ${sidebarHtml()}
+      <main class="content">
+        <div class="head">
+          <div id="crumbs" class="crumbs">Loading…</div>
+          <button class="btn" id="refresh">Refresh</button>
+        </div>
+        <p class="sub" id="sub"></p>
+        <div class="panel">
+          <div id="view"></div>
+          <p id="updated">Loading…</p>
+        </div>
+      </main>
     </div>`;
+  wireSidebar(null);
   const toDash = () => { location.hash = ''; };
   const btn = document.getElementById('refresh');
   let data = null;
@@ -830,14 +1102,17 @@ async function renderJuneDetail(gid) {
     if (chart) { chart.destroy(); chart = null; }
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
-      data:{ labels:data.labels, datasets:[{ label:'Hours logged (' + ml + ')', data:data.hours,
-        backgroundColor:'#4cc085', borderColor:'#6cd49d', borderWidth:1, _counts:data.counts }] },
+      data:{ labels:data.labels, datasets:[
+        { label:'Billable', data:data.billable, backgroundColor:'#4cc085', borderColor:'#6cd49d',
+          borderWidth:1, _counts:data.counts },
+        { label:'Unbillable', data:data.unbillable, backgroundColor:'#8a929c', borderColor:'#a3aab4',
+          borderWidth:1 } ] },
       options:{ responsive:true, maintainAspectRatio:false,
         onClick:(evt, els) => { if (els.length) showEntries(data.labels[els[0].index]); },
         onHover:(evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-        plugins:{ legend:{display:false}, tooltip:{ callbacks:{
-          label: ctx => `Logged: ${h2(ctx.parsed.y)} h`,
-          afterLabel: ctx => `Entries: ${ctx.dataset._counts[ctx.dataIndex]} · click to view` } } },
+        plugins:{ legend:{display:true}, tooltip:{ callbacks:{
+          label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
+          afterLabel: ctx => ctx.datasetIndex === 0 ? `Entries: ${data.counts[ctx.dataIndex]}` : '' } } },
         scales:{ x:{ title:{display:true,text:'Logged by'}, ticks:{ callback:(v,i) => [data.labels[i], h2(data.hours[i]) + ' h'] } },
                  y:{ beginAtZero:true, title:{display:true,text:'Hours logged in ' + ml}, ticks:{ callback:v => h2(v) } } } }
     });
@@ -849,19 +1124,23 @@ async function renderJuneDetail(gid) {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name + ' · ' + ml, fn:showChart}, {label:person}]);
     const rows_ = data.entries.filter(e => e.by === person);
     const total = rows_.reduce((a, e) => a + e.hours, 0);
+    const billTotal = rows_.reduce((a, e) => a + (e.billable ? e.hours : 0), 0);
+    const unbillTotal = total - billTotal;
     let rows = '';
     rows_.forEach(e => {
-      rows += `<tr><td>${esc(e.date)}</td><td>${esc(e.task)}</td><td class="hours">${h2(e.hours)} h</td></tr>`;
+      rows += `<tr><td>${esc(e.date)}</td><td>${esc(e.task)}</td>` +
+        `<td>${e.billable ? '<span class="badge">Billable</span>' : '<span class="badge" style="color:#a3aab4">Unbillable</span>'}</td>` +
+        `<td class="hours">${h2(e.hours)} h</td></tr>`;
     });
-    if (!rows_.length) rows = '<tr><td colspan="3" class="muted">No entries.</td></tr>';
+    if (!rows_.length) rows = '<tr><td colspan="4" class="muted">No entries.</td></tr>';
     document.getElementById('view').innerHTML =
       `<div class="drill-head">
          <h2>${esc(person)}</h2>
          <button class="btn back" id="tochart">← Back to chart</button>
        </div>
-       <p class="drill-total">${rows_.length} entr${rows_.length === 1 ? 'y' : 'ies'} · ${total.toFixed(2)} hours logged in ${ml}</p>
+       <p class="drill-total">${rows_.length} entr${rows_.length === 1 ? 'y' : 'ies'} · ${total.toFixed(2)} h logged in ${ml} · ${h2(billTotal)} h billable / ${h2(unbillTotal)} h unbillable</p>
        <table class="tasks">
-         <thead><tr><th>Date</th><th>Task</th><th class="hours">Hours</th></tr></thead>
+         <thead><tr><th>Date</th><th>Task</th><th>Billable?</th><th class="hours">Hours</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>`;
     document.getElementById('tochart').onclick = showChart;
@@ -871,7 +1150,7 @@ async function renderJuneDetail(gid) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     try {
       data = await (await fetch('/api/june/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
-      document.getElementById('sub').textContent = `Hours logged ${rangeLabel(data.start, data.end)} per person · ${data.nentries} time entries · ${h2(data.total_hours)} h total`;
+      document.getElementById('sub').textContent = `Hours logged ${rangeLabel(data.start, data.end)} per person · ${data.nentries} time entries · ${h2(data.billable_hours)} h billable / ${h2(data.unbillable_hours)} h unbillable`;
       document.getElementById('updated').textContent = 'Last updated: ' + data.updated + ' (cached — click Refresh to re-pull)';
       showChart();
     } catch (e) { document.getElementById('updated').innerHTML = fmtErr(e); }

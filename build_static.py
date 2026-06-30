@@ -18,6 +18,7 @@ import json
 import georgia_grown_app as a
 
 PROJECTS = json.dumps(a.PROJECTS)
+GROUPS = json.dumps(a.GROUPS)
 EST_FIELD = json.dumps(a.EST_FIELD)
 EXCLUDE = json.dumps(sorted(a.EXCLUDE_SECTIONS))
 ASSIGNEE_CAP = a.ASSIGNEE_HOURS_CAP
@@ -34,6 +35,7 @@ const EXCLUDE_SECTIONS = new Set(__EXCLUDE__);
 const ASSIGNEE_HOURS_CAP = __CAP__;
 const TEAM_MEMBERS = __TEAM__;
 const PROJECTS = __PROJECTS__;
+const GROUPS = __GROUPS__;
 const DEF_START = __DEFSTART__, DEF_END = __DEFEND__;
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
 const PROJECT_CAPS  = Object.fromEntries(PROJECTS.map(p => [p.gid, p.cap == null ? null : p.cap]));
@@ -44,7 +46,8 @@ const _realFetch = window.fetch.bind(window);
 function round2(x){ return Math.round((x + Number.EPSILON) * 100) / 100; }
 function sum(arr){ return arr.reduce((a, b) => a + b, 0); }
 function nowStr(){ const d = new Date(), p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+  const h24 = d.getHours(), ap = h24 < 12 ? 'AM' : 'PM', h12 = h24 % 12 || 12;
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(h12)}:${p(d.getMinutes())}:${p(d.getSeconds())} ${ap}`; }
 
 // Bound real network concurrency (Asana rate limits + browser per-host caps).
 let _active = 0; const _waiters = [];
@@ -136,6 +139,20 @@ async function getSummaries(refresh){
   const details = await mapAll(PROJECTS, p => getDetail(p.gid, refresh));
   return (CACHE.summaries = details.map(summaryFromDetail));
 }
+// Task/subtask rows assigned to `name` within one project detail (est/actual/remaining + status).
+function assigneeProjectTasks(d, name){
+  const rows = [];
+  for (const t of d.tasks){
+    if (t.assignee === name)
+      rows.push({ name: t.name, type: 'task', status: t.section, estimated: t.hours, actual: t.actual, remaining: round2(t.hours - t.actual), context: '' });
+    for (const s of t.subtasks){
+      if (s.assignee === name)
+        rows.push({ name: s.name, type: 'subtask', status: t.section, estimated: s.hours, actual: s.actual, remaining: round2(s.hours - s.actual),
+          context: t.assignee === name ? '' : `under "${t.name}" · ${t.assignee}` });
+    }
+  }
+  return rows;
+}
 async function getAssigneeLoad(refresh){
   const details = await mapAll(PROJECTS, p => getDetail(p.gid, refresh));
   const est = {}, act = {}, counts = {}, breakdown = {};
@@ -143,7 +160,7 @@ async function getAssigneeLoad(refresh){
     d.labels.forEach((name, i) => {
       const e = d.hours[i], aa = d.actual_hours[i], cnt = d.counts[i];
       est[name] = (est[name] || 0) + e; act[name] = (act[name] || 0) + aa; counts[name] = (counts[name] || 0) + cnt;
-      if (e || aa) (breakdown[name] = breakdown[name] || []).push({ project: d.name, estimated: round2(e), actual: round2(aa), remaining: round2(e - aa) });
+      if (e || aa) (breakdown[name] = breakdown[name] || []).push({ project: d.name, estimated: round2(e), actual: round2(aa), remaining: round2(e - aa), tasks: assigneeProjectTasks(d, name) });
     });
   }
   const ordered = TEAM_MEMBERS.filter(n => n in est).sort((x, y) => (est[y] - act[y]) - (est[x] - act[x]));
@@ -155,39 +172,56 @@ async function getAssigneeLoad(refresh){
 }
 
 // ---- Logged-hours layer for a date range (mirrors june_detail / get_june_summaries) ----
-function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`); }
-function fetchSubtasksTime(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=name,actual_time_minutes&limit=100`); }
+function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name,billable_status&limit=100`); }
+function fetchSubtasksTime(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=name,actual_time_minutes,completed,completed_at&limit=100`); }
 
 async function entriesForItem(name, gid, start, end){
   const res = [];
   for (const e of await fetchTimeEntries(gid)){
     const entered = e.entered_on || '';
     if (entered && start <= entered && entered <= end)
-      res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered, minutes: e.duration_minutes || 0 });
+      res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
+        minutes: e.duration_minutes || 0, billable: e.billable_status === 'billable' });
   }
   return res;
 }
 async function juneDetail(gid, start, end){
-  const tasks = await asanaGet(`/projects/${gid}/tasks?opt_fields=name,actual_time_minutes,num_subtasks&limit=100`);
+  const tasks = await asanaGet(`/projects/${gid}/tasks?opt_fields=name,actual_time_minutes,num_subtasks,completed,completed_at&limit=100`);
+  // Tasks/subtasks completed within the date range (by completed_at), deduped by gid.
+  const completedDates = {};
+  const noteCompleted = it => {
+    if (it.completed && it.completed_at){ const day = it.completed_at.slice(0, 10);
+      if (start <= day && day <= end) completedDates[it.gid] = day; }
+  };
   const cand = {};
-  for (const t of tasks) if ((t.actual_time_minutes || 0) > 0) cand[t.gid] = t.name || '(untitled)';
+  for (const t of tasks){ noteCompleted(t); if ((t.actual_time_minutes || 0) > 0) cand[t.gid] = t.name || '(untitled)'; }
   const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
   for (const subs of await mapAll(parents, fetchSubtasksTime))
-    for (const s of subs) if ((s.actual_time_minutes || 0) > 0) cand[s.gid] = s.name || '(untitled)';
+    for (const s of subs){ noteCompleted(s); if ((s.actual_time_minutes || 0) > 0) cand[s.gid] = s.name || '(untitled)'; }
   const candidates = Object.entries(cand);   // [gid, name]
   const seen = new Set(), entries = [];
   for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end)))
     for (const e of lst){ if (e.entry_gid && seen.has(e.entry_gid)) continue; if (e.entry_gid) seen.add(e.entry_gid); entries.push(e); }
-  const totals = {}, counts = {};
-  for (const e of entries){ totals[e.by] = (totals[e.by] || 0) + e.minutes; counts[e.by] = (counts[e.by] || 0) + 1; }
+  const totals = {}, counts = {}, bill = {}, unbill = {};
+  for (const e of entries){
+    totals[e.by] = (totals[e.by] || 0) + e.minutes; counts[e.by] = (counts[e.by] || 0) + 1;
+    const b = e.billable ? bill : unbill; b[e.by] = (b[e.by] || 0) + e.minutes;
+  }
   const ordered = Object.keys(totals).sort((x, y) => totals[y] - totals[x]);
   entries.sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
   return { gid, name: PROJECT_NAMES[gid] || gid, start, end, labels: ordered,
-    hours: ordered.map(n => round2(totals[n] / 60)), counts: ordered.map(n => counts[n]),
-    total_hours: round2(sum(Object.values(totals)) / 60), nentries: entries.length,
-    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60) })), updated: nowStr() };
+    hours: ordered.map(n => round2(totals[n] / 60)),
+    billable: ordered.map(n => round2((bill[n] || 0) / 60)),
+    unbillable: ordered.map(n => round2((unbill[n] || 0) / 60)),
+    counts: ordered.map(n => counts[n]),
+    total_hours: round2(sum(Object.values(totals)) / 60),
+    billable_hours: round2(sum(Object.values(bill)) / 60),
+    unbillable_hours: round2(sum(Object.values(unbill)) / 60),
+    completed: Object.keys(completedDates).length,
+    nentries: entries.length,
+    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable })), updated: nowStr() };
 }
-function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, billable_hours: d.billable_hours, unbillable_hours: d.unbillable_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
 
 async function getJuneDetail(gid, refresh, start, end){
   const key = start + ':' + end;
@@ -213,6 +247,7 @@ async function handleApi(p){
   if (path === '/api/projects') return getSummaries(refresh);
   if (path === '/api/june') return getJuneSummaries(refresh, start, end);
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
+  if (path === '/api/groups') return GROUPS;
   if (path.startsWith('/api/june/')) return getJuneDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
   throw new Error('Unknown API ' + path);
@@ -313,6 +348,7 @@ def build():
                .replace('__CAP__', str(ASSIGNEE_CAP))
                .replace('__TEAM__', TEAM)
                .replace('__PROJECTS__', PROJECTS)
+               .replace('__GROUPS__', GROUPS)
                .replace('__DEFSTART__', DEF_START)
                .replace('__DEFEND__', DEF_END))
 
