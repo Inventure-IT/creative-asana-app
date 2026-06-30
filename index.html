@@ -1,457 +1,4 @@
-#!/usr/bin/env python3
-"""
-Asana Widget Dashboard.
-
-A self-contained local app. Starts a small web server that serves a single-page
-dashboard of project "widgets". Click a widget to drill into a detail view with a
-per-assignee estimated-hours bar chart, a Refresh button, and a "last updated" time.
-
-Run:  python georgia_grown_app.py     (opens http://localhost:8765)
-
-Add more widgets by appending to PROJECTS below.
-Token lookup: ASANA_PAT env var, falling back to the Windows User env var (registry).
-"""
-
-import json
-import os
-import sys
-import threading
-import urllib.request
-import urllib.error
-import urllib.parse
-import webbrowser
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-# Each entry becomes a clickable widget on the dashboard.
-# "cap" (optional) is the project's monthly hour capacity, shown on the widgets.
-PROJECTS = [
-    {"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70},
-    {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 40},
-    {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40},
-    {"gid": "1214228966572508", "name": "Firebird MSA", "cap": 15},
-    {"gid": "1214228966572503", "name": "Myrick Marine"},
-    {"gid": "1214228966572429", "name": "CLICR - Internal"},
-    {"gid": "1214229029715234", "name": "Savannah Bee: Zendesk"},
-    {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"},
-    {"gid": "1214228966572531", "name": "CMD: Pathologic"},
-    {"gid": "1214228966572526", "name": "CMD: Products"},
-    {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic"},
-    {"gid": "1214228966572541", "name": "DocSmith.md"},
-    {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2026"},
-    {"gid": "1214755322546416", "name": "Project Twilight"},
-    {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"},
-    {"gid": "1214228966572573", "name": "Autotask Reporting"},
-    {"gid": "1214228966572568", "name": "Brain Dump"},
-    {"gid": "1214228966572563", "name": "Internal IIT Backlog"},
-]
-
-EST_FIELD = "Estimated time"             # stored in minutes
-EXCLUDE_SECTIONS = {"completed"}         # status columns excluded from hour totals (case-insensitive)
-DEFAULT_START = "2026-06-01"             # default date range (inclusive) for the "Hours logged" view
-DEFAULT_END = "2026-06-30"               #   entries with start <= entered_on <= end are counted
-ASSIGNEE_HOURS_CAP = 128                 # estimated hours each assignee is expected to fill (all projects)
-# Team Capacity chart shows only these people (sorted by remaining), with Unassigned pinned far right.
-TEAM_MEMBERS = ["Wallace Norman", "Miranda Osborn", "Linh Trinh", "Julia McKinney", "Grant Roach"]
-PORT = 8765
-API = "https://app.asana.com/api/1.0"
-PROJECT_NAMES = {p["gid"]: p["name"] for p in PROJECTS}
-PROJECT_CAPS = {p["gid"]: p.get("cap") for p in PROJECTS}   # monthly hour capacity, or None
-
-# In-memory cache so navigating between pages never re-hits the Asana API.
-# Data is fetched once and reused until the user explicitly clicks Refresh.
-# The "hours logged" caches are keyed by month: {month: ...}.
-CACHE = {"summaries": None, "detail": {}, "june_summaries": {}, "june_detail": {}}
-CACHE_LOCK = threading.Lock()
-
-
-def get_token():
-    tok = os.environ.get("ASANA_PAT")
-    if tok:
-        return tok.strip()
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
-            val, _ = winreg.QueryValueEx(k, "ASANA_PAT")
-            if val:
-                return val.strip()
-    except (ImportError, FileNotFoundError, OSError):
-        pass
-    sys.exit('ERROR: ASANA_PAT not found. Set it with:  setx ASANA_PAT "your_token"')
-
-
-TOKEN = get_token()
-
-# Two long-lived, bounded thread pools shared across all requests.
-#  - LEAF_POOL runs the many small API calls (subtasks, time entries). Capping it
-#    keeps total concurrent connections to Asana within its limits.
-#  - PROJECT_POOL drives whole projects concurrently; its workers only ever block
-#    waiting on LEAF_POOL futures, so the two pools can't deadlock each other.
-LEAF_POOL = ThreadPoolExecutor(max_workers=16)
-PROJECT_POOL = ThreadPoolExecutor(max_workers=8)
-
-
-def fetch_tasks(gid):
-    """Return all tasks for a project (name + assignee + completed + estimated/actual time + section)."""
-    fields = "name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid"
-    url = f"{API}/projects/{gid}/tasks?opt_fields={fields}&limit=100"
-    tasks = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        tasks.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-    return tasks
-
-
-def fetch_subtasks(task_gid):
-    """Return subtasks for a task (name + assignee + estimated/actual time + completed)."""
-    fields = "name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value"
-    url = f"{API}/tasks/{task_gid}/subtasks?opt_fields={fields}&limit=100"
-    subs = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        subs.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-    return subs
-
-
-def task_minutes(t):
-    for cf in t.get("custom_fields", []):
-        if cf.get("name") == EST_FIELD and cf.get("number_value") is not None:
-            return cf["number_value"]
-    return 0
-
-
-def actual_minutes(t):
-    """Total tracked time on a task/subtask, in minutes."""
-    return t.get("actual_time_minutes") or 0
-
-
-def section_name(t, gid):
-    """The task's section (status column) within project `gid`, or ''."""
-    fallback = ""
-    for m in t.get("memberships", []):
-        sec = (m.get("section") or {}).get("name")
-        if not sec:
-            continue
-        if (m.get("project") or {}).get("gid") == gid:
-            return sec
-        fallback = fallback or sec
-    return fallback
-
-
-def is_excluded(t, gid):
-    """True if the task sits in an excluded status column (e.g. Completed) of this project."""
-    return section_name(t, gid).strip().lower() in EXCLUDE_SECTIONS
-
-
-def build_task(t, gid):
-    """Shape one task plus its (incomplete) subtasks for the drill-down list."""
-    parent_min = task_minutes(t)
-    subs, sub_min = [], 0
-    for s in fetch_subtasks(t["gid"]):
-        if s.get("completed"):
-            continue  # completed subtasks are not shown or counted
-        m = task_minutes(s)
-        sub_min += m
-        subs.append({
-            "name": s.get("name", "(untitled)"),
-            "assignee": (s.get("assignee") or {}).get("name") or "Unassigned",
-            "hours": round(m / 60, 2),
-            "actual": round(actual_minutes(s) / 60, 2),
-        })
-    return {
-        "gid": t["gid"],
-        "name": t.get("name", "(untitled)"),
-        "assignee": (t.get("assignee") or {}).get("name") or "Unassigned",
-        "hours": round(parent_min / 60, 2),   # parent's own estimate (attributed to parent assignee)
-        "actual": round(actual_minutes(t) / 60, 2),   # parent's own tracked time
-        "section": section_name(t, gid),
-        "subtasks": subs,                     # each subtask attributed to its own assignee
-    }
-
-
-def project_detail(gid):
-    # Drop checked-off tasks and anything in an excluded (e.g. Completed) section.
-    tasks = [t for t in fetch_tasks(gid) if not t.get("completed") and not is_excluded(t, gid)]
-    # Fetch subtasks for all tasks concurrently (shared pool) to keep the drill-down snappy.
-    detailed = list(LEAF_POOL.map(lambda t: build_task(t, gid), tasks))
-
-    # Attribute each task's own hours to its assignee, and each subtask's hours to
-    # the subtask's assignee (not the parent owner). Estimated and actual time are
-    # attributed the same way so remaining = estimated - actual lines up per person.
-    # counts = work items per assignee.
-    totals, actuals, counts = {}, {}, {}
-    for d in detailed:
-        totals[d["assignee"]] = totals.get(d["assignee"], 0) + d["hours"]
-        actuals[d["assignee"]] = actuals.get(d["assignee"], 0) + d["actual"]
-        counts[d["assignee"]] = counts.get(d["assignee"], 0) + 1
-        for s in d["subtasks"]:
-            totals[s["assignee"]] = totals.get(s["assignee"], 0) + s["hours"]
-            actuals[s["assignee"]] = actuals.get(s["assignee"], 0) + s["actual"]
-            counts[s["assignee"]] = counts.get(s["assignee"], 0) + 1
-    ordered = sorted(totals, key=lambda n: totals[n], reverse=True)
-    return {
-        "gid": gid,
-        "name": PROJECT_NAMES.get(gid, gid),
-        "labels": ordered,
-        "hours": [round(totals[n], 2) for n in ordered],
-        "actual_hours": [round(actuals[n], 2) for n in ordered],
-        "counts": [counts[n] for n in ordered],
-        "ntasks": len(detailed),
-        "tasks": detailed,
-        "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-
-# ---- Cache layer: only hits Asana when refresh=True; otherwise serves cached data ----
-
-def summary_from_detail(d):
-    return {
-        "gid": d["gid"],
-        "name": d["name"],
-        "ntasks": d["ntasks"],
-        "hours": round(sum(d["hours"]), 2),
-        "cap": PROJECT_CAPS.get(d["gid"]),
-        "updated": d["updated"],
-    }
-
-
-def get_detail(gid, refresh=False):
-    """Cached project detail. Hits Asana only when refresh or not yet cached."""
-    if not refresh:
-        with CACHE_LOCK:
-            cached = CACHE["detail"].get(gid)
-        if cached is not None:
-            return cached
-    data = project_detail(gid)
-    with CACHE_LOCK:
-        CACHE["detail"][gid] = data
-        # Keep any cached dashboard summary in sync with this fresh detail.
-        if CACHE["summaries"] is not None:
-            CACHE["summaries"] = [
-                summary_from_detail(data) if s["gid"] == gid else s
-                for s in CACHE["summaries"]
-            ]
-    return data
-
-
-def get_summaries(refresh=False):
-    """Cached dashboard widgets. Builds from (cached) per-project detail."""
-    if not refresh:
-        with CACHE_LOCK:
-            cached = CACHE["summaries"]
-        if cached is not None:
-            return cached
-    # Build every project's detail concurrently instead of one-at-a-time.
-    details = PROJECT_POOL.map(lambda p: get_detail(p["gid"], refresh=refresh), PROJECTS)
-    out = [summary_from_detail(d) for d in details]
-    with CACHE_LOCK:
-        CACHE["summaries"] = out
-    return out
-
-
-def get_assignee_load(refresh=False):
-    """Remaining hours (estimated - actual) per assignee across ALL projects, vs. the cap.
-
-    Estimated and actual are both attributed to each item's assignee, so the chart's
-    `hours` is the work each person still has left to do. Reuses the cached per-project
-    detail, so it adds no Asana calls when the projects are already loaded.
-    """
-    details = list(PROJECT_POOL.map(lambda p: get_detail(p["gid"], refresh=refresh), PROJECTS))
-    est, act, counts, breakdown = {}, {}, {}, {}
-    for d in details:
-        for name, e, a, cnt in zip(d["labels"], d["hours"], d["actual_hours"], d["counts"]):
-            est[name] = est.get(name, 0) + e
-            act[name] = act.get(name, 0) + a
-            counts[name] = counts.get(name, 0) + cnt
-            if e or a:
-                breakdown.setdefault(name, []).append({
-                    "project": d["name"], "estimated": round(e, 2),
-                    "actual": round(a, 2), "remaining": round(e - a, 2),
-                })
-    # Only the named team members (sorted by remaining), with Unassigned pinned far right.
-    ordered = sorted((n for n in TEAM_MEMBERS if n in est),
-                     key=lambda n: est[n] - act[n], reverse=True)
-    if "Unassigned" in est:
-        ordered.append("Unassigned")
-    return {
-        "cap": ASSIGNEE_HOURS_CAP,
-        "labels": ordered,
-        "hours": [round(est[n] - act[n], 2) for n in ordered],   # remaining = estimated - actual
-        "estimated": [round(est[n], 2) for n in ordered],
-        "actual": [round(act[n], 2) for n in ordered],
-        "counts": [counts[n] for n in ordered],
-        "breakdown": {n: breakdown.get(n, []) for n in ordered},
-        "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-
-# ---- "Hours logged": actual time-tracking entries dated in a given month (YYYY-MM) ----
-
-def fetch_time_entries(task_gid):
-    fields = "duration_minutes,entered_on,created_by.name"
-    url = f"{API}/tasks/{task_gid}/time_tracking_entries?opt_fields={fields}&limit=100"
-    out = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        out.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-    return out
-
-
-def fetch_subtasks_time(task_gid):
-    fields = "name,actual_time_minutes"
-    url = f"{API}/tasks/{task_gid}/subtasks?opt_fields={fields}&limit=100"
-    out = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        out.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-    return out
-
-
-def june_entries_for_item(item):
-    """item = (task_name, task_gid, start, end). Return time entries logged in [start, end]."""
-    name, gid, start, end = item
-    res = []
-    for e in fetch_time_entries(gid):
-        entered = e.get("entered_on") or ""
-        if entered and start <= entered <= end:
-            res.append({
-                "entry_gid": e.get("gid"),
-                "task": name,
-                "by": (e.get("created_by") or {}).get("name") or "Unknown",
-                "date": entered,
-                "minutes": e.get("duration_minutes") or 0,
-            })
-    return res
-
-
-def june_detail(gid, start=DEFAULT_START, end=DEFAULT_END):
-    """Per-person hours logged in [start, end] for one project (tasks + subtasks)."""
-    tfields = "name,actual_time_minutes,num_subtasks"
-    url = f"{API}/projects/{gid}/tasks?opt_fields={tfields}&limit=100"
-    tasks = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        tasks.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-
-    # Only query time entries for items that actually have logged time.
-    # Dedupe by task gid: a subtask added directly to the project would otherwise be
-    # reached twice (project task list + parent's subtasks) and double-counted.
-    cand_by_gid = {}
-    for t in tasks:
-        if (t.get("actual_time_minutes") or 0) > 0:
-            cand_by_gid[t["gid"]] = t.get("name", "(untitled)")
-    parents = [t["gid"] for t in tasks if (t.get("num_subtasks") or 0) > 0]
-    for subs in LEAF_POOL.map(fetch_subtasks_time, parents):
-        for s in subs:
-            if (s.get("actual_time_minutes") or 0) > 0:
-                cand_by_gid[s["gid"]] = s.get("name", "(untitled)")
-    candidates = [(name, gid, start, end) for gid, name in cand_by_gid.items()]
-
-    # Collect entries, deduping by entry gid as a final guard against any double-pull.
-    seen, entries = set(), []
-    for lst in LEAF_POOL.map(june_entries_for_item, candidates):
-        for e in lst:
-            if e["entry_gid"] and e["entry_gid"] in seen:
-                continue
-            if e["entry_gid"]:
-                seen.add(e["entry_gid"])
-            entries.append(e)
-
-    totals, counts = {}, {}
-    for e in entries:
-        totals[e["by"]] = totals.get(e["by"], 0) + e["minutes"]
-        counts[e["by"]] = counts.get(e["by"], 0) + 1
-    ordered = sorted(totals, key=lambda n: totals[n], reverse=True)
-    entries.sort(key=lambda e: e["date"])
-    return {
-        "gid": gid,
-        "name": PROJECT_NAMES.get(gid, gid),
-        "start": start,
-        "end": end,
-        "labels": ordered,
-        "hours": [round(totals[n] / 60, 2) for n in ordered],
-        "counts": [counts[n] for n in ordered],
-        "total_hours": round(sum(totals.values()) / 60, 2),
-        "nentries": len(entries),
-        "entries": [
-            {"task": e["task"], "by": e["by"], "date": e["date"], "hours": round(e["minutes"] / 60, 2)}
-            for e in entries
-        ],
-        "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-
-def june_summary_from_detail(d):
-    return {
-        "gid": d["gid"],
-        "name": d["name"],
-        "start": d["start"],
-        "end": d["end"],
-        "hours": d["total_hours"],
-        "nentries": d["nentries"],
-        "cap": PROJECT_CAPS.get(d["gid"]),
-        "updated": d["updated"],
-    }
-
-
-def get_june_detail(gid, refresh=False, start=DEFAULT_START, end=DEFAULT_END):
-    """Cached per-project logged-hours detail for a date range. Cache key = 'start:end'."""
-    key = f"{start}:{end}"
-    if not refresh:
-        with CACHE_LOCK:
-            cached = CACHE["june_detail"].get(key, {}).get(gid)
-        if cached is not None:
-            return cached
-    data = june_detail(gid, start, end)
-    with CACHE_LOCK:
-        CACHE["june_detail"].setdefault(key, {})[gid] = data
-        # Keep this range's cached summary in sync with the fresh detail.
-        rsum = CACHE["june_summaries"].get(key)
-        if rsum is not None:
-            CACHE["june_summaries"][key] = [
-                june_summary_from_detail(data) if s["gid"] == gid else s
-                for s in rsum
-            ]
-    return data
-
-
-def get_june_summaries(refresh=False, start=DEFAULT_START, end=DEFAULT_END):
-    key = f"{start}:{end}"
-    if not refresh:
-        with CACHE_LOCK:
-            cached = CACHE["june_summaries"].get(key)
-        if cached is not None:
-            return cached
-    # Build every project's logged-hours detail concurrently instead of one-at-a-time.
-    details = PROJECT_POOL.map(lambda p: get_june_detail(p["gid"], refresh=refresh, start=start, end=end), PROJECTS)
-    out = [june_summary_from_detail(d) for d in details]
-    with CACHE_LOCK:
-        CACHE["june_summaries"][key] = out
-    return out
-
-
-PAGE = r"""<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -537,10 +84,283 @@ PAGE = r"""<!DOCTYPE html>
   .sub-name::before { content:'↳'; position:absolute; left:6px; color:#5a616b; }
   .done { text-decoration:line-through; color:var(--faint); }
   .hours { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+
+  /* login + sign-out (static build) */
+  .login { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .login-card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:34px 32px;
+                max-width:430px; width:100%; box-shadow:0 10px 34px rgba(0,0,0,.5); }
+  .login-card h1 { font-size:22px; margin:0 0 6px; }
+  .login-card .sub { margin:0 0 18px; }
+  .login-card input[type=password] { width:100%; box-sizing:border-box; background:var(--panel2); color:var(--text);
+                border:1px solid var(--border); border-radius:8px; padding:11px 12px; font-size:14px; }
+  .login-card .remember { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); margin:12px 0 16px; }
+  .login-card .btn { width:100%; padding:11px; }
+  .login-err { color:var(--red); font-size:13px; margin:0 0 12px; }
+  .login-note { font-size:11px; color:var(--faint); margin-top:16px; line-height:1.55; }
+  .signout { position:fixed; top:16px; right:18px; z-index:50; background:var(--panel2); color:var(--text);
+             border:1px solid var(--border); border-radius:8px; padding:7px 12px; font-size:12px; cursor:pointer; }
+  .signout:hover { background:#414854; }
 </style>
 </head>
 <body>
 <div class="wrap" id="app"></div>
+<script>
+
+// ===== Static build: Asana data layer (runs entirely in the browser) =====
+const ASANA_API = 'https://app.asana.com/api/1.0';
+const EST_FIELD = "Estimated time";
+const EXCLUDE_SECTIONS = new Set(["completed"]);
+const ASSIGNEE_HOURS_CAP = 128;
+const TEAM_MEMBERS = ["Wallace Norman", "Miranda Osborn", "Linh Trinh", "Julia McKinney", "Grant Roach"];
+const PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 40}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40}, {"gid": "1214228966572508", "name": "Firebird MSA", "cap": 15}, {"gid": "1214228966572503", "name": "Myrick Marine"}, {"gid": "1214228966572429", "name": "CLICR - Internal"}, {"gid": "1214229029715234", "name": "Savannah Bee: Zendesk"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic"}, {"gid": "1214228966572541", "name": "DocSmith.md"}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2026"}, {"gid": "1214755322546416", "name": "Project Twilight"}, {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"}, {"gid": "1214228966572573", "name": "Autotask Reporting"}, {"gid": "1214228966572568", "name": "Brain Dump"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}];
+const DEF_START = "2026-06-01", DEF_END = "2026-06-30";
+const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
+const PROJECT_CAPS  = Object.fromEntries(PROJECTS.map(p => [p.gid, p.cap == null ? null : p.cap]));
+
+let TOKEN = null;
+const _realFetch = window.fetch.bind(window);
+
+function round2(x){ return Math.round((x + Number.EPSILON) * 100) / 100; }
+function sum(arr){ return arr.reduce((a, b) => a + b, 0); }
+function nowStr(){ const d = new Date(), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+
+// Bound real network concurrency (Asana rate limits + browser per-host caps).
+let _active = 0; const _waiters = [];
+function _gate(fn){
+  return new Promise((resolve, reject) => {
+    const run = () => { _active++; fn().then(resolve, reject).finally(() => { _active--; const n = _waiters.shift(); if (n) n(); }); };
+    if (_active < 8) run(); else _waiters.push(run);
+  });
+}
+
+// GET an Asana collection (follows pagination, retries on 429). Returns the concatenated data array.
+async function asanaGet(pathOrUrl){
+  let out = [], next = pathOrUrl;
+  while (next){
+    const full = next.startsWith('http') ? next : ASANA_API + next;
+    const page = await _gate(async () => {
+      for (;;){
+        const r = await _realFetch(full, { headers: { Authorization: 'Bearer ' + TOKEN } });
+        if (r.status === 429){ const ra = Number(r.headers.get('Retry-After') || 1); await new Promise(s => setTimeout(s, ra * 1000)); continue; }
+        if (!r.ok) throw new Error('Asana ' + r.status);
+        return r.json();
+      }
+    });
+    out = out.concat(page.data || []);
+    next = page.next_page && page.next_page.uri ? page.next_page.uri : null;
+  }
+  return out;
+}
+const mapAll = (arr, fn) => Promise.all(arr.map(fn));
+
+// ---- Estimated-hours layer (mirrors project_detail / get_summaries / get_assignee_load) ----
+function taskMinutes(t){ for (const cf of (t.custom_fields || [])){ if (cf.name === EST_FIELD && cf.number_value != null) return cf.number_value; } return 0; }
+function actualMinutes(t){ return t.actual_time_minutes || 0; }
+function sectionName(t, gid){ let fb = ''; for (const m of (t.memberships || [])){ const sec = (m.section || {}).name; if (!sec) continue; if ((m.project || {}).gid === gid) return sec; fb = fb || sec; } return fb; }
+function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).trim().toLowerCase()); }
+
+function fetchTasks(gid){
+  const f = 'name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+  return asanaGet(`/projects/${gid}/tasks?opt_fields=${f}&limit=100`);
+}
+function fetchSubtasks(g){
+  const f = 'name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value';
+  return asanaGet(`/tasks/${g}/subtasks?opt_fields=${f}&limit=100`);
+}
+
+async function buildTask(t, gid){
+  const subs = [];
+  for (const s of await fetchSubtasks(t.gid)){
+    if (s.completed) continue;
+    subs.push({ name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
+      hours: round2(taskMinutes(s) / 60), actual: round2(actualMinutes(s) / 60) });
+  }
+  return { gid: t.gid, name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
+    hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: sectionName(t, gid), subtasks: subs };
+}
+
+async function projectDetail(gid){
+  const tasks = (await fetchTasks(gid)).filter(t => !t.completed && !isExcluded(t, gid));
+  const detailed = await mapAll(tasks, t => buildTask(t, gid));
+  const totals = {}, actuals = {}, counts = {};
+  for (const d of detailed){
+    totals[d.assignee] = (totals[d.assignee] || 0) + d.hours;
+    actuals[d.assignee] = (actuals[d.assignee] || 0) + d.actual;
+    counts[d.assignee] = (counts[d.assignee] || 0) + 1;
+    for (const s of d.subtasks){
+      totals[s.assignee] = (totals[s.assignee] || 0) + s.hours;
+      actuals[s.assignee] = (actuals[s.assignee] || 0) + s.actual;
+      counts[s.assignee] = (counts[s.assignee] || 0) + 1;
+    }
+  }
+  const ordered = Object.keys(totals).sort((x, y) => totals[y] - totals[x]);
+  return { gid, name: PROJECT_NAMES[gid] || gid, labels: ordered,
+    hours: ordered.map(n => round2(totals[n])), actual_hours: ordered.map(n => round2(actuals[n])),
+    counts: ordered.map(n => counts[n]), ntasks: detailed.length, tasks: detailed, updated: nowStr() };
+}
+
+const CACHE = { summaries: null, detail: {}, june_summaries: {}, june_detail: {} };
+function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+
+async function getDetail(gid, refresh){
+  if (!refresh && CACHE.detail[gid]) return CACHE.detail[gid];
+  const data = await projectDetail(gid);
+  CACHE.detail[gid] = data;
+  if (CACHE.summaries) CACHE.summaries = CACHE.summaries.map(s => s.gid === gid ? summaryFromDetail(data) : s);
+  return data;
+}
+async function getSummaries(refresh){
+  if (!refresh && CACHE.summaries) return CACHE.summaries;
+  const details = await mapAll(PROJECTS, p => getDetail(p.gid, refresh));
+  return (CACHE.summaries = details.map(summaryFromDetail));
+}
+async function getAssigneeLoad(refresh){
+  const details = await mapAll(PROJECTS, p => getDetail(p.gid, refresh));
+  const est = {}, act = {}, counts = {}, breakdown = {};
+  for (const d of details){
+    d.labels.forEach((name, i) => {
+      const e = d.hours[i], aa = d.actual_hours[i], cnt = d.counts[i];
+      est[name] = (est[name] || 0) + e; act[name] = (act[name] || 0) + aa; counts[name] = (counts[name] || 0) + cnt;
+      if (e || aa) (breakdown[name] = breakdown[name] || []).push({ project: d.name, estimated: round2(e), actual: round2(aa), remaining: round2(e - aa) });
+    });
+  }
+  const ordered = TEAM_MEMBERS.filter(n => n in est).sort((x, y) => (est[y] - act[y]) - (est[x] - act[x]));
+  if ('Unassigned' in est) ordered.push('Unassigned');
+  return { cap: ASSIGNEE_HOURS_CAP, labels: ordered,
+    hours: ordered.map(n => round2(est[n] - act[n])), estimated: ordered.map(n => round2(est[n])),
+    actual: ordered.map(n => round2(act[n])), counts: ordered.map(n => counts[n]),
+    breakdown: Object.fromEntries(ordered.map(n => [n, breakdown[n] || []])), updated: nowStr() };
+}
+
+// ---- Logged-hours layer for a date range (mirrors june_detail / get_june_summaries) ----
+function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`); }
+function fetchSubtasksTime(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=name,actual_time_minutes&limit=100`); }
+
+async function entriesForItem(name, gid, start, end){
+  const res = [];
+  for (const e of await fetchTimeEntries(gid)){
+    const entered = e.entered_on || '';
+    if (entered && start <= entered && entered <= end)
+      res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered, minutes: e.duration_minutes || 0 });
+  }
+  return res;
+}
+async function juneDetail(gid, start, end){
+  const tasks = await asanaGet(`/projects/${gid}/tasks?opt_fields=name,actual_time_minutes,num_subtasks&limit=100`);
+  const cand = {};
+  for (const t of tasks) if ((t.actual_time_minutes || 0) > 0) cand[t.gid] = t.name || '(untitled)';
+  const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
+  for (const subs of await mapAll(parents, fetchSubtasksTime))
+    for (const s of subs) if ((s.actual_time_minutes || 0) > 0) cand[s.gid] = s.name || '(untitled)';
+  const candidates = Object.entries(cand);   // [gid, name]
+  const seen = new Set(), entries = [];
+  for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end)))
+    for (const e of lst){ if (e.entry_gid && seen.has(e.entry_gid)) continue; if (e.entry_gid) seen.add(e.entry_gid); entries.push(e); }
+  const totals = {}, counts = {};
+  for (const e of entries){ totals[e.by] = (totals[e.by] || 0) + e.minutes; counts[e.by] = (counts[e.by] || 0) + 1; }
+  const ordered = Object.keys(totals).sort((x, y) => totals[y] - totals[x]);
+  entries.sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
+  return { gid, name: PROJECT_NAMES[gid] || gid, start, end, labels: ordered,
+    hours: ordered.map(n => round2(totals[n] / 60)), counts: ordered.map(n => counts[n]),
+    total_hours: round2(sum(Object.values(totals)) / 60), nentries: entries.length,
+    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60) })), updated: nowStr() };
+}
+function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+
+async function getJuneDetail(gid, refresh, start, end){
+  const key = start + ':' + end;
+  if (!refresh && CACHE.june_detail[key] && CACHE.june_detail[key][gid]) return CACHE.june_detail[key][gid];
+  const data = await juneDetail(gid, start, end);
+  (CACHE.june_detail[key] = CACHE.june_detail[key] || {})[gid] = data;
+  if (CACHE.june_summaries[key]) CACHE.june_summaries[key] = CACHE.june_summaries[key].map(s => s.gid === gid ? juneSummaryFromDetail(data) : s);
+  return data;
+}
+async function getJuneSummaries(refresh, start, end){
+  const key = start + ':' + end;
+  if (!refresh && CACHE.june_summaries[key]) return CACHE.june_summaries[key];
+  const details = await mapAll(PROJECTS, p => getJuneDetail(p.gid, refresh, start, end));
+  return (CACHE.june_summaries[key] = details.map(juneSummaryFromDetail));
+}
+
+// ---- Route /api/* (same shapes the existing UI expects) ----
+async function handleApi(p){
+  const u = new URL(p, location.origin), path = u.pathname, q = u.searchParams;
+  const refresh = q.get('refresh') === '1';
+  let start = q.get('start') || DEF_START, end = q.get('end') || DEF_END;
+  if (start > end){ const t = start; start = end; end = t; }
+  if (path === '/api/projects') return getSummaries(refresh);
+  if (path === '/api/june') return getJuneSummaries(refresh, start, end);
+  if (path === '/api/assignees') return getAssigneeLoad(refresh);
+  if (path.startsWith('/api/june/')) return getJuneDetail(path.split('/').pop(), refresh, start, end);
+  if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
+  throw new Error('Unknown API ' + path);
+}
+// Intercept the page's own /api/* calls; everything else (Asana, CDN) passes through.
+window.fetch = async (input, init) => {
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  const p = url.replace(location.origin, '');
+  if (p.startsWith('/api/')){
+    try { return new Response(JSON.stringify(await handleApi(p)), { status: 200, headers: { 'Content-Type': 'application/json' } }); }
+    catch (err) { return new Response(JSON.stringify({ error: String(err && err.message || err) }), { status: 502, headers: { 'Content-Type': 'application/json' } }); }
+  }
+  return _realFetch(input, init);
+};
+
+// ---- PAT auth / login screen ----
+const STORE_KEY = 'asana_pat';
+function loadToken(){ return sessionStorage.getItem(STORE_KEY) || localStorage.getItem(STORE_KEY) || null; }
+function clearToken(){ sessionStorage.removeItem(STORE_KEY); localStorage.removeItem(STORE_KEY); }
+async function validateToken(tok){
+  const r = await _realFetch(ASANA_API + '/users/me?opt_fields=name,email', { headers: { Authorization: 'Bearer ' + tok } });
+  if (!r.ok) throw new Error(r.status === 401 ? 'Invalid token' : 'Asana ' + r.status);
+  return (await r.json()).data;
+}
+function showSignout(who){
+  let b = document.getElementById('signout-fab');
+  if (!b){ b = document.createElement('button'); b.id = 'signout-fab'; b.className = 'signout'; document.body.appendChild(b); }
+  b.textContent = 'Sign out'; b.title = who ? ('Signed in as ' + who) : ''; b.onclick = doLogout; b.style.display = 'block';
+}
+function hideSignout(){ const b = document.getElementById('signout-fab'); if (b) b.style.display = 'none'; }
+function doLogout(){ clearToken(); TOKEN = null; window.__authed = false; hideSignout();
+  if (typeof chart !== 'undefined' && chart){ try { chart.destroy(); } catch (e) {} chart = null; } location.hash = ''; renderLogin(); }
+
+function renderLogin(err){
+  window.__authed = false; hideSignout();
+  document.getElementById('app').innerHTML = `
+    <div class="login"><div class="login-card">
+      <h1>Asana Dashboard</h1>
+      <p class="sub">Connect with a Personal Access Token. Create one in Asana → My Settings → Apps → Manage developer apps → Personal access tokens.</p>
+      <input type="password" id="pat" placeholder="Paste your Asana PAT" autocomplete="off" spellcheck="false">
+      <label class="remember"><input type="checkbox" id="remember"> Remember on this device</label>
+      ${err ? `<p class="login-err">${esc(err)}</p>` : ''}
+      <button class="btn" id="connect">Connect</button>
+      <p class="login-note">Your token is stored only in this browser — sessionStorage, or localStorage if you check “remember” — and sent directly to Asana over HTTPS. Don’t use this on a shared computer, and never commit a token to the repo.</p>
+    </div></div>`;
+  const inp = document.getElementById('pat'), go = document.getElementById('connect');
+  const submit = async () => {
+    const tok = inp.value.trim(); if (!tok) return;
+    go.disabled = true; go.textContent = 'Connecting…'; TOKEN = tok;
+    try {
+      const me = await validateToken(tok);
+      (document.getElementById('remember').checked ? localStorage : sessionStorage).setItem(STORE_KEY, tok);
+      window.__authed = true; showSignout(me.name || me.email || 'Signed in'); location.hash = ''; window.__startApp();
+    } catch (e){ TOKEN = null; renderLogin(e && e.message || String(e)); }
+  };
+  go.onclick = submit;
+  inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); };
+  inp.focus();
+}
+
+async function bootAuth(){
+  const tok = loadToken();
+  if (!tok){ renderLogin(); return; }
+  TOKEN = tok;
+  try { const me = await validateToken(tok); window.__authed = true; showSignout(me.name || me.email || 'Signed in'); window.__startApp(); }
+  catch (e){ clearToken(); TOKEN = null; renderLogin('Saved token is no longer valid — please reconnect.'); }
+}
+
+</script>
 <script>
 const app = document.getElementById('app');
 let chart = null;
@@ -1069,63 +889,9 @@ function route() {
   if (m) return renderDetail(m[1]);
   renderDashboard();
 }
-window.addEventListener('hashchange', route);
-route();
+window.addEventListener('hashchange', () => { if (window.__authed) route(); });
+window.__startApp = route;
+bootAuth();
 </script>
 </body>
 </html>
-"""
-
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        parts = self.path.split("?")
-        path = parts[0]
-        query = urllib.parse.parse_qs(parts[1] if len(parts) > 1 else "")
-        refresh = query.get("refresh", [""])[0] == "1"
-        start = query.get("start", [DEFAULT_START])[0]
-        end = query.get("end", [DEFAULT_END])[0]
-        if start > end:                      # tolerate inverted ranges
-            start, end = end, start
-        try:
-            if path == "/api/projects":
-                return self._json(200, get_summaries(refresh=refresh))
-            if path == "/api/june":
-                return self._json(200, get_june_summaries(refresh=refresh, start=start, end=end))
-            if path == "/api/assignees":
-                return self._json(200, get_assignee_load(refresh=refresh))
-            if path.startswith("/api/june/"):
-                gid = path.rsplit("/", 1)[-1]
-                return self._json(200, get_june_detail(gid, refresh=refresh, start=start, end=end))
-            if path.startswith("/api/project/"):
-                gid = path.rsplit("/", 1)[-1]
-                return self._json(200, get_detail(gid, refresh=refresh))
-            if path == "/" or path.startswith("/index"):
-                return self._send(200, "text/html; charset=utf-8", PAGE.encode())
-            self._send(404, "text/plain", b"Not found")
-        except urllib.error.HTTPError as e:
-            self._json(502, {"error": f"Asana {e.code}"})
-
-    def _json(self, code, obj):
-        self._send(code, "application/json", json.dumps(obj).encode())
-
-    def _send(self, code, ctype, body):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *_):
-        pass  # quiet
-
-
-def main():
-    url = f"http://localhost:{PORT}"
-    print(f"Asana dashboard running at {url}  (Ctrl+C to stop)")
-    webbrowser.open(url)
-    ThreadingHTTPServer(("localhost", PORT), Handler).serve_forever()
-
-
-if __name__ == "__main__":
-    main()
