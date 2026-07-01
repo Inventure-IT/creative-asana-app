@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate a static, GitHub-Pages-hostable `index.html` from georgia_grown_app.py.
+Generate a static, GitHub-Pages-hostable `index.html` from creative_asana_app.py.
 
 The local app keeps the Asana PAT server-side and proxies the API. GitHub Pages
 serves static files only, so the static build:
@@ -12,10 +12,10 @@ serves static files only, so the static build:
     entire UI (tabs, charts, date range, drill-ins) is reused verbatim.
 
 Run:  python build_static.py     ->  writes ./index.html
-Re-run whenever you change PROJECTS / caps / team members in georgia_grown_app.py.
+Re-run whenever you change PROJECTS / caps / team members in creative_asana_app.py.
 """
 import json
-import georgia_grown_app as a
+import creative_asana_app as a
 
 PROJECTS = json.dumps(a.PROJECTS)
 GROUPS = json.dumps(a.GROUPS)

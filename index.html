@@ -128,7 +128,7 @@ const EST_FIELD = "Estimated time";
 const EXCLUDE_SECTIONS = new Set(["completed"]);
 const ASSIGNEE_HOURS_CAP = 128;
 const TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia McKinney", "Grant Roach"];
-const PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 40}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40}, {"gid": "1214228966572508", "name": "Firebird MSA", "cap": 15}, {"gid": "1214228966572503", "name": "Myrick Marine"}, {"gid": "1214229029715234", "name": "Savannah Bee: Zendesk"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic"}, {"gid": "1214228966572541", "name": "DocSmith.md"}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2026"}, {"gid": "1214755322546416", "name": "Project Twilight"}, {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"}, {"gid": "1214228966572573", "name": "Autotask Reporting"}, {"gid": "1214228966572568", "name": "Brain Dump"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}];
+const PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 40}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40}, {"gid": "1214228966572508", "name": "Firebird MSA", "cap": 15}, {"gid": "1214228966572503", "name": "Myrick Marine"}, {"gid": "1214229029715234", "name": "Savannah Bee: Zendesk"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic"}, {"gid": "1214228966572541", "name": "DocSmith.md"}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2026"}, {"gid": "1214755322546416", "name": "Project Twilight"}, {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"}, {"gid": "1214228966572573", "name": "Autotask Reporting"}, {"gid": "1214228966572568", "name": "Brain Dump"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}, {"gid": "1216154609521581", "name": "NuNu"}];
 const GROUPS = [{"name": "CMD", "cap": 108, "gids": ["1214228966572536", "1214228966572531", "1214228966572526"]}];
 const DEF_START = "2026-06-01", DEF_END = "2026-06-30";
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
@@ -462,6 +462,45 @@ Chart.register(capMarksPlugin);
 function fmtErr(e){ return '<p class="muted">Error: '+e+'</p>'; }
 function esc(s){ return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function h2(x){ return Number(x || 0).toFixed(2); }   // always two decimals: 40.00, 40.50, 40.75
+
+// Stable per-person colors, shared across the estimated & actual per-person stacked charts,
+// so the same employee keeps one color everywhere within a session.
+// Well-separated categorical hues, one per color family, so stacked segments never blend.
+// Deliberately NO orange/amber/gold — those get lost against the amber capacity marker (#f0c674).
+const PERSON_PALETTE = [
+  '#1f77b4', // blue
+  '#d62728', // red
+  '#2ca02c', // green
+  '#9467bd', // purple
+  '#17becf', // cyan
+  '#e377c2', // pink
+  '#8c564b', // brown
+  '#7f7f7f', // gray
+  '#393b79', // deep indigo
+  '#a55194', // plum
+];
+// Fixed colors for specific people; everyone else auto-assigns a still-unused palette hue.
+// Seeded into _personColors so an override is reserved up front and never clashes with an
+// auto-assigned person, even if that person is colored first.
+const PERSON_COLOR_OVERRIDES = { 'Miranda Osborn': '#9467bd' };   // purple (was orange)
+const _personColors = Object.assign({}, PERSON_COLOR_OVERRIDES);
+let _personColorN = 0;
+function personColor(name){
+  if (name in _personColors) return _personColors[name];
+  // Skip palette entries already taken (by an override or an earlier person) to avoid clashes.
+  const used = new Set(Object.values(_personColors));
+  while (used.size < PERSON_PALETTE.length && used.has(PERSON_PALETTE[_personColorN % PERSON_PALETTE.length])) _personColorN++;
+  return (_personColors[name] = PERSON_PALETTE[_personColorN++ % PERSON_PALETTE.length]);
+}
+// Build stacked Chart.js datasets (one per person) from project rows. hoursOf(row) returns
+// { person: hours } for that project; persons are ordered by grand total (biggest at the bottom).
+function personStacks(rows, hoursOf){
+  const maps = rows.map(hoursOf), totals = {};
+  maps.forEach(m => Object.entries(m).forEach(([p, h]) => { totals[p] = (totals[p] || 0) + h; }));
+  const persons = Object.keys(totals).sort((a, b) => totals[b] - totals[a]);
+  return persons.map(p => ({ label: p, data: maps.map(m => Math.round((m[p] || 0) * 100) / 100),
+    backgroundColor: personColor(p), borderColor: personColor(p), borderWidth: 0 }));
+}
 function capBar(hours, cap){
   if (cap == null) return '';   // only projects with a monthly capacity get a bar
   const pct = cap > 0 ? (hours / cap) * 100 : 0;
@@ -500,21 +539,17 @@ function rangePicker(){
     </div>`;
 }
 const TABS = {
-  team: { label:'Team Capacity', title:'Team Capacity',
-    sub:'Remaining hours (estimated − actual) per assignee across all projects vs. the 128 h target. Click a bar for the per-project breakdown.' },
-  actualproj: { label:'Bar Chart', title:'Bar Chart',
-    sub:'Billable vs. unbillable hours logged per project in the selected date range — only billable counts toward budget. Click a bar to drill into that project.' },
-  estimated: { label:'Statistics', title:'Statistics',
-    sub:'Estimated hours per project (excludes Completed). Click a widget to drill in.' },
-  june: { label:'Statistics', title:'Statistics',
-    sub:'Time-tracking entries logged in the selected date range, split billable / unbillable. Click a widget to drill in.' },
-  capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity',
-    sub:'Projects with a monthly hour budget — selected range’s billable usage vs. capacity (unbillable excluded). Click to drill in.' },
+  team: { label:'Team Capacity', title:'Team Capacity' },
+  actualproj: { label:'Bar Chart', title:'Bar Chart' },
+  estproj: { label:'Bar Chart', title:'Bar Chart' },
+  estimated: { label:'Statistics', title:'Statistics' },
+  june: { label:'Statistics', title:'Statistics' },
+  capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity' },
 };
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views.
 const NAV_SECTIONS = [
-  { title: 'Estimated Hours', tabs: ['team', 'estimated'] },
-  { title: 'Actual Hours', tabs: ['actualproj', 'june', 'capacity'] },
+  { title: 'Estimated Hours', tabs: ['team', 'estproj', 'estimated'] },
+  { title: 'Actual Hours', tabs: ['capacity', 'actualproj', 'june'] },
 ];
 
 // Shared left nav, reused by the dashboard and the drill-in detail pages so the
@@ -647,6 +682,8 @@ async function renderDashboard() {
   let estData = null, juneData = null, teamData = null;   // cached so switching tabs is instant
   let groupsConfig = null;   // budget-group definitions (loaded once); combined per current range
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
+  let projPersonCache = {};    // per-project person split { gid: { person: {b,u} } }, keyed by 'start:end'
+  let personLoading = {};      // in-flight guard so the chart + summary don't double-fetch
 
   // Wire the date-range Search button (if the current tab rendered one). Editing the date
   // fields does nothing until Search is clicked (or Enter is pressed in a field).
@@ -675,8 +712,70 @@ async function renderDashboard() {
     wireRangeSel();
   }
 
+  function renderEstProj() {
+    // Stacked bar chart of estimated hours per project, split by assignee. Project list/caps
+    // come from estData; the per-person split is inverted out of teamData.breakdown.
+    if (!estData || !teamData) { view.innerHTML = '<p class="muted">Loading widgets…</p>'; return; }
+    // Invert the team breakdown (person → projects) into project name → { person: est hours }.
+    const byProject = {};
+    Object.entries(teamData.breakdown).forEach(([person, projs]) => (projs || []).forEach(p => {
+      if (!p.estimated) return;
+      (byProject[p.project] = byProject[p.project] || {});
+      byProject[p.project][person] = (byProject[p.project][person] || 0) + p.estimated;
+    }));
+    const rows = estData.filter(w => w.hours > 0).slice().sort((a, b) => b.hours - a.hours);
+    if (!rows.length) { view.innerHTML = '<p class="muted">No estimated hours.</p>'; return; }
+    view.innerHTML = '<div class="chart-box"><canvas id="chart"></canvas></div>' +
+      '<div id="est-summary"></div>';
+    if (chart) { chart.destroy(); chart = null; }
+    const labels = rows.map(w => w.name);
+    const gids = rows.map(w => w.gid), ntasks = rows.map(w => w.ntasks);
+    const caps = rows.map(w => (w.cap == null ? null : w.cap));
+    const datasets = personStacks(rows, w => byProject[w.name] || {});
+    const top = Math.max(...rows.map(w => w.hours), ...caps.filter(c => c != null), 1);
+    chart = new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: { labels, datasets },
+      options: { responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        onClick: (evt, els) => { if (els.length) { const g = gids[els[0].index]; if (g) location.hash = '#/p/' + g; } },
+        onHover: (evt, els) => { evt.native.target.style.cursor = (els.length && gids[els[0].index]) ? 'pointer' : 'default'; },
+        scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
+                  y: { stacked: true, beginAtZero: true, suggestedMax: top * 1.05,
+                       title: { display: true, text: 'Estimated hours' }, ticks: { callback: v => h2(v) } } },
+        plugins: { legend: { display: true, position: 'bottom' }, capMarks: { caps },
+          tooltip: { itemSort: (a, b) => b.parsed.y - a.parsed.y, filter: item => item.parsed.y > 0,
+            callbacks: {
+              label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
+              afterBody: items => {
+                const i = items[0].dataIndex, lines = [`Total ${h2(rows[i].hours)} h · ${ntasks[i]} tasks`];
+                if (caps[i] != null) lines.push(`Budget ${h2(caps[i])} h/mo (${(rows[i].hours / caps[i] * 100).toFixed(0)}%)`);
+                return lines;
+              } } } } }
+    });
+    renderEstSummary(rows);
+  }
+
+  // Bottom-of-page summary table for the Estimated Hours bar chart: totals per project.
+  function renderEstSummary(rows) {
+    const box = document.getElementById('est-summary');
+    if (!box) return;
+    const statRow = (name, hours, ntasks, cls) =>
+      `<tr${cls ? ' class="' + cls + '"' : ''}><td>${esc(name)}</td>` +
+      `<td class="hours">${h2(hours)} h</td><td class="hours">${ntasks}</td></tr>`;
+    const totH = rows.reduce((a, w) => a + w.hours, 0);
+    const totT = rows.reduce((a, w) => a + w.ntasks, 0);
+    box.innerHTML =
+      `<h2 class="section-h">By project</h2>
+       <table class="tasks">
+         <thead><tr><th>Project</th><th class="hours">Estimated</th><th class="hours">Tasks</th></tr></thead>
+         <tbody>${rows.map(w => statRow(w.name, w.hours, w.ntasks)).join('')}
+           ${statRow('All projects', totH, totT, 'parent')}</tbody>
+       </table>`;
+  }
+
   function renderActualProj() {
-    // Bar chart of actual hours logged per project for the selected date range.
+    // Stacked bar chart of logged hours per project for the selected date range, split by person.
     const picker = rangePicker();
     if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
     // Roll grouped projects (e.g. CMD) into one combined bucket with the group's cap;
@@ -684,63 +783,65 @@ async function renderDashboard() {
     const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
     const groupItems = (groupsConfig || []).map(g => {
       const s = buildGroupSummary(g, juneData);
-      return { name: g.name, gid: null, isGroup: true, cap: g.cap, members: s.members,
+      return { name: g.name, gid: null, isGroup: true, gids: g.gids, cap: g.cap, members: s.members,
         billable_hours: s.billable_hours, unbillable_hours: s.unbillable_hours,
         hours: s.billable_hours + s.unbillable_hours, nentries: s.nentries };
     });
     const projItems = juneData.filter(w => !memberGids.has(w.gid)).map(w => Object.assign({ isGroup: false }, w));
     const rows = [...groupItems, ...projItems]
       .filter(w => w.hours > 0)
-      .sort((a, b) => b.billable_hours - a.billable_hours);
+      .sort((a, b) => b.hours - a.hours);
     if (!rows.length) {
       view.innerHTML = picker + `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
       wireRangeSel(); return;
     }
     view.innerHTML = picker + '<div class="chart-box"><canvas id="chart"></canvas></div>' +
-      `<p class="hint">Billable vs. unbillable hours logged per project, ${rangeLabel(dateStart, dateEnd)}. CMD is one combined bucket — hover it to see each sub-project. Only billable counts toward the monthly budget (amber line); the billable bar turns red when over budget. Click a bar to drill in.</p>` +
       '<div id="actual-summary"></div>';
     wireRangeSel();
     if (chart) { chart.destroy(); chart = null; }
+    renderActualSummary();
+    // The per-person split needs each project's detail (loaded on demand). Show a placeholder
+    // in the chart box until it lands, then re-render this whole tab.
+    const key = dateStart + ':' + dateEnd, pcache = projPersonCache[key];
+    if (!pcache) {
+      const cb = view.querySelector('.chart-box');
+      if (cb) cb.innerHTML = '<p class="muted" style="padding:24px">Loading per-person breakdown…</p>';
+      loadPersonStats(key);
+      return;
+    }
     const labels = rows.map(w => w.name);
-    const billData = rows.map(w => w.billable_hours);
-    const unbillData = rows.map(w => w.unbillable_hours);
     const gids = rows.map(w => w.gid), ents = rows.map(w => w.nentries);
-    const isGrp = rows.map(w => !!w.isGroup);
     const caps = rows.map(w => (w.cap == null ? null : w.cap));
-    const members = rows.map(w => w.members || null);   // member breakdown for combined buckets
-    // Billable bar turns red only when *billable* hours blow the budget.
-    const billColors = rows.map(w => (w.cap != null && w.billable_hours > w.cap) ? '#e26b66' : '#4cc085');
-    const billBorders = rows.map(w => (w.cap != null && w.billable_hours > w.cap) ? '#e98e8a' : '#6cd49d');
+    // Total logged hours (billable + unbillable) per person for a row; groups sum their members.
+    const rowPersons = (w) => {
+      const src = w.isGroup ? (w.gids || []) : [w.gid], out = {};
+      src.forEach(g => { const m = pcache[g]; if (m) Object.entries(m).forEach(([p, v]) => { out[p] = (out[p] || 0) + v.b + v.u; }); });
+      return out;
+    };
+    const datasets = personStacks(rows, rowPersons);
     // Keep every budget marker visible even if it sits above the tallest bar.
-    const top = Math.max(...billData, ...unbillData, ...caps.filter(c => c != null), 1);
+    const top = Math.max(...rows.map(w => w.hours), ...caps.filter(c => c != null), 1);
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
-      data: { labels, datasets: [
-        { label: 'Billable', data: billData, backgroundColor: billColors, borderColor: billBorders, borderWidth: 1 },
-        { label: 'Unbillable', data: unbillData, backgroundColor: '#8a929c', borderColor: '#a3aab4', borderWidth: 1 } ] },
+      data: { labels, datasets },
       options: { responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
         // Single projects drill into their detail; combined buckets (gid null) don't navigate.
         onClick: (evt, els) => { if (els.length) { const g = gids[els[0].index]; if (g) location.hash = '#/june/' + g; } },
         onHover: (evt, els) => { evt.native.target.style.cursor = (els.length && gids[els[0].index]) ? 'pointer' : 'default'; },
-        scales: { x: { title: { display: true, text: 'Project' } },
-                  y: { beginAtZero: true, suggestedMax: top * 1.05,
+        scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
+                  y: { stacked: true, beginAtZero: true, suggestedMax: top * 1.05,
                        title: { display: true, text: 'Hours logged' }, ticks: { callback: v => h2(v) } } },
-        plugins: { legend: { display: true }, capMarks: { caps },
-          tooltip: { callbacks: {
-            label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
-            afterBody: items => {
-              const i = items[0].dataIndex, lines = [`Entries: ${ents[i]}`];
-              if (caps[i] != null) lines.push(`Budget ${h2(caps[i])} h billable (${(billData[i] / caps[i] * 100).toFixed(0)}%)`);
-              const mem = members[i];
-              if (mem && mem.length) {
-                lines.push('— by sub-project (billable) —');
-                mem.slice().sort((a, b) => b.billable_hours - a.billable_hours)
-                   .forEach(m => lines.push(`${m.name}: ${h2(m.billable_hours)} h`));
-              }
-              return lines;
-            } } } } }
+        plugins: { legend: { display: true, position: 'bottom' }, capMarks: { caps },
+          tooltip: { itemSort: (a, b) => b.parsed.y - a.parsed.y, filter: item => item.parsed.y > 0,
+            callbacks: {
+              label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
+              afterBody: items => {
+                const i = items[0].dataIndex, lines = [`Total ${h2(rows[i].hours)} h · ${ents[i]} entries`];
+                if (caps[i] != null) lines.push(`Budget ${h2(caps[i])} h billable`);
+                return lines;
+              } } } } }
     });
-    renderActualSummary();
   }
 
   // Bottom-of-page summary tables for Actual Hours: totals per project and per person.
@@ -783,8 +884,11 @@ async function renderDashboard() {
     if (!people) loadPersonStats(key);
   }
 
-  // Pull each logged project's detail and sum billable/unbillable per person, then cache + re-render.
+  // Pull each logged project's detail and split billable/unbillable per person — both globally
+  // (summary table) and per project (the stacked chart) — then cache + re-render.
   async function loadPersonStats(key) {
+    if (personLoading[key] || personStatsCache[key]) return;   // already loading / loaded
+    personLoading[key] = true;
     const gids = juneData.filter(w => w.hours > 0).map(w => w.gid);
     let details;
     try {
@@ -793,25 +897,33 @@ async function renderDashboard() {
     } catch (e) {
       const el = document.getElementById('person-loading');
       if (el) el.innerHTML = fmtErr(e);
+      delete personLoading[key];
       return;
     }
+    delete personLoading[key];
     if (key !== dateStart + ':' + dateEnd) return;   // range changed while loading
-    const agg = {};
-    details.forEach(d => (d.labels || []).forEach((name, i) => {
-      const a = agg[name] || (agg[name] = { billable: 0, unbillable: 0 });
-      a.billable += d.billable[i]; a.unbillable += d.unbillable[i];
-    }));
+    const agg = {}, byGid = {};
+    gids.forEach((g, idx) => {
+      const d = details[idx], pm = byGid[g] = {};
+      (d.labels || []).forEach((name, i) => {
+        const a = agg[name] || (agg[name] = { billable: 0, unbillable: 0 });
+        a.billable += d.billable[i]; a.unbillable += d.unbillable[i];
+        const p = pm[name] || (pm[name] = { b: 0, u: 0 });
+        p.b += d.billable[i]; p.u += d.unbillable[i];
+      });
+    });
+    projPersonCache[key] = byGid;
     personStatsCache[key] = Object.keys(agg)
       .map(name => ({ name, billable: agg[name].billable, unbillable: agg[name].unbillable }))
       .sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
-    if (dashTab === 'actualproj') renderActualSummary();
+    // Re-render the whole tab so the chart (which needs the per-project split) draws too.
+    if (dashTab === 'actualproj') renderActualProj();
   }
 
   function renderTeam() {
     // Bar chart of estimated hours per assignee, with a dashed line at the 128 h target.
     const d = teamData;
-    view.innerHTML = '<div class="chart-box"><canvas id="chart"></canvas></div>' +
-      '<p class="hint">Bars show remaining work (estimated − actual). Over the target line is red (over-allocated). Click a bar for the per-project breakdown.</p>';
+    view.innerHTML = '<div class="chart-box"><canvas id="chart"></canvas></div>';
     if (chart) { chart.destroy(); chart = null; }
     const colors = d.hours.map(h => h > d.cap ? '#e26b66' : '#4cc085');
     chart = new Chart(document.getElementById('chart'), {
@@ -883,7 +995,7 @@ async function renderDashboard() {
     if (!el) return;
     let u = null;
     if (dashTab === 'team') u = teamData && teamData.updated;
-    else if (dashTab === 'estimated') u = estData && estData[0] && estData[0].updated;
+    else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
     else u = juneData && juneData[0] && juneData[0].updated;
     el.textContent = u ? ('Updated ' + u) : '';
   }
@@ -898,11 +1010,14 @@ async function renderDashboard() {
     if (dashTab === 'june') title = `Statistics · ${rangeLabel(dateStart, dateEnd)}`;
     else if (dashTab === 'actualproj') title = `Bar Chart · ${rangeLabel(dateStart, dateEnd)}`;
     document.getElementById('tab-title').textContent = title;
-    document.getElementById('tab-sub').textContent = TABS[dashTab].sub;
+    const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
+    subEl.textContent = sub; subEl.style.display = sub ? '' : 'none';
     const loading = '<p class="muted">Loading widgets…</p>';
 
     if (dashTab === 'team') {
       teamData ? renderTeam() : (view.innerHTML = loading);
+    } else if (dashTab === 'estproj') {
+      renderEstProj();
     } else if (dashTab === 'actualproj') {
       renderActualProj();
     } else if (dashTab === 'estimated') {
@@ -940,7 +1055,7 @@ async function renderDashboard() {
   // Loads the selected range's "Actual Hours" widgets (used on its own when the range changes).
   async function loadJune(refresh) {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
-    personStatsCache = {};   // range/refresh changed — recompute per-person totals
+    personStatsCache = {}; projPersonCache = {}; personLoading = {};   // range/refresh changed — recompute per-person splits
     try {
       const url = `/api/june?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await fetch(url).then(r => r.json());
@@ -997,8 +1112,7 @@ async function renderDetail(gid) {
     const d = detailData;
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:d.name}]);
     document.getElementById('view').innerHTML =
-      '<div class="chart-box"><canvas id="chart"></canvas></div>' +
-      '<p class="hint">Tip: click a bar to see the tasks (and subtasks) that make up that assignee.</p>';
+      '<div class="chart-box"><canvas id="chart"></canvas></div>';
     if (chart) { chart.destroy(); chart = null; }
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
@@ -1097,8 +1211,7 @@ async function renderJuneDetail(gid) {
     const ml = rangeLabel(data.start, data.end);
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name + ' · ' + ml}]);
     document.getElementById('view').innerHTML =
-      '<div class="chart-box"><canvas id="chart"></canvas></div>' +
-      `<p class="hint">Tip: click a bar to see the individual time entries that person logged in ${ml}.</p>`;
+      '<div class="chart-box"><canvas id="chart"></canvas></div>';
     if (chart) { chart.destroy(); chart = null; }
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
