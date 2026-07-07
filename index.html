@@ -482,7 +482,7 @@ const PERSON_PALETTE = [
 // Fixed colors for specific people; everyone else auto-assigns a still-unused palette hue.
 // Seeded into _personColors so an override is reserved up front and never clashes with an
 // auto-assigned person, even if that person is colored first.
-const PERSON_COLOR_OVERRIDES = { 'Miranda Osborn': '#9467bd' };   // purple (was orange)
+const PERSON_COLOR_OVERRIDES = { 'Miranda Osborn': '#9467bd', 'Unassigned': '#7f7f7f' };   // Miranda purple (was orange); Unassigned always grey
 const _personColors = Object.assign({}, PERSON_COLOR_OVERRIDES);
 let _personColorN = 0;
 function personColor(name){
@@ -925,7 +925,7 @@ async function renderDashboard() {
     const d = teamData;
     view.innerHTML = '<div class="chart-box"><canvas id="chart"></canvas></div>';
     if (chart) { chart.destroy(); chart = null; }
-    const colors = d.hours.map(h => h > d.cap ? '#e26b66' : '#4cc085');
+    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? '#7f7f7f' : (h > d.cap ? '#e26b66' : '#4cc085'));
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
       data: { labels: d.labels, datasets: [{ label: 'Remaining hours', data: d.hours,
