@@ -65,7 +65,7 @@ DEFAULT_START = "2026-06-01"             # default date range (inclusive) for th
 DEFAULT_END = "2026-06-30"               #   entries with start <= entered_on <= end are counted
 ASSIGNEE_HOURS_CAP = 128                 # estimated hours each assignee is expected to fill (all projects)
 # Team Capacity chart shows only these people (sorted by remaining), with Unassigned pinned far right.
-TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia McKinney", "Grant Roach"]
+TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roach"]
 PORT = 8765
 API = "https://app.asana.com/api/1.0"
 PROJECT_NAMES = {p["gid"]: p["name"] for p in PROJECTS}
