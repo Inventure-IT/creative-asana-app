@@ -100,6 +100,17 @@
   .sub-name::before { content:'↳'; position:absolute; left:6px; color:#5a616b; }
   .done { text-decoration:line-through; color:var(--faint); }
   .hours { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  /* settings: per-person graph colors */
+  .color-list { display:flex; flex-direction:column; gap:2px; }
+  .color-row { display:flex; align-items:center; gap:12px; padding:9px 6px; border-bottom:1px solid var(--border); }
+  .color-row:last-child { border-bottom:0; }
+  .color-row .color-name { flex:1; font-size:14px; }
+  .color-pick { width:40px; height:28px; padding:0; border:1px solid var(--border); border-radius:6px;
+                background:var(--panel2); cursor:pointer; }
+  .reset-one { background:none; border:0; color:var(--blue-d); font-size:12px; cursor:pointer; padding:4px 6px; }
+  .reset-one:hover:not(:disabled) { text-decoration:underline; }
+  .reset-one:disabled { color:var(--faint); cursor:default; }
+  .color-actions { margin-top:18px; }
 
   /* login + sign-out (static build) */
   .login { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
@@ -485,10 +496,33 @@ const PERSON_PALETTE = [
 const PERSON_COLOR_OVERRIDES = { 'Miranda Osborn': '#9467bd', 'Unassigned': '#7f7f7f' };   // Miranda purple (was orange); Unassigned always grey
 const _personColors = Object.assign({}, PERSON_COLOR_OVERRIDES);
 let _personColorN = 0;
+// User-picked colors (Settings tab), persisted per-browser. These win over the built-in
+// defaults/auto-assignment so a chosen color applies everywhere the same person is drawn.
+const PERSON_COLOR_STORE = 'personColors.v1';
+function loadPersonColorConfig(){
+  try { return JSON.parse(localStorage.getItem(PERSON_COLOR_STORE)) || {}; } catch (e) { return {}; }
+}
+function savePersonColorConfig(){
+  try { localStorage.setItem(PERSON_COLOR_STORE, JSON.stringify(personColorConfig)); } catch (e) {}
+}
+let personColorConfig = loadPersonColorConfig();
+// Every name we've been asked to color this session, so the Settings tab can list everyone
+// (seeded with the known team + Unassigned so they always show even before any chart loads).
+const _seenPeople = new Set([...TEAM_MEMBERS, 'Unassigned']);
 function personColor(name){
+  _seenPeople.add(name);
+  if (name in personColorConfig) return personColorConfig[name];   // user choice wins
   if (name in _personColors) return _personColors[name];
-  // Skip palette entries already taken (by an override or an earlier person) to avoid clashes.
-  const used = new Set(Object.values(_personColors));
+  // Skip palette entries already taken (by an override, a user color, or an earlier person).
+  const used = new Set([...Object.values(_personColors), ...Object.values(personColorConfig)]);
+  while (used.size < PERSON_PALETTE.length && used.has(PERSON_PALETTE[_personColorN % PERSON_PALETTE.length])) _personColorN++;
+  return (_personColors[name] = PERSON_PALETTE[_personColorN++ % PERSON_PALETTE.length]);
+}
+// Default color for a person, ignoring any user override (used by the Settings "Reset" action
+// to show what they'd revert to).
+function personDefaultColor(name){
+  if (name in _personColors) return _personColors[name];
+  const used = new Set([...Object.values(_personColors), ...Object.values(personColorConfig)]);
   while (used.size < PERSON_PALETTE.length && used.has(PERSON_PALETTE[_personColorN % PERSON_PALETTE.length])) _personColorN++;
   return (_personColors[name] = PERSON_PALETTE[_personColorN++ % PERSON_PALETTE.length]);
 }
@@ -545,11 +579,13 @@ const TABS = {
   estimated: { label:'Statistics', title:'Statistics' },
   june: { label:'Statistics', title:'Statistics' },
   capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity' },
+  settings: { label:'Graph Colors', title:'Graph Colors', sub:'Pick a color for each person — saved in this browser and applied to every per-person chart.' },
 };
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views.
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tabs: ['team', 'estproj', 'estimated'] },
   { title: 'Actual Hours', tabs: ['capacity', 'actualproj', 'june'] },
+  { title: 'Settings', tabs: ['settings'] },
 ];
 
 // Shared left nav, reused by the dashboard and the drill-in detail pages so the
@@ -925,7 +961,7 @@ async function renderDashboard() {
     const d = teamData;
     view.innerHTML = '<div class="chart-box"><canvas id="chart"></canvas></div>';
     if (chart) { chart.destroy(); chart = null; }
-    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? '#7f7f7f' : (h > d.cap ? '#e26b66' : '#4cc085'));
+    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : (h > d.cap ? '#e26b66' : '#4cc085'));
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
       data: { labels: d.labels, datasets: [{ label: 'Remaining hours', data: d.hours,
@@ -994,7 +1030,8 @@ async function renderDashboard() {
     const el = document.getElementById('dash-updated');
     if (!el) return;
     let u = null;
-    if (dashTab === 'team') u = teamData && teamData.updated;
+    if (dashTab === 'settings') u = null;
+    else if (dashTab === 'team') u = teamData && teamData.updated;
     else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
     else u = juneData && juneData[0] && juneData[0].updated;
     el.textContent = u ? ('Updated ' + u) : '';
@@ -1047,7 +1084,37 @@ async function renderDashboard() {
         }
         wireRangeSel();
       }
+    } else if (dashTab === 'settings') {
+      renderSettings();
     }
+  }
+
+  // Settings: per-person graph colors. Choices persist to localStorage (see personColor)
+  // and take effect on any per-person chart the next time it's drawn.
+  function renderSettings() {
+    // Everyone we might color: known team + Unassigned, plus anyone seen in a chart this
+    // session, plus anyone who already has a saved color.
+    const people = [...new Set([...TEAM_MEMBERS, 'Unassigned', ..._seenPeople, ...Object.keys(personColorConfig)])];
+    const rows = people.map(p => {
+      const custom = p in personColorConfig;
+      return `<div class="color-row" data-person="${esc(p)}">
+          <input type="color" class="color-pick" value="${personColor(p)}">
+          <span class="color-name">${esc(p)}</span>
+          <button class="reset-one"${custom ? '' : ' disabled'}>Reset</button>
+        </div>`;
+    }).join('');
+    view.innerHTML = `<div class="panel">
+        <div class="color-list">${rows}</div>
+        <div class="color-actions"><button class="btn back" id="reset-all">Reset all to defaults</button></div>
+        <p class="hint">Applies to the per-person stacked bar charts and the Unassigned bar on Team Capacity. Open a chart tab to see the change.</p>
+      </div>`;
+    view.querySelectorAll('.color-row').forEach(row => {
+      const name = row.dataset.person;
+      const pick = row.querySelector('.color-pick'), reset = row.querySelector('.reset-one');
+      pick.oninput = () => { personColorConfig[name] = pick.value; savePersonColorConfig(); reset.disabled = false; };
+      reset.onclick = () => { delete personColorConfig[name]; savePersonColorConfig(); pick.value = personDefaultColor(name); reset.disabled = true; };
+    });
+    document.getElementById('reset-all').onclick = () => { personColorConfig = {}; savePersonColorConfig(); renderSettings(); };
   }
 
   wireSidebar(renderTab);
