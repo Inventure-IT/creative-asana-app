@@ -949,12 +949,13 @@ async function renderDashboard() {
         const p = pm[name] || (pm[name] = { b: 0, u: 0 });
         p.b += d.billable[i]; p.u += d.unbillable[i];
       });
-      // Roll each project's time entries up by task, so the Items tab can list every
-      // worked-on item with its logged hours. Key by project + task so identically
-      // named tasks in different projects stay separate.
+      // Roll each project's time entries up by task AND the person who logged them, so the
+      // Items tab can list every worked-on item with who logged the time and how much. Key by
+      // project + task + person so identically named tasks / multiple loggers stay separate.
       (d.entries || []).forEach(e => {
-        const ikey = (d.name || '') + ' | ' + e.task;
-        const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', billable: 0, unbillable: 0, entries: 0 });
+        const person = e.by || 'Unknown';
+        const ikey = (d.name || '') + ' | ' + e.task + ' | ' + person;
+        const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', person: person, billable: 0, unbillable: 0, entries: 0 });
         if (e.billable) it.billable += e.hours; else it.unbillable += e.hours;
         it.entries += 1;
       });
@@ -964,7 +965,10 @@ async function renderDashboard() {
       .map(name => ({ name, billable: agg[name].billable, unbillable: agg[name].unbillable }))
       .sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
     itemStatsCache[key] = Object.values(items)
-      .sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
+      // Group by project (A→Z), then heaviest items first within each project.
+      .sort((a, b) => a.project.localeCompare(b.project)
+        || (b.billable + b.unbillable) - (a.billable + a.unbillable)
+        || a.task.localeCompare(b.task));
     // Re-render the whole tab so the chart (which needs the per-project split) draws too.
     if (dashTab === 'actualproj') renderActualProj();
     else if (dashTab === 'actualitems') renderActualItems();
@@ -991,7 +995,7 @@ async function renderDashboard() {
     const totU = items.reduce((a, it) => a + it.unbillable, 0);
     const totE = items.reduce((a, it) => a + it.entries, 0);
     const itemRow = (it) =>
-      `<tr><td>${esc(it.task)}</td><td class="muted">${esc(it.project)}</td>` +
+      `<tr><td class="muted">${esc(it.project)}</td><td>${esc(it.task)}</td><td>${esc(it.person)}</td>` +
       `<td class="hours">${h2(it.billable)} h</td><td class="hours">${h2(it.unbillable)} h</td>` +
       `<td class="hours">${h2(it.billable + it.unbillable)} h</td></tr>`;
     view.innerHTML = picker +
@@ -999,9 +1003,9 @@ async function renderDashboard() {
         `${h2(totB + totU)} h logged in ${rangeLabel(dateStart, dateEnd)} ` +
         `(${h2(totB)} h billable / ${h2(totU)} h unbillable)</p>
        <table class="tasks">
-         <thead><tr><th>Item</th><th>Project</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+         <thead><tr><th>Project</th><th>Item</th><th>Logged by</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
          <tbody>${items.map(itemRow).join('')}
-           <tr class="parent"><td>All items</td><td></td>` +
+           <tr class="parent"><td>All projects</td><td></td><td></td>` +
              `<td class="hours">${h2(totB)} h</td><td class="hours">${h2(totU)} h</td><td class="hours">${h2(totB + totU)} h</td></tr></tbody>
        </table>`;
     wireRangeSel();
