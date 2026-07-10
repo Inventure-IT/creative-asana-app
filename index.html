@@ -993,21 +993,32 @@ async function renderDashboard() {
     }
     const totB = items.reduce((a, it) => a + it.billable, 0);
     const totU = items.reduce((a, it) => a + it.unbillable, 0);
-    const totE = items.reduce((a, it) => a + it.entries, 0);
-    const itemRow = (it) =>
-      `<tr><td class="muted">${esc(it.project)}</td><td>${esc(it.task)}</td><td>${esc(it.person)}</td>` +
-      `<td class="hours">${h2(it.billable)} h</td><td class="hours">${h2(it.unbillable)} h</td>` +
-      `<td class="hours">${h2(it.billable + it.unbillable)} h</td></tr>`;
-    view.innerHTML = picker +
-      `<p class="drill-total">${items.length} item(s) · ${totE} time entr${totE === 1 ? 'y' : 'ies'} · ` +
-        `${h2(totB + totU)} h logged in ${rangeLabel(dateStart, dateEnd)} ` +
-        `(${h2(totB)} h billable / ${h2(totU)} h unbillable)</p>
-       <table class="tasks">
-         <thead><tr><th>Project</th><th>Item</th><th>Logged by</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
-         <tbody>${items.map(itemRow).join('')}
-           <tr class="parent"><td>All projects</td><td></td><td></td>` +
-             `<td class="hours">${h2(totB)} h</td><td class="hours">${h2(totU)} h</td><td class="hours">${h2(totB + totU)} h</td></tr></tbody>
-       </table>`;
+    const hoursCells = (b, u) =>
+      `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td>`;
+    // One titled section per project: a heading, a table of that project's logged tasks
+    // (with who logged them), and a project total row. `items` is already sorted by project,
+    // so the keys keep project order.
+    const byProject = {};
+    items.forEach(it => (byProject[it.project] = byProject[it.project] || []).push(it));
+    const sections = Object.keys(byProject).map(proj => {
+      const list = byProject[proj];
+      const pB = list.reduce((a, it) => a + it.billable, 0);
+      const pU = list.reduce((a, it) => a + it.unbillable, 0);
+      const body = list.map(it =>
+        `<tr><td>${esc(it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.billable, it.unbillable)}</tr>`).join('');
+      return `<h2 class="section-h">${esc(proj)}</h2>
+        <table class="tasks">
+          <thead><tr><th>Item</th><th>Logged by</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+          <tbody>${body}
+            <tr class="parent"><td>${esc(proj)} total</td><td></td>${hoursCells(pB, pU)}</tr></tbody>
+        </table>`;
+    }).join('');
+    // Grand total across every project, at the very bottom.
+    const grand = `<h2 class="section-h">All projects</h2>
+      <table class="tasks">
+        <tbody><tr class="parent"><td>Total hours logged · ${rangeLabel(dateStart, dateEnd)}</td><td></td>${hoursCells(totB, totU)}</tr></tbody>
+      </table>`;
+    view.innerHTML = picker + sections + grand;
     wireRangeSel();
   }
 
