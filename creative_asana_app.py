@@ -783,6 +783,7 @@ function rangePicker(){
 const TABS = {
   team: { label:'Team Capacity', title:'Team Capacity' },
   actualproj: { label:'Bar Chart', title:'Bar Chart' },
+  actualitems: { label:'Items', title:'Items' },
   estproj: { label:'Bar Chart', title:'Bar Chart' },
   estimated: { label:'Statistics', title:'Statistics' },
   june: { label:'Statistics', title:'Statistics' },
@@ -792,7 +793,7 @@ const TABS = {
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views.
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tabs: ['team', 'estproj', 'estimated'] },
-  { title: 'Actual Hours', tabs: ['capacity', 'actualproj', 'june'] },
+  { title: 'Actual Hours', tabs: ['capacity', 'actualproj', 'june', 'actualitems'] },
   { title: 'Settings', tabs: ['settings'] },
 ];
 
@@ -927,6 +928,7 @@ async function renderDashboard() {
   let groupsConfig = null;   // budget-group definitions (loaded once); combined per current range
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
   let projPersonCache = {};    // per-project person split { gid: { person: {b,u} } }, keyed by 'start:end'
+  let itemStatsCache = {};     // Actual Hours per-item (task) totals, keyed by 'start:end'
   let personLoading = {};      // in-flight guard so the chart + summary don't double-fetch
 
   // Wire the date-range Search button (if the current tab rendered one). Editing the date
@@ -1146,7 +1148,7 @@ async function renderDashboard() {
     }
     delete personLoading[key];
     if (key !== dateStart + ':' + dateEnd) return;   // range changed while loading
-    const agg = {}, byGid = {};
+    const agg = {}, byGid = {}, items = {};
     gids.forEach((g, idx) => {
       const d = details[idx], pm = byGid[g] = {};
       (d.labels || []).forEach((name, i) => {
@@ -1155,13 +1157,62 @@ async function renderDashboard() {
         const p = pm[name] || (pm[name] = { b: 0, u: 0 });
         p.b += d.billable[i]; p.u += d.unbillable[i];
       });
+      // Roll each project's time entries up by task, so the Items tab can list every
+      // worked-on item with its logged hours. Key by project + task so identically
+      // named tasks in different projects stay separate.
+      (d.entries || []).forEach(e => {
+        const ikey = (d.name || '') + ' | ' + e.task;
+        const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', billable: 0, unbillable: 0, entries: 0 });
+        if (e.billable) it.billable += e.hours; else it.unbillable += e.hours;
+        it.entries += 1;
+      });
     });
     projPersonCache[key] = byGid;
     personStatsCache[key] = Object.keys(agg)
       .map(name => ({ name, billable: agg[name].billable, unbillable: agg[name].unbillable }))
       .sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
+    itemStatsCache[key] = Object.values(items)
+      .sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
     // Re-render the whole tab so the chart (which needs the per-project split) draws too.
     if (dashTab === 'actualproj') renderActualProj();
+    else if (dashTab === 'actualitems') renderActualItems();
+  }
+
+  // Actual Hours › Items: every task worked on in the selected range, with its logged
+  // hours (billable / unbillable / total) and a grand total. Reuses the per-item rollup
+  // that loadPersonStats builds from each project's time entries.
+  function renderActualItems() {
+    const picker = rangePicker();
+    if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
+    if (!juneData.some(w => w.hours > 0)) {
+      view.innerHTML = picker + `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+      wireRangeSel(); return;
+    }
+    const key = dateStart + ':' + dateEnd, items = itemStatsCache[key];
+    if (!items) {
+      view.innerHTML = picker + '<p class="muted" id="items-loading">Loading items…</p>';
+      wireRangeSel();
+      loadPersonStats(key);
+      return;
+    }
+    const totB = items.reduce((a, it) => a + it.billable, 0);
+    const totU = items.reduce((a, it) => a + it.unbillable, 0);
+    const totE = items.reduce((a, it) => a + it.entries, 0);
+    const itemRow = (it) =>
+      `<tr><td>${esc(it.task)}</td><td class="muted">${esc(it.project)}</td>` +
+      `<td class="hours">${h2(it.billable)} h</td><td class="hours">${h2(it.unbillable)} h</td>` +
+      `<td class="hours">${h2(it.billable + it.unbillable)} h</td></tr>`;
+    view.innerHTML = picker +
+      `<p class="drill-total">${items.length} item(s) · ${totE} time entr${totE === 1 ? 'y' : 'ies'} · ` +
+        `${h2(totB + totU)} h logged in ${rangeLabel(dateStart, dateEnd)} ` +
+        `(${h2(totB)} h billable / ${h2(totU)} h unbillable)</p>
+       <table class="tasks">
+         <thead><tr><th>Item</th><th>Project</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+         <tbody>${items.map(itemRow).join('')}
+           <tr class="parent"><td>All items</td><td></td>` +
+             `<td class="hours">${h2(totB)} h</td><td class="hours">${h2(totU)} h</td><td class="hours">${h2(totB + totU)} h</td></tr></tbody>
+       </table>`;
+    wireRangeSel();
   }
 
   function renderTeam() {
@@ -1254,6 +1305,7 @@ async function renderDashboard() {
     let title = TABS[dashTab].title;
     if (dashTab === 'june') title = `Statistics · ${rangeLabel(dateStart, dateEnd)}`;
     else if (dashTab === 'actualproj') title = `Bar Chart · ${rangeLabel(dateStart, dateEnd)}`;
+    else if (dashTab === 'actualitems') title = `Items · ${rangeLabel(dateStart, dateEnd)}`;
     document.getElementById('tab-title').textContent = title;
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     subEl.textContent = sub; subEl.style.display = sub ? '' : 'none';
@@ -1265,6 +1317,8 @@ async function renderDashboard() {
       renderEstProj();
     } else if (dashTab === 'actualproj') {
       renderActualProj();
+    } else if (dashTab === 'actualitems') {
+      renderActualItems();
     } else if (dashTab === 'estimated') {
       estData ? cardGrid(estData, estCard, 'No projects.') : (view.innerHTML = loading);
     } else if (dashTab === 'june') {
@@ -1330,14 +1384,14 @@ async function renderDashboard() {
   // Loads the selected range's "Actual Hours" widgets (used on its own when the range changes).
   async function loadJune(refresh) {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
-    personStatsCache = {}; projPersonCache = {}; personLoading = {};   // range/refresh changed — recompute per-person splits
+    personStatsCache = {}; projPersonCache = {}; itemStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
     try {
       const url = `/api/june?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await fetch(url).then(r => r.json());
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
       juneData = j;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
-    if (['june', 'capacity', 'actualproj'].includes(dashTab)) renderTab();
+    if (['june', 'capacity', 'actualproj', 'actualitems'].includes(dashTab)) renderTab();
   }
 
   async function loadAll(refresh) {
@@ -1564,6 +1618,18 @@ route();
 """
 
 
+# The shared UI script references a few constants that the static build (build_static.py)
+# injects via its PREPEND. When serving the page ourselves we inject the same values here,
+# in a <script> that runs before the UI script, so identifiers like TEAM_MEMBERS are defined.
+def render_page():
+    boot = "<script>\nconst TEAM_MEMBERS = %s;\n</script>\n" % json.dumps(TEAM_MEMBERS)
+    return PAGE.replace('<div class="wrap" id="app"></div>\n<script>',
+                        '<div class="wrap" id="app"></div>\n' + boot + '<script>', 1)
+
+
+PAGE_HTML = render_page()
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parts = self.path.split("?")
@@ -1590,7 +1656,7 @@ class Handler(BaseHTTPRequestHandler):
                 gid = path.rsplit("/", 1)[-1]
                 return self._json(200, get_detail(gid, refresh=refresh))
             if path == "/" or path.startswith("/index"):
-                return self._send(200, "text/html; charset=utf-8", PAGE.encode())
+                return self._send(200, "text/html; charset=utf-8", PAGE_HTML.encode())
             self._send(404, "text/plain", b"Not found")
         except urllib.error.HTTPError as e:
             self._json(502, {"error": f"Asana {e.code}"})
