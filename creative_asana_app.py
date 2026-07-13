@@ -568,6 +568,12 @@ PAGE = r"""<!DOCTYPE html>
   .content .head { margin-bottom:4px; }
   .content h1 { font-size:20px; margin:0; }
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
+  /* Tasks tab: total-hours summary banner */
+  .summary-bar { display:flex; gap:24px; background:var(--panel2); border:1px solid var(--border);
+                 border-radius:12px; padding:18px 24px; margin:6px 0 4px; }
+  .summary-stat { display:flex; flex-direction:column; gap:4px; }
+  .summary-stat .n { font-size:28px; font-weight:700; color:var(--green-d); font-variant-numeric:tabular-nums; }
+  .summary-stat .l { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .card.june:hover { border-color:var(--green); }
   .card.june .stat .n, .card.june .go { color:var(--green-d); }
   .card.june .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
@@ -783,7 +789,7 @@ function rangePicker(){
 const TABS = {
   team: { label:'Team Capacity', title:'Team Capacity' },
   actualproj: { label:'Bar Chart', title:'Bar Chart' },
-  actualitems: { label:'Items', title:'Items' },
+  actualitems: { label:'Tasks', title:'Tasks' },
   estproj: { label:'Bar Chart', title:'Bar Chart' },
   estimated: { label:'Statistics', title:'Statistics' },
   june: { label:'Statistics', title:'Statistics' },
@@ -1203,6 +1209,12 @@ async function renderDashboard() {
     const totU = items.reduce((a, it) => a + it.unbillable, 0);
     const hoursCells = (b, u) =>
       `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td>`;
+    // Headline summary: total hours logged across every project for the selected range.
+    const summary = `<div class="summary-bar">
+      <div class="summary-stat"><span class="n">${h2(totB + totU)} h</span><span class="l">Total hours logged · ${rangeLabel(dateStart, dateEnd)}</span></div>
+      <div class="summary-stat"><span class="n">${h2(totB)} h</span><span class="l">Billable</span></div>
+      <div class="summary-stat"><span class="n">${h2(totU)} h</span><span class="l">Unbillable</span></div>
+    </div>`;
     // One titled section per project: a heading, a table of that project's logged tasks
     // (with who logged them), and a project total row. `items` is already sorted by project,
     // so the keys keep project order.
@@ -1216,17 +1228,12 @@ async function renderDashboard() {
         `<tr><td>${esc(it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.billable, it.unbillable)}</tr>`).join('');
       return `<h2 class="section-h">${esc(proj)}</h2>
         <table class="tasks">
-          <thead><tr><th>Item</th><th>Logged by</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+          <thead><tr><th>Task</th><th>Logged by</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
           <tbody>${body}
-            <tr class="parent"><td>${esc(proj)} total</td><td></td>${hoursCells(pB, pU)}</tr></tbody>
+            <tr class="parent"><td>Total</td><td></td>${hoursCells(pB, pU)}</tr></tbody>
         </table>`;
     }).join('');
-    // Grand total across every project, at the very bottom.
-    const grand = `<h2 class="section-h">All projects</h2>
-      <table class="tasks">
-        <tbody><tr class="parent"><td>Total hours logged · ${rangeLabel(dateStart, dateEnd)}</td><td></td>${hoursCells(totB, totU)}</tr></tbody>
-      </table>`;
-    view.innerHTML = picker + sections + grand;
+    view.innerHTML = picker + summary + sections;
     wireRangeSel();
   }
 
@@ -1320,7 +1327,7 @@ async function renderDashboard() {
     let title = TABS[dashTab].title;
     if (dashTab === 'june') title = `Statistics · ${rangeLabel(dateStart, dateEnd)}`;
     else if (dashTab === 'actualproj') title = `Bar Chart · ${rangeLabel(dateStart, dateEnd)}`;
-    else if (dashTab === 'actualitems') title = `Items · ${rangeLabel(dateStart, dateEnd)}`;
+    else if (dashTab === 'actualitems') title = `Tasks · ${rangeLabel(dateStart, dateEnd)}`;
     document.getElementById('tab-title').textContent = title;
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     subEl.textContent = sub; subEl.style.display = sub ? '' : 'none';
