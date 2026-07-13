@@ -581,7 +581,7 @@ function rangePicker(){
 const TABS = {
   team: { label:'Team Capacity', title:'Team Capacity' },
   actualproj: { label:'Bar Chart', title:'Bar Chart' },
-  actualitems: { label:'Tasks', title:'Tasks' },
+  actualitems: { label:'Tasks (WIP)', title:'Tasks (WIP)' },
   estproj: { label:'Bar Chart', title:'Bar Chart' },
   estimated: { label:'Statistics', title:'Statistics' },
   june: { label:'Statistics', title:'Statistics' },
@@ -1119,7 +1119,7 @@ async function renderDashboard() {
     let title = TABS[dashTab].title;
     if (dashTab === 'june') title = `Statistics · ${rangeLabel(dateStart, dateEnd)}`;
     else if (dashTab === 'actualproj') title = `Bar Chart · ${rangeLabel(dateStart, dateEnd)}`;
-    else if (dashTab === 'actualitems') title = `Tasks · ${rangeLabel(dateStart, dateEnd)}`;
+    else if (dashTab === 'actualitems') title = `Tasks (WIP) · ${rangeLabel(dateStart, dateEnd)}`;
     document.getElementById('tab-title').textContent = title;
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     subEl.textContent = sub; subEl.style.display = sub ? '' : 'none';
