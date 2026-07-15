@@ -37,7 +37,7 @@ PROJECTS = [
     {"gid": "1214228966572531", "name": "CMD: Pathologic"},
     {"gid": "1214228966572526", "name": "CMD: Products"},
     {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic"},
-    {"gid": "1214228966572541", "name": "DocSmith.md"},
+    {"gid": "1214228966572541", "name": "DocSmith.md MSA", "cap": 24},
     {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2026"},
     {"gid": "1214755322546416", "name": "Project Twilight"},
     {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"},
@@ -52,10 +52,11 @@ PROJECTS = [
 # adds a single combined bucket to the Monthly Capacity tab (summing its members'
 # billable hours against `cap`). Members are referenced by project gid.
 GROUPS = [
-    {"name": "CMD", "cap": 108, "gids": [
+    {"name": "CMD", "cap": 244, "gids": [
         "1214228966572536",   # CMD: Concierge Clinics
         "1214228966572531",   # CMD: Pathologic
         "1214228966572526",   # CMD: Products
+        "1216154609521581",   # NuNu
     ]},
 ]
 
