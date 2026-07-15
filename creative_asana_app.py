@@ -783,6 +783,8 @@ let dashTab = 'team';   // Team Capacity is the default tab
 // Estimated-hours Bar Chart filters, remembered across renders/tab switches.
 let estStatusFilter = null;    // Set of enabled status columns; null = show all statuses
 let estHideUnassigned = false; // when true, drop the Unassigned assignee from the chart
+// Team Capacity: hide the Unassigned bar by default; toggle remembered across renders.
+let teamShowUnassigned = false;
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
 let dateStart = '2026-06-01', dateEnd = '2026-06-30';
 function fmtDate(d){ const [y,m,day]=d.split('-').map(Number); return new Date(y, m-1, day).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
@@ -1298,8 +1300,19 @@ async function renderDashboard() {
 
   function renderTeam() {
     // Bar chart of estimated hours per assignee, with a dashed line at the 128 h target.
-    const d = teamData;
-    view.innerHTML = '<div class="chart-box"><canvas id="chart"></canvas></div>';
+    // Unassigned is hidden by default; the toolbar toggle brings it back.
+    const src = teamData, hasU = src.labels.includes('Unassigned');
+    const keep = src.labels.map((_, i) => i).filter(i => teamShowUnassigned || src.labels[i] !== 'Unassigned');
+    const d = { cap: src.cap,
+      labels: keep.map(i => src.labels[i]), hours: keep.map(i => src.hours[i]),
+      estimated: keep.map(i => src.estimated[i]), actual: keep.map(i => src.actual[i]),
+      counts: keep.map(i => src.counts[i]) };
+    const toolbar = hasU
+      ? `<div class="toolbar team-toolbar"><label class="chk"><input type="checkbox" id="team-show-unassigned" ${teamShowUnassigned ? 'checked' : ''}>Include Unassigned</label></div>`
+      : '';
+    view.innerHTML = toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
+    const cb = document.getElementById('team-show-unassigned');
+    if (cb) cb.onchange = () => { teamShowUnassigned = cb.checked; renderTeam(); };
     if (chart) { chart.destroy(); chart = null; }
     const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : (h > d.cap ? '#e26b66' : '#4cc085'));
     chart = new Chart(document.getElementById('chart'), {
