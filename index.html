@@ -37,6 +37,11 @@
   .toolbar select, .toolbar input[type=date] { background:var(--panel2); color:var(--text);
                     border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer; }
   .toolbar input[type=date]::-webkit-calendar-picker-indicator { filter:invert(.8); cursor:pointer; }
+  .toolbar.est-toolbar { flex-wrap:wrap; }
+  .toolbar .tb-label { font-weight:600; color:var(--text); margin-left:0; }
+  .toolbar .chk { display:inline-flex; align-items:center; gap:5px; margin-left:0; cursor:pointer; }
+  .toolbar .chk input { cursor:pointer; margin:0; }
+  .toolbar .tb-sep { width:1px; align-self:stretch; background:var(--border); margin:2px 4px; }
   /* dashboard layout: left nav + content */
   .layout { display:flex; gap:24px; align-items:flex-start; }
   .sidebar { flex:0 0 210px; position:sticky; top:32px; background:var(--panel); border-radius:12px;
@@ -567,6 +572,9 @@ function setCrumbs(items) {
 
 // Which dashboard tab is active; remembered across renders/drill-ins.
 let dashTab = 'team';   // Team Capacity is the default tab
+// Estimated-hours Bar Chart filters, remembered across renders/tab switches.
+let estStatusFilter = null;    // Set of enabled status columns; null = show all statuses
+let estHideUnassigned = false; // when true, drop the Unassigned assignee from the chart
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
 let dateStart = '2026-06-01', dateEnd = '2026-06-30';
 function fmtDate(d){ const [y,m,day]=d.split('-').map(Number); return new Date(y, m-1, day).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
@@ -757,25 +765,76 @@ async function renderDashboard() {
   }
 
   function renderEstProj() {
-    // Stacked bar chart of estimated hours per project, split by assignee. Project list/caps
-    // come from estData; the per-person split is inverted out of teamData.breakdown.
+    // Stacked bar chart of estimated hours per project, split by assignee, with filters for
+    // the status column and for hiding Unassigned. Caps/gids come from estData; the per-person
+    // split and per-status breakdown are inverted out of teamData.breakdown's task rows.
     if (!estData || !teamData) { view.innerHTML = '<p class="muted">Loading widgets…</p>'; return; }
-    // Invert the team breakdown (person → projects) into project name → { person: est hours }.
-    const byProject = {};
-    Object.entries(teamData.breakdown).forEach(([person, projs]) => (projs || []).forEach(p => {
-      if (!p.estimated) return;
-      (byProject[p.project] = byProject[p.project] || {});
-      byProject[p.project][person] = (byProject[p.project][person] || 0) + p.estimated;
-    }));
-    const rows = estData.filter(w => w.hours > 0).slice().sort((a, b) => b.hours - a.hours);
-    if (!rows.length) { view.innerHTML = '<p class="muted">No estimated hours.</p>'; return; }
-    view.innerHTML = '<div class="chart-box"><canvas id="chart"></canvas></div>' +
+    const NO_STATUS = '(No status)';
+    // Every status column seen in the data → drives the filter checkboxes.
+    const allStatuses = new Set();
+    Object.values(teamData.breakdown).forEach(projs => (projs || []).forEach(p =>
+      (p.tasks || []).forEach(t => allStatuses.add(t.status || NO_STATUS))));
+    const statusList = [...allStatuses].sort((a, b) =>
+      a === NO_STATUS ? 1 : b === NO_STATUS ? -1 : a.localeCompare(b));
+    // Forget any remembered status that no longer exists; an empty set collapses back to "all".
+    if (estStatusFilter) {
+      estStatusFilter = new Set([...estStatusFilter].filter(s => allStatuses.has(s)));
+      if (!estStatusFilter.size) estStatusFilter = null;
+    }
+    const statusOn = s => !estStatusFilter || estStatusFilter.has(s);
+
+    // Toolbar: one checkbox per status column, then an "Exclude Unassigned" toggle.
+    const toolbar =
+      '<div class="toolbar est-toolbar">' +
+        '<span class="tb-label">Status</span>' +
+        statusList.map(s =>
+          `<label class="chk"><input type="checkbox" class="est-status" value="${esc(s)}" ${statusOn(s) ? 'checked' : ''}>${esc(s)}</label>`
+        ).join('') +
+        '<span class="tb-sep"></span>' +
+        `<label class="chk"><input type="checkbox" id="est-hide-unassigned" ${estHideUnassigned ? 'checked' : ''}>Exclude Unassigned</label>` +
+      '</div>';
+    const wireFilters = () => {
+      view.querySelectorAll('.est-status').forEach(cb => cb.onchange = () => {
+        const on = [...view.querySelectorAll('.est-status')].filter(c => c.checked).map(c => c.value);
+        estStatusFilter = (on.length === statusList.length) ? null : new Set(on);
+        renderEstProj();
+      });
+      const hu = view.querySelector('#est-hide-unassigned');
+      if (hu) hu.onchange = () => { estHideUnassigned = hu.checked; renderEstProj(); };
+    };
+
+    // Aggregate estimated hours per project from the filtered task rows: total, item count,
+    // and the per-person split for the stacked bars.
+    const capOf = Object.fromEntries(estData.map(w => [w.name, w.cap == null ? null : w.cap]));
+    const gidOf = Object.fromEntries(estData.map(w => [w.name, w.gid]));
+    const agg = {};
+    Object.entries(teamData.breakdown).forEach(([person, projs]) => {
+      if (estHideUnassigned && person === 'Unassigned') return;
+      (projs || []).forEach(p => (p.tasks || []).forEach(t => {
+        if (!statusOn(t.status || NO_STATUS)) return;
+        const a = agg[p.project] || (agg[p.project] = { hours: 0, ntasks: 0, persons: {} });
+        a.hours += t.estimated || 0;
+        a.ntasks += 1;
+        a.persons[person] = (a.persons[person] || 0) + (t.estimated || 0);
+      }));
+    });
+    const rows = Object.entries(agg)
+      .map(([name, a]) => ({ name, gid: gidOf[name], cap: name in capOf ? capOf[name] : null,
+        hours: Math.round(a.hours * 100) / 100, ntasks: a.ntasks, persons: a.persons }))
+      .filter(w => w.hours > 0)
+      .sort((a, b) => b.hours - a.hours);
+    if (!rows.length) {
+      view.innerHTML = toolbar + '<p class="muted">No estimated hours match the current filters.</p>';
+      wireFilters(); return;
+    }
+    view.innerHTML = toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>' +
       '<div id="est-summary"></div>';
+    wireFilters();
     if (chart) { chart.destroy(); chart = null; }
     const labels = rows.map(w => w.name);
     const gids = rows.map(w => w.gid), ntasks = rows.map(w => w.ntasks);
     const caps = rows.map(w => (w.cap == null ? null : w.cap));
-    const datasets = personStacks(rows, w => byProject[w.name] || {});
+    const datasets = personStacks(rows, w => w.persons);
     const top = Math.max(...rows.map(w => w.hours), ...caps.filter(c => c != null), 1);
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
