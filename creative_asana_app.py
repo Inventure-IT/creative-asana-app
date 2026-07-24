@@ -787,8 +787,15 @@ let estStatusFilter = null;    // Set of enabled status columns; null = show all
 let estHideUnassigned = false; // when true, drop the Unassigned assignee from the chart
 // Team Capacity: hide the Unassigned bar by default; toggle remembered across renders.
 let teamShowUnassigned = false;
+// Task List: filter to a single assignee (person who logged the time); null = show everyone.
+let itemFilterPerson = null;
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
-let dateStart = '2026-06-01', dateEnd = '2026-06-30';
+// Defaults to the current calendar month so the dashboard opens on "this month" every time.
+function monthRange(now){ const d = now || new Date(), p = n => String(n).padStart(2, '0'),
+  y = d.getFullYear(), m = d.getMonth(),
+  first = `${y}-${p(m+1)}-01`, last = `${y}-${p(m+1)}-${p(new Date(y, m+1, 0).getDate())}`;
+  return [first, last]; }
+let [dateStart, dateEnd] = monthRange();
 function fmtDate(d){ const [y,m,day]=d.split('-').map(Number); return new Date(y, m-1, day).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
 function rangeLabel(s, e){ return fmtDate(s) + ' – ' + fmtDate(e); }
 function rangePicker(){
@@ -801,7 +808,7 @@ function rangePicker(){
 const TABS = {
   team: { label:'Team Capacity', title:'Team Capacity' },
   actualproj: { label:'Bar Chart', title:'Bar Chart' },
-  actualitems: { label:'Tasks (WIP)', title:'Tasks (WIP)' },
+  actualitems: { label:'Task List', title:'Task List' },
   estproj: { label:'Bar Chart', title:'Bar Chart' },
   estimated: { label:'Statistics', title:'Statistics' },
   june: { label:'Statistics', title:'Statistics' },
@@ -1261,20 +1268,32 @@ async function renderDashboard() {
       view.innerHTML = picker + `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
       wireRangeSel(); return;
     }
-    const key = dateStart + ':' + dateEnd, items = itemStatsCache[key];
-    if (!items) {
+    const key = dateStart + ':' + dateEnd, allItems = itemStatsCache[key];
+    if (!allItems) {
       view.innerHTML = picker + '<p class="muted" id="items-loading">Loading items…</p>';
       wireRangeSel();
       loadPersonStats(key);
       return;
     }
+    // Assignee filter: dropdown of everyone who logged time in this range. If the remembered
+    // selection isn't present in this range, fall back to showing everyone.
+    const people = [...new Set(allItems.map(it => it.person))].sort((a, b) => a.localeCompare(b));
+    if (itemFilterPerson && !people.includes(itemFilterPerson)) itemFilterPerson = null;
+    const items = itemFilterPerson ? allItems.filter(it => it.person === itemFilterPerson) : allItems;
+    const filterBar = `<div class="toolbar">
+      <label for="item-assignee">Assignee</label>
+      <select id="item-assignee">
+        <option value="">All assignees</option>
+        ${people.map(p => `<option value="${esc(p)}"${p === itemFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
+      </select>
+    </div>`;
     const totB = items.reduce((a, it) => a + it.billable, 0);
     const totU = items.reduce((a, it) => a + it.unbillable, 0);
     const hoursCells = (b, u) =>
       `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td>`;
     // Headline summary: total hours logged across every project for the selected range.
     const summary = `<div class="summary-bar">
-      <div class="summary-stat"><span class="n">${h2(totB + totU)} h</span><span class="l">Total hours logged · ${rangeLabel(dateStart, dateEnd)}</span></div>
+      <div class="summary-stat"><span class="n">${h2(totB + totU)} h</span><span class="l">Total hours logged</span></div>
       <div class="summary-stat"><span class="n">${h2(totB)} h</span><span class="l">Billable</span></div>
       <div class="summary-stat"><span class="n">${h2(totU)} h</span><span class="l">Unbillable</span></div>
     </div>`;
@@ -1296,8 +1315,11 @@ async function renderDashboard() {
             <tr class="parent"><td>Total</td><td></td>${hoursCells(pB, pU)}</tr></tbody>
         </table>`;
     }).join('');
-    view.innerHTML = picker + summary + sections;
+    const noneMsg = items.length ? '' : `<p class="muted">No hours logged by ${esc(itemFilterPerson)} in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+    view.innerHTML = picker + filterBar + summary + (noneMsg || sections);
     wireRangeSel();
+    const sel = document.getElementById('item-assignee');
+    if (sel) sel.onchange = () => { itemFilterPerson = sel.value || null; renderActualItems(); };
   }
 
   function renderTeam() {
@@ -1401,7 +1423,7 @@ async function renderDashboard() {
     let title = TABS[dashTab].title;
     if (dashTab === 'june') title = `Statistics · ${rangeLabel(dateStart, dateEnd)}`;
     else if (dashTab === 'actualproj') title = `Bar Chart · ${rangeLabel(dateStart, dateEnd)}`;
-    else if (dashTab === 'actualitems') title = `Tasks (WIP) · ${rangeLabel(dateStart, dateEnd)}`;
+    else if (dashTab === 'actualitems') title = `Task List · ${rangeLabel(dateStart, dateEnd)}`;
     document.getElementById('tab-title').textContent = title;
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     subEl.textContent = sub; subEl.style.display = sub ? '' : 'none';
