@@ -623,6 +623,8 @@ PAGE = r"""<!DOCTYPE html>
   table.tasks td { padding:9px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
   table.tasks tr.parent td { font-weight:600; }
   table.tasks tr.sub td { font-weight:400; color:var(--muted); }
+  .proj-toggle { display:inline-flex; align-items:center; gap:8px; cursor:pointer; }
+  .proj-toggle input { cursor:pointer; margin:0; flex:0 0 auto; }
   .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; background:var(--panel2); color:var(--text); }
   .sub-name { padding-left:22px; position:relative; }
   .sub-name::before { content:'↳'; position:absolute; left:6px; color:#5a616b; }
@@ -789,6 +791,10 @@ let estHideUnassigned = false; // when true, drop the Unassigned assignee from t
 // clicked open into its member projects; null = show the combined bucket. One per chart.
 let estDrillGroup = null;
 let actualDrillGroup = null;
+// Projects unchecked in the "By project" summary tables — hidden from the bar chart above only
+// (the table still lists them so they can be re-checked). Keyed by the row's display name.
+let estHiddenProjects = new Set();
+let actualHiddenProjects = new Set();
 // Team Capacity: hide the Unassigned bar by default; toggle remembered across renders.
 let teamShowUnassigned = false;
 // Task List: filter to a single assignee (person who logged the time); null = show everyone.
@@ -1190,28 +1196,35 @@ async function renderDashboard() {
       loadPersonStats(key);
       return;
     }
-    const labels = rows.map(w => w.name);
-    const gids = rows.map(w => w.gid), ents = rows.map(w => w.nentries);
-    const caps = rows.map(w => (w.cap == null ? null : w.cap));
+    // Checkboxes in the By-project table hide projects from the chart only.
+    const chartRows = rows.filter(w => !actualHiddenProjects.has(w.name));
+    if (!chartRows.length) {
+      const cbox = view.querySelector('.chart-box');
+      if (cbox) cbox.innerHTML = '<p class="muted" style="padding:24px">All projects hidden — re-check a project below to show it in the chart.</p>';
+      return;
+    }
+    const labels = chartRows.map(w => w.name);
+    const gids = chartRows.map(w => w.gid), ents = chartRows.map(w => w.nentries);
+    const caps = chartRows.map(w => (w.cap == null ? null : w.cap));
     // Total logged hours (billable + unbillable) per person for a row; groups sum their members.
     const rowPersons = (w) => {
       const src = w.isGroup ? (w.gids || []) : [w.gid], out = {};
       src.forEach(g => { const m = pcache[g]; if (m) Object.entries(m).forEach(([p, v]) => { out[p] = (out[p] || 0) + v.b + v.u; }); });
       return out;
     };
-    const datasets = personStacks(rows, rowPersons);
+    const datasets = personStacks(chartRows, rowPersons);
     // Keep every budget marker visible even if it sits above the tallest bar.
-    const top = Math.max(...rows.map(w => w.hours), ...caps.filter(c => c != null), 1);
+    const top = Math.max(...chartRows.map(w => w.hours), ...caps.filter(c => c != null), 1);
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
       data: { labels, datasets },
       options: { responsive: true, maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         // Combined buckets split into their projects; single projects open their detail.
-        onClick: (evt, els) => { if (!els.length) return; const r = rows[els[0].index];
+        onClick: (evt, els) => { if (!els.length) return; const r = chartRows[els[0].index];
           if (r.isGroup) { actualDrillGroup = r.name; renderActualProj(); }
           else if (r.gid) location.hash = '#/june/' + r.gid; },
-        onHover: (evt, els) => { const r = els.length ? rows[els[0].index] : null;
+        onHover: (evt, els) => { const r = els.length ? chartRows[els[0].index] : null;
           evt.native.target.style.cursor = (r && (r.isGroup || r.gid)) ? 'pointer' : 'default'; },
         scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
                   y: { stacked: true, beginAtZero: true, suggestedMax: top * 1.05,
@@ -1221,7 +1234,7 @@ async function renderDashboard() {
             callbacks: {
               label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
               afterBody: items => {
-                const r = rows[items[0].dataIndex], lines = [`Total ${h2(r.hours)} h · ${r.nentries} entries`];
+                const r = chartRows[items[0].dataIndex], lines = [`Total ${h2(r.hours)} h · ${r.nentries} entries`];
                 if (r.cap != null) lines.push(`Budget ${h2(r.cap)} h billable`);
                 if (r.isGroup) {
                   lines.push('', 'By project:');
@@ -1247,6 +1260,14 @@ async function renderDashboard() {
     const statRow = (name, b, u, cls) =>
       `<tr${cls ? ' class="' + cls + '"' : ''}><td>${esc(name)}</td>` +
       `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td></tr>`;
+    // Same as statRow but the Project cell leads with a checkbox that toggles the project's
+    // visibility in the bar chart above (unchecking adds it to actualHiddenProjects).
+    const projStatRow = (name, b, u) => {
+      const checked = actualHiddenProjects.has(name) ? '' : ' checked';
+      const attr = esc(name).replace(/"/g, '&quot;');
+      return `<tr><td><label class="proj-toggle"><input type="checkbox" class="proj-check" data-proj="${attr}"${checked}> ${esc(name)}</label></td>` +
+        `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td></tr>`;
+    };
 
     // By project — mirrors the chart's rows (combined buckets / drilled-in members).
     const projRows = (rows_ || juneData.filter(w => w.hours > 0)).slice().sort((a, b) => b.hours - a.hours);
@@ -1256,7 +1277,7 @@ async function renderDashboard() {
       `<h2 class="section-h">By project</h2>
        <table class="tasks">
          <thead><tr><th>Project</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
-         <tbody>${projRows.map(w => statRow(w.name, w.billable_hours, w.unbillable_hours)).join('')}
+         <tbody>${projRows.map(w => projStatRow(w.name, w.billable_hours, w.unbillable_hours)).join('')}
            ${statRow('All projects', pjB, pjU, 'parent')}</tbody>
        </table>`;
 
@@ -1286,6 +1307,15 @@ async function renderDashboard() {
          </table>`;
     }
     box.innerHTML = projTable + personTable;
+    // Wire the By-project checkboxes: toggling one hides/shows that project in the chart
+    // (kept in actualHiddenProjects) and re-renders the tab.
+    box.querySelectorAll('.proj-check').forEach(cb => {
+      cb.onchange = () => {
+        const p = cb.getAttribute('data-proj');
+        if (cb.checked) actualHiddenProjects.delete(p); else actualHiddenProjects.add(p);
+        renderActualProj();
+      };
+    });
     if (!people) loadPersonStats(key);
   }
 
