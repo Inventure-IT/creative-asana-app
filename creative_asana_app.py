@@ -799,7 +799,9 @@ let actualDrillGroup = null;
 let estHiddenProjects = new Set();
 let actualHiddenProjects = new Set();
 // Team Capacity: hide the Unassigned bar by default; toggle remembered across renders.
+// Separate flag for the Actual Hours copy so the two Team Capacity tabs toggle independently.
 let teamShowUnassigned = false;
+let teamActualShowUnassigned = false;
 // Task List: filter to a single assignee (person who logged the time); null = show everyone.
 let itemFilterPerson = null;
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
@@ -824,13 +826,14 @@ const TABS = {
   actualitems: { label:'Task List', title:'Task List' },
   estproj: { label:'Bar Chart', title:'Bar Chart' },
   estimated: { label:'Statistics', title:'Statistics' },
+  teamactual: { label:'Team Capacity', title:'Team Capacity' },
   capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity' },
   settings: { label:'Graph Colors', title:'Graph Colors', sub:'Pick a color for each person — saved in this browser and applied to every per-person chart.' },
 };
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views.
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tabs: ['team', 'estproj', 'estimated'] },
-  { title: 'Actual Hours', tabs: ['capacity', 'actualproj', 'actualitems'] },
+  { title: 'Actual Hours', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems'] },
   { title: 'Settings', tabs: ['settings'] },
 ];
 
@@ -1139,15 +1142,32 @@ async function renderDashboard() {
     const statRow = (name, hours, ntasks, cls) =>
       `<tr${cls ? ' class="' + cls + '"' : ''}><td>${esc(name)}</td>` +
       `<td class="hours">${h2(hours)} h</td><td class="hours">${ntasks}</td></tr>`;
+    // Same as statRow but the Project cell leads with a checkbox that toggles the project's
+    // visibility in the bar chart above (unchecking adds it to estHiddenProjects).
+    const projStatRow = (name, hours, ntasks) => {
+      const checked = estHiddenProjects.has(name) ? '' : ' checked';
+      const attr = esc(name).replace(/"/g, '&quot;');
+      return `<tr><td><label class="proj-toggle"><input type="checkbox" class="proj-check" data-proj="${attr}"${checked}> ${esc(name)}</label></td>` +
+        `<td class="hours">${h2(hours)} h</td><td class="hours">${ntasks}</td></tr>`;
+    };
     const totH = rows.reduce((a, w) => a + w.hours, 0);
     const totT = rows.reduce((a, w) => a + w.ntasks, 0);
     box.innerHTML =
       `<h2 class="section-h">By project</h2>
        <table class="tasks">
          <thead><tr><th>Project</th><th class="hours">Estimated</th><th class="hours">Tasks</th></tr></thead>
-         <tbody>${rows.map(w => statRow(w.name, w.hours, w.ntasks)).join('')}
+         <tbody>${rows.map(w => projStatRow(w.name, w.hours, w.ntasks)).join('')}
            ${statRow('All projects', totH, totT, 'parent')}</tbody>
        </table>`;
+    // Wire the By-project checkboxes: toggling one hides/shows that project in the chart
+    // (kept in estHiddenProjects) and re-renders the tab.
+    box.querySelectorAll('.proj-check').forEach(cb => {
+      cb.onchange = () => {
+        const p = cb.getAttribute('data-proj');
+        if (cb.checked) estHiddenProjects.delete(p); else estHiddenProjects.add(p);
+        renderEstProj();
+      };
+    });
   }
 
   function renderActualProj() {
@@ -1473,7 +1493,7 @@ async function renderDashboard() {
     });
   }
 
-  function showBreakdown(name) {
+  function showBreakdown(name, back) {
     if (chart) { chart.destroy(); chart = null; }
     const rows_ = (teamData.breakdown[name] || []).slice().sort((a, b) => b.remaining - a.remaining);
     const totEst = rows_.reduce((a, r) => a + r.estimated, 0);
@@ -1513,7 +1533,44 @@ async function renderDashboard() {
          <thead><tr><th>Project / Task</th><th>Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>`;
-    document.getElementById('tochart').onclick = renderTeam;
+    document.getElementById('tochart').onclick = back || renderTeam;
+  }
+
+  // Actual Hours copy of Team Capacity: same chart, but bars show hours actually logged per
+  // person (vs. the 128 h target) instead of remaining capacity. Data comes from the same
+  // /api/assignees pull, so it reflects tracked totals and is not scoped to the date range.
+  function renderTeamActual() {
+    const src = teamData, hasU = src.labels.includes('Unassigned');
+    const keep = src.labels.map((_, i) => i).filter(i => teamActualShowUnassigned || src.labels[i] !== 'Unassigned');
+    const d = { cap: src.cap,
+      labels: keep.map(i => src.labels[i]), hours: keep.map(i => src.hours[i]),
+      estimated: keep.map(i => src.estimated[i]), actual: keep.map(i => src.actual[i]),
+      counts: keep.map(i => src.counts[i]) };
+    const toolbar = hasU
+      ? `<div class="toolbar team-toolbar"><label class="chk"><input type="checkbox" id="team-show-unassigned" ${teamActualShowUnassigned ? 'checked' : ''}>Include Unassigned</label></div>`
+      : '';
+    view.innerHTML = toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
+    const cb = document.getElementById('team-show-unassigned');
+    if (cb) cb.onchange = () => { teamActualShowUnassigned = cb.checked; renderTeamActual(); };
+    if (chart) { chart.destroy(); chart = null; }
+    const colors = d.actual.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : (h > d.cap ? '#e26b66' : '#4cc085'));
+    chart = new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: { labels: d.labels, datasets: [{ label: 'Actual hours', data: d.actual,
+        backgroundColor: colors, borderColor: colors, borderWidth: 1,
+        _counts: d.counts, _est: d.estimated, _rem: d.hours }] },
+      options: { responsive: true, maintainAspectRatio: false,
+        onClick: (evt, els) => { if (els.length) showBreakdown(d.labels[els[0].index], renderTeamActual); },
+        onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+        scales: { x: { title: { display: true, text: 'Assignee' },
+                       ticks: { callback: (v, i) => [d.labels[i], h2(d.actual[i]) + ' h'] } },
+                  y: { beginAtZero: true, suggestedMax: Math.max(d.cap * 1.1, ...d.actual, 1),
+                       title: { display: true, text: 'Actual hours' }, ticks: { callback: v => h2(v) } } },
+        plugins: { legend: { display: false }, capLine: { value: d.cap },
+          tooltip: { callbacks: {
+            label: ctx => `Actual: ${h2(ctx.parsed.y)} h of ${h2(d.cap)} (${(ctx.parsed.y / d.cap * 100).toFixed(0)}%)`,
+            afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} · remaining ${h2(ctx.dataset._rem[ctx.dataIndex])} · ${ctx.dataset._counts[ctx.dataIndex]} items` } } } }
+    });
   }
 
   // One central "Updated" label by the Refresh button, reflecting the data behind the
@@ -1523,7 +1580,7 @@ async function renderDashboard() {
     if (!el) return;
     let u = null;
     if (dashTab === 'settings') u = null;
-    else if (dashTab === 'team') u = teamData && teamData.updated;
+    else if (dashTab === 'team' || dashTab === 'teamactual') u = teamData && teamData.updated;
     else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
     else u = juneData && juneData[0] && juneData[0].updated;
     el.textContent = u ? ('Updated ' + u) : '';
@@ -1544,6 +1601,8 @@ async function renderDashboard() {
 
     if (dashTab === 'team') {
       teamData ? renderTeam() : (view.innerHTML = loading);
+    } else if (dashTab === 'teamactual') {
+      teamData ? renderTeamActual() : (view.innerHTML = loading);
     } else if (dashTab === 'estproj') {
       renderEstProj();
     } else if (dashTab === 'actualproj') {
