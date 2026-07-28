@@ -78,6 +78,9 @@
   .grp-row { display:flex; justify-content:space-between; align-items:center; gap:10px;
              padding:7px 6px; border-radius:7px; font-size:13px; cursor:pointer; }
   .grp-row:hover { background:var(--panel2); }
+  /* On highlighted (.cap) bucket cards the card bg is already --panel2, so member rows need a
+     lighter hover to stay visible. */
+  .card.cap .grp-row:hover { background:#414854; }
   .grp-row .grp-name { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .grp-row .grp-h { color:var(--green-d); font-variant-numeric:tabular-nums; white-space:nowrap; }
   /* detail */
@@ -589,9 +592,7 @@ let actualDrillGroup = null;
 let estHiddenProjects = new Set();
 let actualHiddenProjects = new Set();
 // Team Capacity: hide the Unassigned bar by default; toggle remembered across renders.
-// Separate flag for the Actual Hours copy so the two Team Capacity tabs toggle independently.
 let teamShowUnassigned = false;
-let teamActualShowUnassigned = false;
 // Task List: filter to a single assignee (person who logged the time); null = show everyone.
 let itemFilterPerson = null;
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
@@ -1188,6 +1189,7 @@ async function renderDashboard() {
     // Re-render the whole tab so the chart (which needs the per-project split) draws too.
     if (dashTab === 'actualproj') renderActualProj();
     else if (dashTab === 'actualitems') renderActualItems();
+    else if (dashTab === 'teamactual') renderTeamActual();
   }
 
   // Actual Hours › Items: every task worked on in the selected range, with its logged
@@ -1333,41 +1335,82 @@ async function renderDashboard() {
     document.getElementById('tochart').onclick = back || renderTeam;
   }
 
-  // Actual Hours copy of Team Capacity: same chart, but bars show hours actually logged per
-  // person (vs. the 128 h target) instead of remaining capacity. Data comes from the same
-  // /api/assignees pull, so it reflects tracked totals and is not scoped to the date range.
+  // Actual Hours copy of Team Capacity: bars show hours actually LOGGED per person (time
+  // entries) in the selected range, vs. the monthly capacity target. Uses the same per-person
+  // rollup as the By-person summary (personStatsCache), so it matches the rest of Actual Hours
+  // (e.g. Grant's logged time on a project), not Asana's task tracked-time totals.
   function renderTeamActual() {
-    const src = teamData, hasU = src.labels.includes('Unassigned');
-    const keep = src.labels.map((_, i) => i).filter(i => teamActualShowUnassigned || src.labels[i] !== 'Unassigned');
-    const d = { cap: src.cap,
-      labels: keep.map(i => src.labels[i]), hours: keep.map(i => src.hours[i]),
-      estimated: keep.map(i => src.estimated[i]), actual: keep.map(i => src.actual[i]),
-      counts: keep.map(i => src.counts[i]) };
-    const toolbar = hasU
-      ? `<div class="toolbar team-toolbar"><label class="chk"><input type="checkbox" id="team-show-unassigned" ${teamActualShowUnassigned ? 'checked' : ''}>Include Unassigned</label></div>`
-      : '';
-    view.innerHTML = toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
-    const cb = document.getElementById('team-show-unassigned');
-    if (cb) cb.onchange = () => { teamActualShowUnassigned = cb.checked; renderTeamActual(); };
+    const picker = rangePicker();
+    if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
+    const key = dateStart + ':' + dateEnd, people = personStatsCache[key];
+    if (!people) {
+      view.innerHTML = picker + '<p class="muted" id="person-loading">Loading per-person totals…</p>';
+      wireRangeSel(); loadPersonStats(key); return;
+    }
+    const cap = (teamData && teamData.cap) || 128;
+    const rows = people.map(p => ({ name: p.name, billable: p.billable, unbillable: p.unbillable,
+        total: p.billable + p.unbillable }))
+      .filter(p => p.total > 0)
+      .sort((a, b) => b.total - a.total);
+    view.innerHTML = picker + '<div class="chart-box"><canvas id="chart"></canvas></div>';
+    wireRangeSel();
+    if (!rows.length) {
+      const cb = view.querySelector('.chart-box');
+      if (cb) cb.innerHTML = `<p class="muted" style="padding:24px">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+      return;
+    }
     if (chart) { chart.destroy(); chart = null; }
-    const colors = d.actual.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : (h > d.cap ? '#e26b66' : '#4cc085'));
+    const labels = rows.map(r => r.name), totals = rows.map(r => r.total);
+    const colors = totals.map(h => h > cap ? '#e26b66' : '#4cc085');
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
-      data: { labels: d.labels, datasets: [{ label: 'Actual hours', data: d.actual,
+      data: { labels, datasets: [{ label: 'Actual hours logged', data: totals,
         backgroundColor: colors, borderColor: colors, borderWidth: 1,
-        _counts: d.counts, _est: d.estimated, _rem: d.hours }] },
+        _bill: rows.map(r => r.billable), _unbill: rows.map(r => r.unbillable) }] },
       options: { responsive: true, maintainAspectRatio: false,
-        onClick: (evt, els) => { if (els.length) showBreakdown(d.labels[els[0].index], renderTeamActual); },
+        onClick: (evt, els) => { if (els.length) showLoggedBreakdown(rows[els[0].index].name); },
         onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-        scales: { x: { title: { display: true, text: 'Assignee' },
-                       ticks: { callback: (v, i) => [d.labels[i], h2(d.actual[i]) + ' h'] } },
-                  y: { beginAtZero: true, suggestedMax: Math.max(d.cap * 1.1, ...d.actual, 1),
-                       title: { display: true, text: 'Actual hours' }, ticks: { callback: v => h2(v) } } },
-        plugins: { legend: { display: false }, capLine: { value: d.cap },
+        scales: { x: { title: { display: true, text: 'Person' },
+                       ticks: { callback: (v, i) => [labels[i], h2(totals[i]) + ' h'] } },
+                  y: { beginAtZero: true, suggestedMax: Math.max(cap * 1.1, ...totals, 1),
+                       title: { display: true, text: 'Actual hours logged' }, ticks: { callback: v => h2(v) } } },
+        plugins: { legend: { display: false }, capLine: { value: cap },
           tooltip: { callbacks: {
-            label: ctx => `Actual: ${h2(ctx.parsed.y)} h of ${h2(d.cap)} (${(ctx.parsed.y / d.cap * 100).toFixed(0)}%)`,
-            afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} · remaining ${h2(ctx.dataset._rem[ctx.dataIndex])} · ${ctx.dataset._counts[ctx.dataIndex]} items` } } } }
+            label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)`,
+            afterLabel: ctx => `${h2(ctx.dataset._bill[ctx.dataIndex])} h billable · ${h2(ctx.dataset._unbill[ctx.dataIndex])} h unbillable` } } } }
     });
+  }
+
+  // Per-project logged-hours breakdown for one person, opened from the Actual Hours Team
+  // Capacity chart. Built from the per-project/person split (projPersonCache) for the range.
+  function showLoggedBreakdown(person) {
+    if (chart) { chart.destroy(); chart = null; }
+    const key = dateStart + ':' + dateEnd, pc = projPersonCache[key] || {};
+    const nameOf = Object.fromEntries((juneData || []).map(w => [w.gid, w.name]));
+    const rows_ = [];
+    Object.entries(pc).forEach(([gid, pm]) => {
+      const v = pm[person];
+      if (v && (v.b + v.u) > 0) rows_.push({ project: nameOf[gid] || gid, billable: v.b, unbillable: v.u });
+    });
+    rows_.sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
+    const totB = rows_.reduce((a, r) => a + r.billable, 0), totU = rows_.reduce((a, r) => a + r.unbillable, 0);
+    const cap = (teamData && teamData.cap) || 128;
+    const pct = ((totB + totU) / cap * 100).toFixed(0);
+    const cell = (b, u) => `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td>`;
+    let body = rows_.map(r => `<tr><td>${esc(r.project)}</td>${cell(r.billable, r.unbillable)}</tr>`).join('');
+    if (!rows_.length) body = '<tr><td colspan="4" class="muted">No hours logged.</td></tr>';
+    view.innerHTML =
+      `<div class="drill-head">
+         <button class="btn back" id="tochart">← Back to chart</button>
+         <h2>${esc(person)}</h2>
+       </div>
+       <p class="drill-total">${h2(totB + totU)} h logged of ${h2(cap)} (${pct}%) · ${h2(totB)} h billable / ${h2(totU)} h unbillable · ${rows_.length} project(s)</p>
+       <table class="tasks">
+         <thead><tr><th>Project</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+         <tbody>${body}
+           <tr class="parent"><td>All projects</td>${cell(totB, totU)}</tr></tbody>
+       </table>`;
+    document.getElementById('tochart').onclick = renderTeamActual;
   }
 
   // One central "Updated" label by the Refresh button, reflecting the data behind the
@@ -1377,7 +1420,7 @@ async function renderDashboard() {
     if (!el) return;
     let u = null;
     if (dashTab === 'settings') u = null;
-    else if (dashTab === 'team' || dashTab === 'teamactual') u = teamData && teamData.updated;
+    else if (dashTab === 'team') u = teamData && teamData.updated;
     else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
     else u = juneData && juneData[0] && juneData[0].updated;
     el.textContent = u ? ('Updated ' + u) : '';
@@ -1399,7 +1442,7 @@ async function renderDashboard() {
     if (dashTab === 'team') {
       teamData ? renderTeam() : (view.innerHTML = loading);
     } else if (dashTab === 'teamactual') {
-      teamData ? renderTeamActual() : (view.innerHTML = loading);
+      renderTeamActual();
     } else if (dashTab === 'estproj') {
       renderEstProj();
     } else if (dashTab === 'actualproj') {
@@ -1490,7 +1533,7 @@ async function renderDashboard() {
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
       juneData = j;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
-    if (['capacity', 'actualproj', 'actualitems'].includes(dashTab)) renderTab();
+    if (['capacity', 'actualproj', 'actualitems', 'teamactual'].includes(dashTab)) renderTab();
   }
 
   async function loadAll(refresh) {
