@@ -58,6 +58,7 @@
   .content .head { margin-bottom:4px; }
   .content h1 { font-size:20px; margin:0; }
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
+  .section-h.flush { margin-top:8px; padding-top:0; border-top:0; }   /* first heading under the filter */
   /* Tasks tab: total-hours summary banner */
   .summary-bar { display:flex; gap:24px; background:var(--panel2); border:1px solid var(--border);
                  border-radius:12px; padding:18px 24px; margin:6px 0 4px; }
@@ -67,6 +68,8 @@
   .card.june:hover { border-color:var(--green); }
   .card.june .stat .n, .card.june .go { color:var(--green-d); }
   .card.june .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
+  /* MSA/capacity cards: lighter panel + brighter border so they stand out at the top of the list */
+  .card.cap { background:var(--panel2); border-color:#5c6b86; }
   .grp-card { grid-column: 1 / -1; }   /* combined buckets (e.g. CMD) span the whole row */
   /* combined budget-group card: per-project breakdown rows */
   .grp-tag { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.05em;
@@ -96,7 +99,7 @@
   .muted { color:var(--muted); }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   /* drill-down task list */
-  .drill-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+  .drill-head { display:flex; align-items:center; gap:14px; margin-bottom:14px; }
   .drill-head h2 { font-size:17px; margin:0; }
   .drill-total { font-size:13px; color:var(--muted); }
   table.tasks { width:100%; border-collapse:collapse; font-size:14px; }
@@ -611,14 +614,13 @@ const TABS = {
   actualitems: { label:'Task List', title:'Task List' },
   estproj: { label:'Bar Chart', title:'Bar Chart' },
   estimated: { label:'Statistics', title:'Statistics' },
-  june: { label:'Statistics', title:'Statistics' },
   capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity' },
   settings: { label:'Graph Colors', title:'Graph Colors', sub:'Pick a color for each person — saved in this browser and applied to every per-person chart.' },
 };
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views.
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tabs: ['team', 'estproj', 'estimated'] },
-  { title: 'Actual Hours', tabs: ['capacity', 'actualproj', 'june', 'actualitems'] },
+  { title: 'Actual Hours', tabs: ['capacity', 'actualproj', 'actualitems'] },
   { title: 'Settings', tabs: ['settings'] },
 ];
 
@@ -854,8 +856,8 @@ async function renderDashboard() {
       const gset = new Set(drill.gids);
       displayRows = rows.filter(w => gset.has(w.gid)).sort((a, b) => b.hours - a.hours);
       if (!displayRows.length) { estDrillGroup = null; return renderEstProj(); }
-      backBar = `<div class="toolbar drill-head"><button class="btn" id="est-drill-back">← Back to all projects</button>` +
-                `<span class="tb-label">${esc(drill.name)} · split by project</span></div>`;
+      backBar = `<div class="drill-head"><button class="btn back" id="est-drill-back">← Back to all projects</button>` +
+                `<h2>${esc(drill.name)} · split by project</h2></div>`;
     } else {
       const groupRows = groups.map(g => {
         const gset = new Set(g.gids);
@@ -961,8 +963,8 @@ async function renderDashboard() {
         .map(w => Object.assign({ isGroup: false }, w))
         .sort((a, b) => b.hours - a.hours);
       if (!rows.length) { actualDrillGroup = null; return renderActualProj(); }
-      backBar = `<div class="toolbar drill-head"><button class="btn" id="actual-drill-back">← Back to all projects</button>` +
-                `<span class="tb-label">${esc(drill.name)} · split by project</span></div>`;
+      backBar = `<div class="drill-head"><button class="btn back" id="actual-drill-back">← Back to all projects</button>` +
+                `<h2>${esc(drill.name)} · split by project</h2></div>`;
     } else {
       const groupItems = (groupsConfig || []).map(g => {
         const s = buildGroupSummary(g, juneData);
@@ -1300,8 +1302,8 @@ async function renderDashboard() {
     if (!rows_.length) rows = '<tr><td colspan="5" class="muted">No estimated or actual hours.</td></tr>';
     view.innerHTML =
       `<div class="drill-head">
-         <h2>${esc(name)}</h2>
          <button class="btn back" id="tochart">← Back to chart</button>
+         <h2>${esc(name)}</h2>
        </div>
        <p class="drill-total">${h2(totRem)} h remaining of ${h2(teamData.cap)} (${pct}%) · ${h2(totEst)} est − ${h2(totAct)} actual · ${rows_.length} project(s)</p>
        <table class="tasks">
@@ -1330,12 +1332,9 @@ async function renderDashboard() {
     document.querySelectorAll('.nav-item').forEach(a =>
       a.classList.toggle('active', a.dataset.tab === dashTab));
     setUpdatedLabel();
-    // Range-based tabs put the selected date range in the title.
-    let title = TABS[dashTab].title;
-    if (dashTab === 'june') title = `Statistics · ${rangeLabel(dateStart, dateEnd)}`;
-    else if (dashTab === 'actualproj') title = `Bar Chart · ${rangeLabel(dateStart, dateEnd)}`;
-    else if (dashTab === 'actualitems') title = `Task List · ${rangeLabel(dateStart, dateEnd)}`;
-    document.getElementById('tab-title').textContent = title;
+    // Titles stay clean: the From/To filter under range-based tabs is the single
+    // place that shows the selected date range.
+    document.getElementById('tab-title').textContent = TABS[dashTab].title;
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     subEl.textContent = sub; subEl.style.display = sub ? '' : 'none';
     const loading = '<p class="muted">Loading widgets…</p>';
@@ -1350,28 +1349,40 @@ async function renderDashboard() {
       renderActualItems();
     } else if (dashTab === 'estimated') {
       estData ? cardGrid(estData, estCard, 'No projects.') : (view.innerHTML = loading);
-    } else if (dashTab === 'june') {
-      cardGrid(juneData || [], juneCard,
-        juneData ? `No hours logged in ${rangeLabel(dateStart, dateEnd)}.` : 'Loading widgets…', rangePicker());
     } else if (dashTab === 'capacity') {
       const picker = rangePicker();
       if (!juneData) { view.innerHTML = picker + loading; wireRangeSel(); }
       else {
-        // Combined budget buckets first, then any standalone capped project that
-        // isn't part of a group (group members are rolled into their bucket).
+        // MSA projects with a monthly capacity lead the list and are highlighted: combined
+        // budget buckets first, then any standalone capped project (group members roll into
+        // their bucket). Everything else that logged hours follows as plain statistics cards.
         const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
         const groups = (groupsConfig || []).map(g => buildGroupSummary(g, juneData))
                          .filter(g => g.members.length);
-        const standalone = juneData.filter(w => w.cap != null && !memberGids.has(w.gid));
+        const standalone = juneData.filter(w => w.cap != null && !memberGids.has(w.gid))
+                             .sort((a, b) => b.billable_hours - a.billable_hours);
+        const others = juneData.filter(w => w.cap == null && !memberGids.has(w.gid))
+                         .sort((a, b) => b.hours - a.hours);
         view.innerHTML = picker;
-        if (!groups.length && !standalone.length) {
-          view.insertAdjacentHTML('beforeend', '<p class="muted">No projects have a monthly capacity set.</p>');
+        const hasCap = groups.length || standalone.length;
+        if (!hasCap && !others.length) {
+          view.insertAdjacentHTML('beforeend', `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`);
         } else {
-          const grid = document.createElement('div');
-          grid.className = 'grid';
-          groups.forEach(g => grid.appendChild(groupCard(g)));
-          standalone.forEach(w => grid.appendChild(capCard(w)));
-          view.appendChild(grid);
+          if (hasCap) {
+            view.insertAdjacentHTML('beforeend', '<h2 class="section-h flush">MSA projects · monthly capacity</h2>');
+            const capGrid = document.createElement('div');
+            capGrid.className = 'grid';
+            groups.forEach(g => { const c = groupCard(g); c.classList.add('cap'); capGrid.appendChild(c); });
+            standalone.forEach(w => { const c = capCard(w); c.classList.add('cap'); capGrid.appendChild(c); });
+            view.appendChild(capGrid);
+          }
+          if (others.length) {
+            view.insertAdjacentHTML('beforeend', `<h2 class="section-h${hasCap ? '' : ' flush'}">Other projects</h2>`);
+            const grid = document.createElement('div');
+            grid.className = 'grid';
+            others.forEach(w => grid.appendChild(juneCard(w)));
+            view.appendChild(grid);
+          }
         }
         wireRangeSel();
       }
@@ -1420,7 +1431,7 @@ async function renderDashboard() {
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
       juneData = j;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
-    if (['june', 'capacity', 'actualproj', 'actualitems'].includes(dashTab)) renderTab();
+    if (['capacity', 'actualproj', 'actualitems'].includes(dashTab)) renderTab();
   }
 
   async function loadAll(refresh) {
@@ -1452,12 +1463,14 @@ async function renderDetail(gid) {
       <main class="content">
         <div class="head">
           <div id="crumbs" class="crumbs">Loading…</div>
-          <button class="btn" id="refresh">Refresh</button>
+          <div class="head-right">
+            <span id="dash-updated" class="dash-updated"></span>
+            <button class="btn" id="refresh">Refresh</button>
+          </div>
         </div>
         <p class="sub" id="sub"></p>
         <div class="panel">
           <div id="view"></div>
-          <p id="updated">Loading…</p>
         </div>
       </main>
     </div>`;
@@ -1519,8 +1532,8 @@ async function renderDetail(gid) {
     if (!items) rows = '<tr><td colspan="3" class="muted">No items.</td></tr>';
     document.getElementById('view').innerHTML =
       `<div class="drill-head">
-         <h2>${esc(assignee)}</h2>
          <button class="btn back" id="tochart">← Back to chart</button>
+         <h2>${esc(assignee)}</h2>
        </div>
        <p class="drill-total">${items} item(s) · ${h2(total)} estimated hours (excludes Completed)</p>
        <table class="tasks">
@@ -1535,9 +1548,9 @@ async function renderDetail(gid) {
     try {
       detailData = await (await fetch('/api/project/' + gid + (refresh ? '?refresh=1' : ''))).json();
       document.getElementById('sub').textContent = `Estimated hours per assignee · ${detailData.ntasks} tasks (excludes Completed)`;
-      document.getElementById('updated').textContent = 'Last updated: ' + detailData.updated + ' (cached — click Refresh to re-pull)';
+      document.getElementById('dash-updated').textContent = detailData.updated ? ('Updated ' + detailData.updated) : '';
       showChart();
-    } catch (e) { document.getElementById('updated').innerHTML = fmtErr(e); }
+    } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
     finally { btn.disabled = false; btn.textContent = 'Refresh'; }
   }
   btn.onclick = () => load(true);
@@ -1551,12 +1564,14 @@ async function renderJuneDetail(gid) {
       <main class="content">
         <div class="head">
           <div id="crumbs" class="crumbs">Loading…</div>
-          <button class="btn" id="refresh">Refresh</button>
+          <div class="head-right">
+            <span id="dash-updated" class="dash-updated"></span>
+            <button class="btn" id="refresh">Refresh</button>
+          </div>
         </div>
         <p class="sub" id="sub"></p>
         <div class="panel">
           <div id="view"></div>
-          <p id="updated">Loading…</p>
         </div>
       </main>
     </div>`;
@@ -1566,8 +1581,7 @@ async function renderJuneDetail(gid) {
   let data = null;
 
   function showChart() {
-    const ml = rangeLabel(data.start, data.end);
-    setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name + ' · ' + ml}]);
+    setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name}]);
     document.getElementById('view').innerHTML =
       '<div class="chart-box"><canvas id="chart"></canvas></div>';
     if (chart) { chart.destroy(); chart = null; }
@@ -1585,14 +1599,14 @@ async function renderJuneDetail(gid) {
           label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
           afterLabel: ctx => ctx.datasetIndex === 0 ? `Entries: ${data.counts[ctx.dataIndex]}` : '' } } },
         scales:{ x:{ title:{display:true,text:'Logged by'}, ticks:{ callback:(v,i) => [data.labels[i], h2(data.hours[i]) + ' h'] } },
-                 y:{ beginAtZero:true, title:{display:true,text:'Hours logged in ' + ml}, ticks:{ callback:v => h2(v) } } } }
+                 y:{ beginAtZero:true, title:{display:true,text:'Hours logged'}, ticks:{ callback:v => h2(v) } } } }
     });
   }
 
   function showEntries(person) {
     if (chart) { chart.destroy(); chart = null; }
     const ml = rangeLabel(data.start, data.end);
-    setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name + ' · ' + ml, fn:showChart}, {label:person}]);
+    setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name, fn:showChart}, {label:person}]);
     const rows_ = data.entries.filter(e => e.by === person);
     const total = rows_.reduce((a, e) => a + e.hours, 0);
     const billTotal = rows_.reduce((a, e) => a + (e.billable ? e.hours : 0), 0);
@@ -1606,8 +1620,8 @@ async function renderJuneDetail(gid) {
     if (!rows_.length) rows = '<tr><td colspan="4" class="muted">No entries.</td></tr>';
     document.getElementById('view').innerHTML =
       `<div class="drill-head">
-         <h2>${esc(person)}</h2>
          <button class="btn back" id="tochart">← Back to chart</button>
+         <h2>${esc(person)}</h2>
        </div>
        <p class="drill-total">${rows_.length} entr${rows_.length === 1 ? 'y' : 'ies'} · ${total.toFixed(2)} h logged in ${ml} · ${h2(billTotal)} h billable / ${h2(unbillTotal)} h unbillable</p>
        <table class="tasks">
@@ -1622,9 +1636,9 @@ async function renderJuneDetail(gid) {
     try {
       data = await (await fetch('/api/june/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
       document.getElementById('sub').textContent = `Hours logged ${rangeLabel(data.start, data.end)} per person · ${data.nentries} time entries · ${h2(data.billable_hours)} h billable / ${h2(data.unbillable_hours)} h unbillable`;
-      document.getElementById('updated').textContent = 'Last updated: ' + data.updated + ' (cached — click Refresh to re-pull)';
+      document.getElementById('dash-updated').textContent = data.updated ? ('Updated ' + data.updated) : '';
       showChart();
-    } catch (e) { document.getElementById('updated').innerHTML = fmtErr(e); }
+    } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
     finally { btn.disabled = false; btn.textContent = 'Refresh'; }
   }
   btn.onclick = () => load(true);
