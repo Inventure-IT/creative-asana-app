@@ -1012,9 +1012,10 @@ async function renderDashboard() {
   }
 
   function renderEstProj() {
-    // Stacked bar chart of estimated hours per project, split by assignee, with filters for
-    // the status column and for hiding Unassigned. Caps/gids come from estData; the per-person
-    // split and per-status breakdown are inverted out of teamData.breakdown's task rows.
+    // Stacked bar chart of REMAINING hours per project (estimated − actual, per task), split by
+    // assignee, with filters for the status column and for hiding Unassigned. Caps/gids come from
+    // estData; the per-person split and per-status breakdown are inverted out of teamData.breakdown's
+    // task rows — the same estimated − actual math the Team Capacity chart uses.
     if (!estData || !teamData) { view.innerHTML = '<p class="muted">Loading widgets…</p>'; return; }
     // Every status column seen in the data → drives the filter checkboxes.
     const statusList = statusColumns(), allStatuses = new Set(statusList);
@@ -1045,7 +1046,7 @@ async function renderDashboard() {
       if (hu) hu.onchange = () => { estHideUnassigned = hu.checked; renderEstProj(); };
     };
 
-    // Aggregate estimated hours per project from the filtered task rows: total, item count,
+    // Aggregate remaining hours per project from the filtered task rows: total, item count,
     // and the per-person split for the stacked bars.
     const capOf = Object.fromEntries(estData.map(w => [w.name, w.cap == null ? null : w.cap]));
     const gidOf = Object.fromEntries(estData.map(w => [w.name, w.gid]));
@@ -1055,9 +1056,12 @@ async function renderDashboard() {
       (projs || []).forEach(p => (p.tasks || []).forEach(t => {
         if (!statusOn(t.status || NO_STATUS)) return;
         const a = agg[p.project] || (agg[p.project] = { hours: 0, ntasks: 0, persons: {} });
-        a.hours += t.estimated || 0;
+        // Remaining work on this task: what was estimated, less the time already tracked
+        // against it. An over-run task contributes a negative amount, as on Team Capacity.
+        const rem = (t.estimated || 0) - (t.actual || 0);
+        a.hours += rem;
         a.ntasks += 1;
-        a.persons[person] = (a.persons[person] || 0) + (t.estimated || 0);
+        a.persons[person] = (a.persons[person] || 0) + rem;
       }));
     });
     const rows = Object.entries(agg)
@@ -1093,7 +1097,7 @@ async function renderDashboard() {
       displayRows = [...groupRows, ...others].sort((a, b) => b.hours - a.hours);
     }
     if (!displayRows.length) {
-      view.innerHTML = toolbar + '<p class="muted">No estimated hours match the current filters.</p>';
+      view.innerHTML = toolbar + '<p class="muted">No remaining hours match the current filters.</p>';
       wireFilters(); return;
     }
     view.innerHTML = toolbar + backBar + '<div class="chart-box"><canvas id="chart"></canvas></div>' +
@@ -1120,14 +1124,14 @@ async function renderDashboard() {
           evt.native.target.style.cursor = (r && (r.isGroup || r.gid)) ? 'pointer' : 'default'; },
         scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
                   y: { stacked: true, beginAtZero: true, suggestedMax: top * 1.05,
-                       title: { display: true, text: 'Estimated hours' }, ticks: { callback: v => h2(v) } } },
+                       title: { display: true, text: 'Remaining hours' }, ticks: { callback: v => h2(v) } } },
         plugins: { legend: { display: true, position: 'bottom' }, capMarks: { caps },
           tooltip: { itemSort: (a, b) => b.parsed.y - a.parsed.y, filter: item => item.parsed.y > 0,
             callbacks: {
               label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
               afterBody: items => {
-                const r = displayRows[items[0].dataIndex], lines = [`Total ${h2(r.hours)} h · ${r.ntasks} tasks`];
-                if (r.cap != null) lines.push(`Budget ${h2(r.cap)} h/mo (${(r.hours / r.cap * 100).toFixed(0)}%)`);
+                const r = displayRows[items[0].dataIndex], lines = [`Remaining ${h2(r.hours)} h · ${r.ntasks} tasks`];
+                if (r.cap != null) lines.push(`Budget ${h2(r.cap)} h/mo (${(r.hours / r.cap * 100).toFixed(0)}% remaining)`);
                 if (r.isGroup) {
                   lines.push('', 'By project:');
                   r.members.slice().sort((a, b) => b.hours - a.hours).forEach(m => {
@@ -1143,7 +1147,7 @@ async function renderDashboard() {
     renderEstSummary(displayRows);
   }
 
-  // Bottom-of-page summary table for the Estimated Hours bar chart: totals per project.
+  // Bottom-of-page summary table for the Estimated Hours bar chart: remaining hours per project.
   function renderEstSummary(rows) {
     const box = document.getElementById('est-summary');
     if (!box) return;
@@ -1163,7 +1167,7 @@ async function renderDashboard() {
     box.innerHTML =
       `<h2 class="section-h">By project</h2>
        <table class="tasks">
-         <thead><tr><th>Project</th><th class="hours">Estimated</th><th class="hours">Tasks</th></tr></thead>
+         <thead><tr><th>Project</th><th class="hours">Remaining</th><th class="hours">Tasks</th></tr></thead>
          <tbody>${rows.map(w => projStatRow(w.name, w.hours, w.ntasks)).join('')}
            ${statRow('All projects', totH, totT, 'parent')}</tbody>
        </table>`;
