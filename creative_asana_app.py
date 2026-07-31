@@ -555,7 +555,7 @@ PAGE = r"""<!DOCTYPE html>
   .toolbar select, .toolbar input[type=date] { background:var(--panel2); color:var(--text);
                     border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer; }
   .toolbar input[type=date]::-webkit-calendar-picker-indicator { filter:invert(.8); cursor:pointer; }
-  .toolbar.est-toolbar { flex-wrap:wrap; }
+  .toolbar.est-toolbar, .toolbar.team-toolbar { flex-wrap:wrap; }
   .toolbar .tb-label { font-weight:600; color:var(--text); margin-left:0; }
   .toolbar .chk { display:inline-flex; align-items:center; gap:5px; margin-left:0; cursor:pointer; }
   .toolbar .chk input { cursor:pointer; margin:0; }
@@ -678,6 +678,15 @@ const capLinePlugin = {
   }
 };
 Chart.register(capLinePlugin);
+
+// Team Capacity bar color: green when a person lands within CAP_TOLERANCE hours of the
+// target (i.e. appropriately loaded), red when they are under- or over-booked past it.
+const CAP_TOLERANCE = 15;
+const capColor = (h, cap) => Math.abs(h - cap) <= CAP_TOLERANCE ? '#4cc085' : '#e26b66';
+
+// Label for task rows that sit in no status column; used by the status filters.
+const NO_STATUS = '(No status)';
+const r2 = v => Math.round(v * 100) / 100;
 
 // Draws a per-bar monthly-budget marker: a short amber line across each billable bar that
 // has a cap. Enable via options.plugins.capMarks = { caps: [<cap or null per bar>] }.
@@ -804,6 +813,8 @@ let estHiddenProjects = new Set();
 let actualHiddenProjects = new Set();
 // Team Capacity: hide the Unassigned bar by default; toggle remembered across renders.
 let teamShowUnassigned = false;
+// Team Capacity status-column filter; null = all statuses. Applies to the bars and the drill-in.
+let teamStatusFilter = null;
 // Task List: filter to a single assignee (person who logged the time); null = show everyone.
 let itemFilterPerson = null;
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
@@ -1005,13 +1016,8 @@ async function renderDashboard() {
     // the status column and for hiding Unassigned. Caps/gids come from estData; the per-person
     // split and per-status breakdown are inverted out of teamData.breakdown's task rows.
     if (!estData || !teamData) { view.innerHTML = '<p class="muted">Loading widgets…</p>'; return; }
-    const NO_STATUS = '(No status)';
     // Every status column seen in the data → drives the filter checkboxes.
-    const allStatuses = new Set();
-    Object.values(teamData.breakdown).forEach(projs => (projs || []).forEach(p =>
-      (p.tasks || []).forEach(t => allStatuses.add(t.status || NO_STATUS))));
-    const statusList = [...allStatuses].sort((a, b) =>
-      a === NO_STATUS ? 1 : b === NO_STATUS ? -1 : a.localeCompare(b));
+    const statusList = statusColumns(), allStatuses = new Set(statusList);
     // Forget any remembered status that no longer exists; an empty set collapses back to "all".
     if (estStatusFilter) {
       estStatusFilter = new Set([...estStatusFilter].filter(s => allStatuses.has(s)));
@@ -1460,23 +1466,77 @@ async function renderDashboard() {
     if (sel) sel.onchange = () => { itemFilterPerson = sel.value || null; renderActualItems(); };
   }
 
+  // Every status column present in the Team Capacity task rows, in filter order
+  // (alphabetical, with "no status" last).
+  function statusColumns() {
+    const seen = new Set();
+    Object.values((teamData && teamData.breakdown) || {}).forEach(projs =>
+      (projs || []).forEach(p => (p.tasks || []).forEach(t => seen.add(t.status || NO_STATUS))));
+    return [...seen].sort((a, b) => a === NO_STATUS ? 1 : b === NO_STATUS ? -1 : a.localeCompare(b));
+  }
+  const teamStatusOn = s => !teamStatusFilter || teamStatusFilter.has(s || NO_STATUS);
+
+  // One person's Team Capacity rollup under the current status filter: their projects with
+  // only the matching task rows, and the totals those rows add up to. Recomputing from the
+  // task rows (rather than teamData's per-person totals) is what makes the filter apply to
+  // the bars, the tooltips and the drill-in table alike.
+  function teamRollup(name) {
+    const projects = [];
+    let estimated = 0, actual = 0, count = 0;
+    ((teamData.breakdown || {})[name] || []).forEach(p => {
+      const tasks = (p.tasks || []).filter(t => teamStatusOn(t.status));
+      if (teamStatusFilter && !tasks.length) return;
+      const e = tasks.reduce((a, t) => a + (t.estimated || 0), 0);
+      const a_ = tasks.reduce((a, t) => a + (t.actual || 0), 0);
+      projects.push({ project: p.project, estimated: r2(e), actual: r2(a_), remaining: r2(e - a_), tasks });
+      estimated += e; actual += a_; count += tasks.length;
+    });
+    return { projects, estimated: r2(estimated), actual: r2(actual),
+             remaining: r2(estimated - actual), count };
+  }
+
   function renderTeam() {
     // Bar chart of estimated hours per assignee, with a dashed line at the 128 h target.
-    // Unassigned is hidden by default; the toolbar toggle brings it back.
+    // Bars can be filtered to a subset of status columns; Unassigned is hidden by default.
     const src = teamData, hasU = src.labels.includes('Unassigned');
-    const keep = src.labels.map((_, i) => i).filter(i => teamShowUnassigned || src.labels[i] !== 'Unassigned');
-    const d = { cap: src.cap,
-      labels: keep.map(i => src.labels[i]), hours: keep.map(i => src.hours[i]),
-      estimated: keep.map(i => src.estimated[i]), actual: keep.map(i => src.actual[i]),
-      counts: keep.map(i => src.counts[i]) };
-    const toolbar = hasU
-      ? `<div class="toolbar team-toolbar"><label class="chk"><input type="checkbox" id="team-show-unassigned" ${teamShowUnassigned ? 'checked' : ''}>Include Unassigned</label></div>`
-      : '';
+    const statusList = statusColumns();
+    // Forget any remembered status that no longer exists; an empty set collapses back to "all".
+    if (teamStatusFilter) {
+      teamStatusFilter = new Set([...teamStatusFilter].filter(s => statusList.includes(s)));
+      if (!teamStatusFilter.size) teamStatusFilter = null;
+    }
+    // Re-sort by the filtered remaining hours (Unassigned stays pinned far right), so the
+    // bars keep the same most-loaded-first reading under any status selection.
+    const rolled = src.labels
+      .filter(n => teamShowUnassigned || n !== 'Unassigned')
+      .map(n => ({ name: n, roll: teamRollup(n) }))
+      .sort((a, b) => a.name === 'Unassigned' ? 1 : b.name === 'Unassigned' ? -1
+                      : b.roll.remaining - a.roll.remaining);
+    const labels = rolled.map(x => x.name), stats = rolled.map(x => x.roll);
+    const d = { cap: src.cap, labels,
+      hours: stats.map(s => s.remaining), estimated: stats.map(s => s.estimated),
+      actual: stats.map(s => s.actual), counts: stats.map(s => s.count) };
+    const toolbar =
+      '<div class="toolbar team-toolbar">' +
+        '<span class="tb-label">Status</span>' +
+        statusList.map(s =>
+          `<label class="chk"><input type="checkbox" class="team-status" value="${esc(s)}" ${teamStatusOn(s) ? 'checked' : ''}>${esc(s)}</label>`
+        ).join('') +
+        (hasU
+          ? '<span class="tb-sep"></span>' +
+            `<label class="chk"><input type="checkbox" id="team-show-unassigned" ${teamShowUnassigned ? 'checked' : ''}>Include Unassigned</label>`
+          : '') +
+      '</div>';
     view.innerHTML = toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
+    view.querySelectorAll('.team-status').forEach(box => box.onchange = () => {
+      const on = [...view.querySelectorAll('.team-status')].filter(c => c.checked).map(c => c.value);
+      teamStatusFilter = (on.length === statusList.length) ? null : new Set(on);
+      renderTeam();
+    });
     const cb = document.getElementById('team-show-unassigned');
     if (cb) cb.onchange = () => { teamShowUnassigned = cb.checked; renderTeam(); };
     if (chart) { chart.destroy(); chart = null; }
-    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : (h > d.cap ? '#e26b66' : '#4cc085'));
+    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : capColor(h, d.cap));
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
       data: { labels: d.labels, datasets: [{ label: 'Remaining hours', data: d.hours,
@@ -1498,11 +1558,13 @@ async function renderDashboard() {
 
   function showBreakdown(name, back) {
     if (chart) { chart.destroy(); chart = null; }
-    const rows_ = (teamData.breakdown[name] || []).slice().sort((a, b) => b.remaining - a.remaining);
-    const totEst = rows_.reduce((a, r) => a + r.estimated, 0);
-    const totAct = rows_.reduce((a, r) => a + r.actual, 0);
-    const totRem = totEst - totAct;
+    // Same status filter the chart is showing, so the drill-in adds up to the clicked bar.
+    const roll = teamRollup(name);
+    const rows_ = roll.projects.slice().sort((a, b) => b.remaining - a.remaining);
+    const totEst = roll.estimated, totAct = roll.actual, totRem = roll.remaining;
     const pct = (totRem / teamData.cap * 100).toFixed(0);
+    const filterNote = teamStatusFilter
+      ? ` · status: ${[...teamStatusFilter].join(', ')}` : '';
     // Each project is a bold header row, with that person's tasks/subtasks listed beneath it.
     let rows = rows_.map(r => {
       let body = `<tr class="parent"><td>${esc(r.project)}</td><td></td>` +
@@ -1531,7 +1593,7 @@ async function renderDashboard() {
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(name)}</h2>
        </div>
-       <p class="drill-total">${h2(totRem)} h remaining of ${h2(teamData.cap)} (${pct}%) · ${h2(totEst)} est − ${h2(totAct)} actual · ${rows_.length} project(s)</p>
+       <p class="drill-total">${h2(totRem)} h remaining of ${h2(teamData.cap)} (${pct}%) · ${h2(totEst)} est − ${h2(totAct)} actual · ${rows_.length} project(s)${esc(filterNote)}</p>
        <table class="tasks">
          <thead><tr><th>Project / Task</th><th>Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
@@ -1565,7 +1627,7 @@ async function renderDashboard() {
     }
     if (chart) { chart.destroy(); chart = null; }
     const labels = rows.map(r => r.name), totals = rows.map(r => r.total);
-    const colors = totals.map(h => h > cap ? '#e26b66' : '#4cc085');
+    const colors = totals.map(h => capColor(h, cap));
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
       data: { labels, datasets: [{ label: 'Actual hours logged', data: totals,
