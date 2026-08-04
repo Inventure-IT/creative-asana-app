@@ -47,6 +47,7 @@ PROJECTS = [
     {"gid": "1214228966572563", "name": "Internal IIT Backlog"},
     {"gid": "1216154609521581", "name": "NuNu"},
     {"gid": "1216640931651593", "name": "Ross Wood Website Redesign", "cap": 30},   # one-month cap, not a recurring MSA
+    {"gid": "1216208009045309", "name": "Marsh and Main"},
 ]
 
 # Budget groups: several projects that share ONE combined monthly capacity.
