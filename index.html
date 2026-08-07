@@ -101,6 +101,20 @@
   .chart-box { position:relative; height:480px; margin-top:10px; }
   .muted { color:var(--muted); }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
+  /* Team Capacity: per-person project donuts under the bar chart */
+  .donut-sub { margin:-4px 0 12px; }
+  .donut-legend { display:flex; flex-wrap:wrap; gap:8px 18px; margin:0 0 18px; }
+  .dl-item { display:inline-flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); }
+  .dl-item i { width:11px; height:11px; border-radius:3px; flex:0 0 auto; }
+  .donut-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:16px; }
+  .donut-card { background:var(--panel2); border:1px solid var(--border); border-radius:12px;
+                padding:14px 12px 12px; cursor:pointer; transition:border-color .08s, transform .08s; }
+  .donut-card:hover { border-color:var(--blue); transform:translateY(-2px); }
+  .donut-card h4 { font-size:13px; margin:0 0 8px; text-align:center; overflow:hidden;
+                   text-overflow:ellipsis; white-space:nowrap; }
+  .donut-box { position:relative; height:170px; }
+  .donut-total { margin-top:10px; text-align:center; font-size:12px; color:var(--muted);
+                 font-variant-numeric:tabular-nums; }
   /* drill-down task list */
   .drill-head { display:flex; align-items:center; gap:14px; margin-bottom:14px; }
   .drill-head h2 { font-size:17px; margin:0; }
@@ -439,6 +453,14 @@ async function bootAuth(){
 <script>
 const app = document.getElementById('app');
 let chart = null;
+// Small per-person donuts drawn under the Team Capacity bar charts. Tracked as a set so
+// every re-render tears all of them down alongside the main chart.
+let donutCharts = [];
+function destroyCharts(){
+  if (chart) { chart.destroy(); chart = null; }
+  donutCharts.forEach(c => c.destroy());
+  donutCharts = [];
+}
 
 // Dark-mode chart defaults: light tick/legend text and faint gridlines.
 Chart.defaults.color = '#9aa0a8';
@@ -558,6 +580,71 @@ function personStacks(rows, hoursOf){
   return persons.map(p => ({ label: p, data: maps.map(m => Math.round((m[p] || 0) * 100) / 100),
     backgroundColor: personColor(p), borderColor: personColor(p), borderWidth: 0 }));
 }
+// Stable per-project colors for the Team Capacity donuts, so one project reads as the same
+// color in every person's ring. Shares the categorical palette used for people.
+const _projColors = {};
+let _projColorN = 0;
+function projectColor(name){
+  if (name in _projColors) return _projColors[name];
+  return (_projColors[name] = PERSON_PALETTE[_projColorN++ % PERSON_PALETTE.length]);
+}
+
+// Fold a { project: hours } map into donut slices: biggest first, with everything past the
+// top DONUT_MAX_SLICES rolled into a single "Other projects" slice so small rings stay legible.
+const DONUT_MAX_SLICES = 7;
+const OTHER_SLICE = 'Other projects';
+function donutSlices(map){
+  const all = Object.entries(map).filter(([, h]) => h > 0).sort((a, b) => b[1] - a[1]);
+  if (all.length <= DONUT_MAX_SLICES + 1) return all.map(([label, hours]) => ({ label, hours }));
+  const top = all.slice(0, DONUT_MAX_SLICES).map(([label, hours]) => ({ label, hours }));
+  top.push({ label: OTHER_SLICE, hours: all.slice(DONUT_MAX_SLICES).reduce((a, x) => a + x[1], 0) });
+  return top;
+}
+
+// A grid of one donut per person, showing how that person's hours split across projects.
+// rows: [{ name, total, slices:[{label, hours}] }]. Colors are shared across every ring, so
+// a single legend above the grid covers them all. Clicking a ring calls onPick(row).
+function donutGrid(container, rows, opts){
+  const o = opts || {};
+  rows = rows.filter(r => r.slices.length);
+  if (!rows.length) return;
+  // Legend lists every project drawn below, heaviest overall first ("Other" always last).
+  const totals = {};
+  rows.forEach(r => r.slices.forEach(s => { totals[s.label] = (totals[s.label] || 0) + s.hours; }));
+  const legend = Object.keys(totals)
+    .sort((a, b) => (a === OTHER_SLICE) - (b === OTHER_SLICE) || totals[b] - totals[a])
+    .map(p => `<span class="dl-item"><i style="background:${p === OTHER_SLICE ? '#5a616b' : projectColor(p)}"></i>${esc(p)}</span>`)
+    .join('');
+  container.insertAdjacentHTML('beforeend',
+    `<h2 class="section-h">${esc(o.title || 'By project, per person')}</h2>
+     ${o.sub ? `<p class="hint donut-sub">${esc(o.sub)}</p>` : ''}
+     <div class="donut-legend">${legend}</div>
+     <div class="donut-grid">${rows.map((r, i) =>
+       `<div class="donut-card" data-di="${i}">
+          <h4>${esc(r.name)}</h4>
+          <div class="donut-box"><canvas id="donut-${i}"></canvas></div>
+          <div class="donut-total">${h2(r.total)} h · ${r.slices.length} project${r.slices.length === 1 ? '' : 's'}</div>
+        </div>`).join('')}</div>`);
+  rows.forEach((r, i) => {
+    const el = document.getElementById('donut-' + i);
+    if (!el) return;
+    const colors = r.slices.map(s => s.label === OTHER_SLICE ? '#5a616b' : projectColor(s.label));
+    donutCharts.push(new Chart(el, {
+      type: 'doughnut',
+      data: { labels: r.slices.map(s => s.label),
+              datasets: [{ data: r.slices.map(s => r2(s.hours)), backgroundColor: colors,
+                           borderColor: '#2a2f38', borderWidth: 2 }] },
+      options: { responsive: true, maintainAspectRatio: false, cutout: '58%',
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { label: ctx =>
+            `${ctx.label}: ${h2(ctx.parsed)} h (${(ctx.parsed / (r.total || 1) * 100).toFixed(0)}%)` } } } }
+    }));
+  });
+  // Clicking anywhere on a card opens that person's existing drill-in.
+  if (o.onPick) container.querySelectorAll('.donut-card').forEach(c =>
+    c.onclick = () => o.onPick(rows[+c.dataset.di]));
+}
+
 function capBar(hours, cap){
   if (cap == null) return '';   // only projects with a monthly capacity get a bar
   const pct = cap > 0 ? (hours / cap) * 100 : 0;
@@ -738,7 +825,7 @@ function groupCard(g) {
 }
 
 async function renderDashboard() {
-  if (chart) { chart.destroy(); chart = null; }
+  destroyCharts();
   app.innerHTML = `
     <div class="layout">
       ${sidebarHtml()}
@@ -884,7 +971,7 @@ async function renderDashboard() {
     wireFilters();
     const backBtn = document.getElementById('est-drill-back');
     if (backBtn) backBtn.onclick = () => { estDrillGroup = null; renderEstProj(); };
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     const labels = displayRows.map(w => w.name);
     const gids = displayRows.map(w => w.gid), ntasks = displayRows.map(w => w.ntasks);
     const caps = displayRows.map(w => (w.cap == null ? null : w.cap));
@@ -997,7 +1084,7 @@ async function renderDashboard() {
     wireRangeSel();
     const backBtn = document.getElementById('actual-drill-back');
     if (backBtn) backBtn.onclick = () => { actualDrillGroup = null; renderActualProj(); };
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     renderActualSummary(rows);
     // The per-person split needs each project's detail (loaded on demand). Show a placeholder
     // in the chart box until it lands, then re-render this whole tab.
@@ -1311,7 +1398,7 @@ async function renderDashboard() {
     });
     const cb = document.getElementById('team-show-unassigned');
     if (cb) cb.onchange = () => { teamShowUnassigned = cb.checked; renderTeam(); };
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : capColor(h, d.cap));
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
@@ -1330,10 +1417,21 @@ async function renderDashboard() {
             label: ctx => `Remaining: ${h2(ctx.parsed.y)} h of ${h2(d.cap)} (${(ctx.parsed.y / d.cap * 100).toFixed(0)}%)`,
             afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} − actual ${h2(ctx.dataset._act[ctx.dataIndex])} · ${ctx.dataset._counts[ctx.dataIndex]} items` } } } }
     });
+    // One donut per assignee under the bars: which projects their remaining hours sit in.
+    // Projects already fully burned down (remaining ≤ 0) drop out, so the rings only show
+    // work still ahead — the same measure the bars use.
+    donutGrid(view, rolled.map(x => {
+      const m = {};
+      x.roll.projects.forEach(p => { if (p.remaining > 0) m[p.project] = (m[p.project] || 0) + p.remaining; });
+      const slices = donutSlices(m);
+      return { name: x.name, slices, total: slices.reduce((a, s) => a + s.hours, 0) };
+    }), { title: 'Remaining hours by project, per person',
+          sub: 'Each ring is one assignee. Click a card for their full project/task breakdown.',
+          onPick: r => showBreakdown(r.name) });
   }
 
   function showBreakdown(name, back) {
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     // Same status filter the chart is showing, so the drill-in adds up to the clicked bar.
     const roll = teamRollup(name);
     const rows_ = roll.projects.slice().sort((a, b) => b.remaining - a.remaining);
@@ -1400,7 +1498,7 @@ async function renderDashboard() {
       if (cb) cb.innerHTML = `<p class="muted" style="padding:24px">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
       return;
     }
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     const labels = rows.map(r => r.name), totals = rows.map(r => r.total);
     const colors = totals.map(h => capColor(h, cap));
     chart = new Chart(document.getElementById('chart'), {
@@ -1418,12 +1516,26 @@ async function renderDashboard() {
           tooltip: { callbacks: {
             label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)` } } } }
     });
+    // One donut per person under the bars: which projects they logged their hours against.
+    const pc = projPersonCache[key] || {};
+    const nameOf = Object.fromEntries((juneData || []).map(w => [w.gid, w.name]));
+    donutGrid(view, rows.map(r => {
+      const m = {};
+      Object.entries(pc).forEach(([gid, pm]) => {
+        const v = pm[r.name];
+        if (v > 0) { const n = nameOf[gid] || gid; m[n] = (m[n] || 0) + v; }
+      });
+      const slices = donutSlices(m);
+      return { name: r.name, slices, total: slices.reduce((a, s) => a + s.hours, 0) };
+    }), { title: 'Logged hours by project, per person',
+          sub: 'Each ring is one person. Click a card for their per-project totals.',
+          onPick: r => showLoggedBreakdown(r.name) });
   }
 
   // Per-project logged-hours breakdown for one person, opened from the Actual Hours Team
   // Capacity chart. Built from the per-project/person split (projPersonCache) for the range.
   function showLoggedBreakdown(person) {
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     const key = dateStart + ':' + dateEnd, pc = projPersonCache[key] || {};
     const nameOf = Object.fromEntries((juneData || []).map(w => [w.gid, w.name]));
     const rows_ = [];
@@ -1466,7 +1578,7 @@ async function renderDashboard() {
   }
 
   function renderTab() {
-    if (chart) { chart.destroy(); chart = null; }   // leaving any chart tab
+    destroyCharts();   // leaving any chart tab
     estDrillGroup = null; actualDrillGroup = null;   // switching tabs collapses any drilled-in bucket
     document.querySelectorAll('.nav-item').forEach(a =>
       a.classList.toggle('active', a.dataset.tab === dashTab));
@@ -1625,7 +1737,7 @@ async function renderDetail(gid) {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:d.name}]);
     document.getElementById('view').innerHTML =
       '<div class="chart-box"><canvas id="chart"></canvas></div>';
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
       data:{ labels:d.labels, datasets:[{ label:'Estimated hours', data:d.hours,
@@ -1642,7 +1754,7 @@ async function renderDetail(gid) {
   }
 
   function showTasks(assignee) {
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:detailData.name, fn:showChart}, {label:assignee}]);
     const all = detailData.tasks;
     let rows = '', total = 0, items = 0;
@@ -1725,7 +1837,7 @@ async function renderJuneDetail(gid) {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name}]);
     document.getElementById('view').innerHTML =
       '<div class="chart-box"><canvas id="chart"></canvas></div>';
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
       data:{ labels:data.labels, datasets:[
@@ -1743,7 +1855,7 @@ async function renderJuneDetail(gid) {
   }
 
   function showEntries(person) {
-    if (chart) { chart.destroy(); chart = null; }
+    destroyCharts();
     const ml = rangeLabel(data.start, data.end);
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name, fn:showChart}, {label:person}]);
     const rows_ = data.entries.filter(e => e.by === person);
@@ -1782,7 +1894,7 @@ async function renderJuneDetail(gid) {
 }
 
 function route() {
-  if (chart) { chart.destroy(); chart = null; }
+  destroyCharts();
   let m = location.hash.match(/^#\/june\/(\d+)/);
   if (m) return renderJuneDetail(m[1]);
   m = location.hash.match(/^#\/p\/(\d+)/);
