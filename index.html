@@ -59,6 +59,9 @@
   .content h1 { font-size:20px; margin:0; }
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
   .section-h.flush { margin-top:8px; padding-top:0; border-top:0; }   /* first heading under the filter */
+  /* Daily Log: day headings sit under a person heading, so they read one level quieter */
+  .section-h.day-h { font-size:13px; font-weight:600; color:var(--muted); text-transform:uppercase;
+                     letter-spacing:.04em; margin:18px 0 8px; padding-top:0; border-top:0; }
   /* Tasks tab: total-hours summary banner */
   .summary-bar { display:flex; gap:24px; background:var(--panel2); border:1px solid var(--border);
                  border-radius:12px; padding:18px 24px; margin:6px 0 4px; }
@@ -701,6 +704,11 @@ let teamShowUnassigned = false;
 let teamStatusFilter = null;
 // Task List: filter to a single assignee (person who logged the time); null = show everyone.
 let itemFilterPerson = null;
+// Daily Log: filter to a single assignee; null = show everyone. Kept separate from the Task
+// List filter so switching between the two tabs doesn't clobber either selection.
+let dailyFilterPerson = null;
+// Daily Log: newest day first by default; toggled by the Order control.
+let dailyNewestFirst = true;
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
 // Defaults to the current calendar month so the dashboard opens on "this month" every time.
 function monthRange(now){ const d = now || new Date(), p = n => String(n).padStart(2, '0'),
@@ -721,6 +729,7 @@ const TABS = {
   team: { label:'Team Capacity', title:'Team Capacity' },
   actualproj: { label:'Bar Chart', title:'Bar Chart' },
   actualitems: { label:'Task List', title:'Task List' },
+  actualdaily: { label:'Daily Log', title:'Daily Log' },
   estproj: { label:'Bar Chart', title:'Bar Chart' },
   estimated: { label:'Statistics', title:'Statistics' },
   teamactual: { label:'Team Capacity', title:'Team Capacity' },
@@ -730,7 +739,7 @@ const TABS = {
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views.
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tabs: ['team', 'estproj', 'estimated'] },
-  { title: 'Actual Hours', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems'] },
+  { title: 'Actual Hours', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily'] },
   { title: 'Settings', tabs: ['settings'] },
 ];
 
@@ -861,6 +870,7 @@ async function renderDashboard() {
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
   let projPersonCache = {};    // per-project person split { gid: { person: hours } }, keyed by 'start:end'
   let itemStatsCache = {};     // Actual Hours per-item (task) totals, keyed by 'start:end'
+  let dailyStatsCache = {};    // Actual Hours per-person/per-day task rows, keyed by 'start:end'
   let personLoading = {};      // in-flight guard so the chart + summary don't double-fetch
 
   // Wire the date-range Search button (if the current tab rendered one). Editing the date
@@ -1247,7 +1257,7 @@ async function renderDashboard() {
     }
     delete personLoading[key];
     if (key !== dateStart + ':' + dateEnd) return;   // range changed while loading
-    const agg = {}, byGid = {}, items = {};
+    const agg = {}, byGid = {}, items = {}, daily = {};
     gids.forEach((g, idx) => {
       const d = details[idx], pm = byGid[g] = {};
       (d.labels || []).forEach((name, i) => {
@@ -1263,6 +1273,13 @@ async function renderDashboard() {
         const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', person: person, hours: 0, entries: 0 });
         it.hours += e.hours;
         it.entries += 1;
+        // Same rollup again, but keyed by person + day + task, so the Daily Log can show
+        // one row per task worked on that day and total each day's logged hours.
+        const dkey = person + ' | ' + (e.date || '') + ' | ' + (d.name || '') + ' | ' + e.task;
+        const dr = daily[dkey] || (daily[dkey] =
+          { person: person, date: e.date || '', task: e.task, project: d.name || '', hours: 0, entries: 0 });
+        dr.hours += e.hours;
+        dr.entries += 1;
       });
     });
     projPersonCache[key] = byGid;
@@ -1274,9 +1291,17 @@ async function renderDashboard() {
       .sort((a, b) => a.project.localeCompare(b.project)
         || b.hours - a.hours
         || a.task.localeCompare(b.task));
+    dailyStatsCache[key] = Object.values(daily)
+      // Person (A→Z), then day (oldest first — the tab flips this when newest-first is on),
+      // then heaviest task first within the day.
+      .sort((a, b) => a.person.localeCompare(b.person)
+        || (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)
+        || b.hours - a.hours
+        || a.task.localeCompare(b.task));
     // Re-render the whole tab so the chart (which needs the per-project split) draws too.
     if (dashTab === 'actualproj') renderActualProj();
     else if (dashTab === 'actualitems') renderActualItems();
+    else if (dashTab === 'actualdaily') renderActualDaily();
     else if (dashTab === 'teamactual') renderTeamActual();
   }
 
@@ -1340,6 +1365,84 @@ async function renderDashboard() {
     wireRangeSel();
     const sel = document.getElementById('item-assignee');
     if (sel) sel.onchange = () => { itemFilterPerson = sel.value || null; renderActualItems(); };
+  }
+
+  // Actual Hours › Daily Log: for each person, a day-by-day list of everything they logged
+  // time to in the selected range — one table per day (task, project, hours) with that day's
+  // total. Reuses the per-person/per-day rollup loadPersonStats builds from the time entries.
+  function renderActualDaily() {
+    const picker = rangePicker();
+    if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
+    if (!juneData.some(w => w.hours > 0)) {
+      view.innerHTML = picker + `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+      wireRangeSel(); return;
+    }
+    const key = dateStart + ':' + dateEnd, allRows = dailyStatsCache[key];
+    if (!allRows) {
+      view.innerHTML = picker + '<p class="muted" id="items-loading">Loading daily log…</p>';
+      wireRangeSel();
+      loadPersonStats(key);
+      return;
+    }
+    // Assignee filter: same behaviour as the Task List tab — a remembered person who logged
+    // nothing in this range falls back to showing everyone.
+    const people = [...new Set(allRows.map(r => r.person))].sort((a, b) => a.localeCompare(b));
+    if (dailyFilterPerson && !people.includes(dailyFilterPerson)) dailyFilterPerson = null;
+    const rows = dailyFilterPerson ? allRows.filter(r => r.person === dailyFilterPerson) : allRows;
+    const filterBar = `<div class="toolbar">
+      <label for="daily-assignee">Assignee</label>
+      <select id="daily-assignee">
+        <option value="">All assignees</option>
+        ${people.map(p => `<option value="${esc(p)}"${p === dailyFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
+      </select>
+      <label for="daily-order">Order</label>
+      <select id="daily-order">
+        <option value="new"${dailyNewestFirst ? ' selected' : ''}>Newest day first</option>
+        <option value="old"${dailyNewestFirst ? '' : ' selected'}>Oldest day first</option>
+      </select>
+    </div>`;
+    const tot = rows.reduce((a, r) => a + r.hours, 0);
+    const totEntries = rows.reduce((a, r) => a + r.entries, 0);
+    const days = new Set(rows.map(r => r.person + '|' + r.date));
+    const hoursCells = (h) => `<td class="hours">${h2(h)} h</td>`;
+    const summary = `<div class="summary-bar">
+      <div class="summary-stat"><span class="n">${h2(tot)} h</span><span class="l">Total hours logged</span></div>
+      <div class="summary-stat"><span class="n">${days.size}</span><span class="l">Person-days</span></div>
+      <div class="summary-stat"><span class="n">${totEntries}</span><span class="l">Time entries</span></div>
+    </div>`;
+    // Group person → day. `rows` is already sorted person A→Z then date ascending, so the
+    // key order holds; only the day order flips when "newest first" is selected.
+    const byPerson = {};
+    rows.forEach(r => {
+      const p = byPerson[r.person] = byPerson[r.person] || {};
+      (p[r.date] = p[r.date] || []).push(r);
+    });
+    const sections = Object.keys(byPerson).map(person => {
+      const dayMap = byPerson[person];
+      const dayKeys = Object.keys(dayMap);
+      if (dailyNewestFirst) dayKeys.reverse();
+      const pTot = dayKeys.reduce((a, d) => a + dayMap[d].reduce((x, r) => x + r.hours, 0), 0);
+      const dayTables = dayKeys.map(d => {
+        const list = dayMap[d];
+        const dTot = list.reduce((a, r) => a + r.hours, 0);
+        const body = list.map(r =>
+          `<tr><td>${esc(r.task)}</td><td>${esc(r.project)}</td>${hoursCells(r.hours)}</tr>`).join('');
+        return `<h3 class="section-h day-h">${d ? esc(fmtDate(d)) : 'No date'} · ${h2(dTot)} h</h3>
+          <table class="tasks">
+            <thead><tr><th>Task</th><th>Project</th><th class="hours">Hours</th></tr></thead>
+            <tbody>${body}
+              <tr class="parent"><td>Day total</td><td></td>${hoursCells(dTot)}</tr></tbody>
+          </table>`;
+      }).join('');
+      return `<h2 class="section-h">${esc(person)} · ${h2(pTot)} h</h2>` + dayTables;
+    }).join('');
+    const noneMsg = rows.length ? '' : `<p class="muted">No hours logged by ${esc(dailyFilterPerson)} in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+    view.innerHTML = picker + filterBar + summary + (noneMsg || sections);
+    wireRangeSel();
+    const sel = document.getElementById('daily-assignee');
+    if (sel) sel.onchange = () => { dailyFilterPerson = sel.value || null; renderActualDaily(); };
+    const ord = document.getElementById('daily-order');
+    if (ord) ord.onchange = () => { dailyNewestFirst = ord.value === 'new'; renderActualDaily(); };
   }
 
   // Every status column present in the Team Capacity task rows, in filter order
@@ -1621,6 +1724,8 @@ async function renderDashboard() {
       renderActualProj();
     } else if (dashTab === 'actualitems') {
       renderActualItems();
+    } else if (dashTab === 'actualdaily') {
+      renderActualDaily();
     } else if (dashTab === 'estimated') {
       estData ? cardGrid(estData, estCard, 'No projects.') : (view.innerHTML = loading);
     } else if (dashTab === 'capacity') {
@@ -1698,14 +1803,14 @@ async function renderDashboard() {
   // Loads the selected range's "Actual Hours" widgets (used on its own when the range changes).
   async function loadJune(refresh) {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
-    personStatsCache = {}; projPersonCache = {}; itemStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
+    personStatsCache = {}; projPersonCache = {}; itemStatsCache = {}; dailyStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
     try {
       const url = `/api/june?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await fetch(url).then(r => r.json());
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
       juneData = j;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
-    if (['capacity', 'actualproj', 'actualitems', 'teamactual'].includes(dashTab)) renderTab();
+    if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual'].includes(dashTab)) renderTab();
   }
 
   async function loadAll(refresh) {
