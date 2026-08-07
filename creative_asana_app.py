@@ -799,6 +799,16 @@ function projectColor(name){
 // top DONUT_MAX_SLICES rolled into a single "Other projects" slice so small rings stay legible.
 const DONUT_MAX_SLICES = 7;
 const OTHER_SLICE = 'Other projects';
+// Filler slice: the part of a person's monthly capacity no project has claimed yet, so the
+// ring reads against the full 128 h target instead of only against their own workload.
+const FREE_SLICE = 'Unallocated capacity';
+// The two synthetic slices get fixed greys and always sort last in the legend.
+function sliceColor(label){
+  if (label === OTHER_SLICE) return '#5a616b';
+  if (label === FREE_SLICE) return '#434a56';
+  return projectColor(label);
+}
+const sliceRank = label => label === FREE_SLICE ? 2 : label === OTHER_SLICE ? 1 : 0;
 function donutSlices(map){
   const all = Object.entries(map).filter(([, h]) => h > 0).sort((a, b) => b[1] - a[1]);
   if (all.length <= DONUT_MAX_SLICES + 1) return all.map(([label, hours]) => ({ label, hours }));
@@ -808,18 +818,21 @@ function donutSlices(map){
 }
 
 // A grid of one donut per person, showing how that person's hours split across projects.
-// rows: [{ name, total, slices:[{label, hours}] }]. Colors are shared across every ring, so
-// a single legend above the grid covers them all. Clicking a ring calls onPick(row).
+// rows: [{ name, total, slices:[{label, hours}], caption? }] — total is what the ring adds up
+// to (the capacity target when a FREE_SLICE is present), caption overrides the line beneath.
+// Colors are shared across every ring, so a single legend above the grid covers them all.
+// Clicking a ring calls onPick(row).
 function donutGrid(container, rows, opts){
   const o = opts || {};
   rows = rows.filter(r => r.slices.length);
   if (!rows.length) return;
-  // Legend lists every project drawn below, heaviest overall first ("Other" always last).
+  // Legend lists every project drawn below, heaviest overall first, with the synthetic
+  // "Other"/"Unallocated" slices pinned to the end.
   const totals = {};
   rows.forEach(r => r.slices.forEach(s => { totals[s.label] = (totals[s.label] || 0) + s.hours; }));
   const legend = Object.keys(totals)
-    .sort((a, b) => (a === OTHER_SLICE) - (b === OTHER_SLICE) || totals[b] - totals[a])
-    .map(p => `<span class="dl-item"><i style="background:${p === OTHER_SLICE ? '#5a616b' : projectColor(p)}"></i>${esc(p)}</span>`)
+    .sort((a, b) => sliceRank(a) - sliceRank(b) || totals[b] - totals[a])
+    .map(p => `<span class="dl-item"><i style="background:${sliceColor(p)}"></i>${esc(p)}</span>`)
     .join('');
   container.insertAdjacentHTML('beforeend',
     `<h2 class="section-h">${esc(o.title || 'By project, per person')}</h2>
@@ -829,12 +842,12 @@ function donutGrid(container, rows, opts){
        `<div class="donut-card" data-di="${i}">
           <h4>${esc(r.name)}</h4>
           <div class="donut-box"><canvas id="donut-${i}"></canvas></div>
-          <div class="donut-total">${h2(r.total)} h · ${r.slices.length} project${r.slices.length === 1 ? '' : 's'}</div>
+          <div class="donut-total">${esc(r.caption || `${h2(r.total)} h · ${r.slices.length} project${r.slices.length === 1 ? '' : 's'}`)}</div>
         </div>`).join('')}</div>`);
   rows.forEach((r, i) => {
     const el = document.getElementById('donut-' + i);
     if (!el) return;
-    const colors = r.slices.map(s => s.label === OTHER_SLICE ? '#5a616b' : projectColor(s.label));
+    const colors = r.slices.map(s => sliceColor(s.label));
     donutCharts.push(new Chart(el, {
       type: 'doughnut',
       data: { labels: r.slices.map(s => s.label),
@@ -1625,14 +1638,22 @@ async function renderDashboard() {
     });
     // One donut per assignee under the bars: which projects their remaining hours sit in.
     // Projects already fully burned down (remaining ≤ 0) drop out, so the rings only show
-    // work still ahead — the same measure the bars use.
+    // work still ahead — the same measure the bars use. Each ring is padded out to the
+    // capacity target with an "unallocated" slice, so a light week reads as a mostly empty
+    // ring rather than a full one; anyone already past the target gets no filler.
     donutGrid(view, rolled.map(x => {
       const m = {};
       x.roll.projects.forEach(p => { if (p.remaining > 0) m[p.project] = (m[p.project] || 0) + p.remaining; });
       const slices = donutSlices(m);
-      return { name: x.name, slices, total: slices.reduce((a, s) => a + s.hours, 0) };
+      const used = slices.reduce((a, s) => a + s.hours, 0);
+      const nproj = slices.length;
+      const free = r2(d.cap - used);
+      if (free > 0) slices.push({ label: FREE_SLICE, hours: free });
+      return { name: x.name, slices, total: Math.max(used, d.cap),
+        caption: `${h2(used)} of ${h2(d.cap)} h · ${nproj} project${nproj === 1 ? '' : 's'}` +
+                 (free > 0 ? '' : ' · at capacity') };
     }), { title: 'Remaining hours by project, per person',
-          sub: 'Each ring is one assignee. Click a card for their full project/task breakdown.',
+          sub: `Each ring is one assignee, filled out to the ${h2(d.cap)} h monthly target. Click a card for their full project/task breakdown.`,
           onPick: r => showBreakdown(r.name) });
   }
 
