@@ -707,8 +707,8 @@ let itemFilterPerson = null;
 // Daily Log: filter to a single assignee; null = show everyone. Kept separate from the Task
 // List filter so switching between the two tabs doesn't clobber either selection.
 let dailyFilterPerson = null;
-// Daily Log: newest day first by default; toggled by the Order control.
-let dailyNewestFirst = true;
+// Daily Log: oldest day first by default; toggled by the Order control.
+let dailyNewestFirst = false;
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
 // Defaults to the current calendar month so the dashboard opens on "this month" every time.
 function monthRange(now){ const d = now || new Date(), p = n => String(n).padStart(2, '0'),
@@ -1397,8 +1397,8 @@ async function renderDashboard() {
       </select>
       <label for="daily-order">Order</label>
       <select id="daily-order">
-        <option value="new"${dailyNewestFirst ? ' selected' : ''}>Newest day first</option>
         <option value="old"${dailyNewestFirst ? '' : ' selected'}>Oldest day first</option>
+        <option value="new"${dailyNewestFirst ? ' selected' : ''}>Newest day first</option>
       </select>
     </div>`;
     const tot = rows.reduce((a, r) => a + r.hours, 0);
