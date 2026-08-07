@@ -172,7 +172,7 @@ async function getAssigneeLoad(refresh){
 }
 
 // ---- Logged-hours layer for a date range (mirrors june_detail / get_june_summaries) ----
-function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name,billable_status&limit=100`); }
+function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`); }
 function fetchSubtasksTime(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=name,actual_time_minutes,completed,completed_at&limit=100`); }
 
 async function entriesForItem(name, gid, start, end){
@@ -181,7 +181,7 @@ async function entriesForItem(name, gid, start, end){
     const entered = e.entered_on || '';
     if (entered && start <= entered && entered <= end)
       res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
-        minutes: e.duration_minutes || 0, billable: e.billable_status === 'billable' });
+        minutes: e.duration_minutes || 0 });
   }
   return res;
 }
@@ -202,26 +202,21 @@ async function juneDetail(gid, start, end){
   const seen = new Set(), entries = [];
   for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end)))
     for (const e of lst){ if (e.entry_gid && seen.has(e.entry_gid)) continue; if (e.entry_gid) seen.add(e.entry_gid); entries.push(e); }
-  const totals = {}, counts = {}, bill = {}, unbill = {};
+  const totals = {}, counts = {};
   for (const e of entries){
     totals[e.by] = (totals[e.by] || 0) + e.minutes; counts[e.by] = (counts[e.by] || 0) + 1;
-    const b = e.billable ? bill : unbill; b[e.by] = (b[e.by] || 0) + e.minutes;
   }
   const ordered = Object.keys(totals).sort((x, y) => totals[y] - totals[x]);
   entries.sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
   return { gid, name: PROJECT_NAMES[gid] || gid, start, end, labels: ordered,
     hours: ordered.map(n => round2(totals[n] / 60)),
-    billable: ordered.map(n => round2((bill[n] || 0) / 60)),
-    unbillable: ordered.map(n => round2((unbill[n] || 0) / 60)),
     counts: ordered.map(n => counts[n]),
     total_hours: round2(sum(Object.values(totals)) / 60),
-    billable_hours: round2(sum(Object.values(bill)) / 60),
-    unbillable_hours: round2(sum(Object.values(unbill)) / 60),
     completed: Object.keys(completedDates).length,
     nentries: entries.length,
-    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable })), updated: nowStr() };
+    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60) })), updated: nowStr() };
 }
-function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, billable_hours: d.billable_hours, unbillable_hours: d.unbillable_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
 
 async function getJuneDetail(gid, refresh, start, end){
   const key = start + ':' + end;

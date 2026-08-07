@@ -53,7 +53,7 @@ PROJECTS = [
 # Budget groups: several projects that share ONE combined monthly capacity.
 # Each member project still appears individually in every other tab; the group only
 # adds a single combined bucket to the Monthly Capacity tab (summing its members'
-# billable hours against `cap`). Members are referenced by project gid.
+# logged hours against `cap`). Members are referenced by project gid.
 GROUPS = [
     {"name": "CMD", "cap": 244, "gids": [
         "1214228966572536",   # CMD: Concierge Clinics
@@ -337,7 +337,7 @@ def get_assignee_load(refresh=False):
 # ---- "Hours logged": actual time-tracking entries dated in a given month (YYYY-MM) ----
 
 def fetch_time_entries(task_gid):
-    fields = "duration_minutes,entered_on,created_by.name,billable_status"
+    fields = "duration_minutes,entered_on,created_by.name"
     url = f"{API}/tasks/{task_gid}/time_tracking_entries?opt_fields={fields}&limit=100"
     out = []
     while url:
@@ -376,10 +376,8 @@ def june_entries_for_item(item):
                 "task": name,
                 "by": (e.get("created_by") or {}).get("name") or "Unknown",
                 "date": entered,
+                # Every logged entry counts the same, regardless of Asana's billable flag.
                 "minutes": e.get("duration_minutes") or 0,
-                # Only entries explicitly marked "billable" count toward budgets.
-                # "nonBillable" and "notApplicable" (and unset) are treated as unbillable.
-                "billable": e.get("billable_status") == "billable",
             })
     return res
 
@@ -431,14 +429,11 @@ def june_detail(gid, start=DEFAULT_START, end=DEFAULT_END):
                 seen.add(e["entry_gid"])
             entries.append(e)
 
-    # Per person: total minutes, plus the billable / unbillable split. Only entries
-    # flagged billable count toward project budgets; everything else is unbillable.
-    totals, counts, bill, unbill = {}, {}, {}, {}
+    # Per person: total minutes logged. All logged time counts toward project budgets.
+    totals, counts = {}, {}
     for e in entries:
         totals[e["by"]] = totals.get(e["by"], 0) + e["minutes"]
         counts[e["by"]] = counts.get(e["by"], 0) + 1
-        bucket = bill if e["billable"] else unbill
-        bucket[e["by"]] = bucket.get(e["by"], 0) + e["minutes"]
     ordered = sorted(totals, key=lambda n: totals[n], reverse=True)
     entries.sort(key=lambda e: e["date"])
     return {
@@ -448,17 +443,13 @@ def june_detail(gid, start=DEFAULT_START, end=DEFAULT_END):
         "end": end,
         "labels": ordered,
         "hours": [round(totals[n] / 60, 2) for n in ordered],
-        "billable": [round(bill.get(n, 0) / 60, 2) for n in ordered],
-        "unbillable": [round(unbill.get(n, 0) / 60, 2) for n in ordered],
         "counts": [counts[n] for n in ordered],
         "total_hours": round(sum(totals.values()) / 60, 2),
-        "billable_hours": round(sum(bill.values()) / 60, 2),
-        "unbillable_hours": round(sum(unbill.values()) / 60, 2),
         "completed": len(completed_dates),
         "nentries": len(entries),
         "entries": [
             {"task": e["task"], "by": e["by"], "date": e["date"],
-             "hours": round(e["minutes"] / 60, 2), "billable": e["billable"]}
+             "hours": round(e["minutes"] / 60, 2)}
             for e in entries
         ],
         "updated": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"),
@@ -472,8 +463,6 @@ def june_summary_from_detail(d):
         "start": d["start"],
         "end": d["end"],
         "hours": d["total_hours"],
-        "billable_hours": d["billable_hours"],
-        "unbillable_hours": d["unbillable_hours"],
         "completed": d["completed"],
         "nentries": d["nentries"],
         "cap": PROJECT_CAPS.get(d["gid"]),
@@ -689,7 +678,7 @@ const capColor = (h, cap) => Math.abs(h - cap) <= CAP_TOLERANCE ? '#4cc085' : '#
 const NO_STATUS = '(No status)';
 const r2 = v => Math.round(v * 100) / 100;
 
-// Draws a per-bar monthly-budget marker: a short amber line across each billable bar that
+// Draws a per-bar monthly-budget marker: a short amber line across each bar that
 // has a cap. Enable via options.plugins.capMarks = { caps: [<cap or null per bar>] }.
 const capMarksPlugin = {
   id: 'capMarks',
@@ -892,8 +881,8 @@ function juneCard(w) {
   c.className = 'card june';
   c.innerHTML = `<h3>${esc(w.name)}</h3>
     <div class="stats">
-      <div class="stat"><div class="n">${h2(w.billable_hours)}</div><div class="l">Billable</div></div>
-      <div class="stat"><div class="n">${h2(w.unbillable_hours)}</div><div class="l">Unbillable</div></div>
+      <div class="stat"><div class="n">${h2(w.hours)}</div><div class="l">Hours Logged</div></div>
+      <div class="stat"><div class="n">${w.nentries}</div><div class="l">Time Entries</div></div>
       <div class="stat"><div class="n">${w.completed}</div><div class="l">Completed Tasks</div></div>
     </div>`;
   c.onclick = () => { location.hash = '#/june/' + w.gid; };
@@ -901,57 +890,52 @@ function juneCard(w) {
 }
 
 function capCard(w) {
-  // Only billable hours count against a project's monthly capacity.
-  const used = Number(w.billable_hours || 0), cap = Number(w.cap || 0);
-  const unbill = Number(w.unbillable_hours || 0);
+  // All logged hours count against a project's monthly capacity.
+  const used = Number(w.hours || 0), cap = Number(w.cap || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
   c.className = 'card june';
   c.innerHTML = `<h3>${esc(w.name)}</h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(w.cap)}</div><div class="l">Capacity h/mo</div></div>
-      <div class="stat"><div class="n">${h2(used)}</div><div class="l">Billable used</div></div>
+      <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
       <div class="stat"><div class="n"${remaining < 0 ? ' style="color:#e26b66"' : ''}>${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
-    ${capBar(used, cap)}
-    ${unbill > 0 ? `<div class="cap-bar"><div class="lab">+ ${h2(unbill)} h unbillable (not counted)</div></div>` : ''}`;
+    ${capBar(used, cap)}`;
   c.onclick = () => { location.hash = '#/june/' + w.gid; };
   return c;
 }
 
 // Roll up a budget group's member projects (from the current Hours-Logged data)
-// into one combined bucket: summed billable/unbillable, plus the per-member rows.
+// into one combined bucket: summed hours, plus the per-member rows.
 function buildGroupSummary(g, jd) {
   const members = g.gids.map(gid => jd.find(w => w.gid === gid)).filter(Boolean);
   return {
     name: g.name, cap: g.cap, members,
-    billable_hours: members.reduce((a, w) => a + (w.billable_hours || 0), 0),
-    unbillable_hours: members.reduce((a, w) => a + (w.unbillable_hours || 0), 0),
+    hours: members.reduce((a, w) => a + (w.hours || 0), 0),
     nentries: members.reduce((a, w) => a + (w.nentries || 0), 0),
     updated: members.length ? members[0].updated : '',
   };
 }
 
 function groupCard(g) {
-  // Combined monthly bucket shared by several projects; billable hours only.
-  const used = Number(g.billable_hours || 0), cap = Number(g.cap || 0);
-  const unbill = Number(g.unbillable_hours || 0);
+  // Combined monthly bucket shared by several projects; all logged hours count.
+  const used = Number(g.hours || 0), cap = Number(g.cap || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
   c.className = 'card june grp-card';
   const rows = g.members.map(m =>
     `<div class="grp-row" data-gid="${m.gid}" title="Open ${esc(m.name)}">
        <span class="grp-name">${esc(m.name)}</span>
-       <span class="grp-h">${h2(m.billable_hours)} h</span>
+       <span class="grp-h">${h2(m.hours)} h</span>
      </div>`).join('') || '<div class="grp-row"><span class="grp-name muted">No member data in range.</span></div>';
   c.innerHTML = `<h3>${esc(g.name)} <span class="grp-tag">combined bucket</span></h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(g.cap)}</div><div class="l">Capacity h/mo</div></div>
-      <div class="stat"><div class="n">${h2(used)}</div><div class="l">Billable used</div></div>
+      <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
       <div class="stat"><div class="n"${remaining < 0 ? ' style="color:#e26b66"' : ''}>${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
     ${capBar(used, cap)}
-    ${unbill > 0 ? `<div class="cap-bar"><div class="lab">+ ${h2(unbill)} h unbillable (not counted)</div></div>` : ''}
     <div class="grp-members">${rows}</div>`;
   // Each member row opens that project's own Hours-Logged detail.
   c.querySelectorAll('.grp-row[data-gid]').forEach(r =>
@@ -981,7 +965,7 @@ async function renderDashboard() {
   let estData = null, juneData = null, teamData = null;   // cached so switching tabs is instant
   let groupsConfig = null;   // budget-group definitions (loaded once); combined per current range
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
-  let projPersonCache = {};    // per-project person split { gid: { person: {b,u} } }, keyed by 'start:end'
+  let projPersonCache = {};    // per-project person split { gid: { person: hours } }, keyed by 'start:end'
   let itemStatsCache = {};     // Actual Hours per-item (task) totals, keyed by 'start:end'
   let personLoading = {};      // in-flight guard so the chart + summary don't double-fetch
 
@@ -1205,8 +1189,7 @@ async function renderDashboard() {
       const groupItems = (groupsConfig || []).map(g => {
         const s = buildGroupSummary(g, juneData);
         return { name: g.name, gid: null, isGroup: true, gids: g.gids, cap: g.cap, members: s.members,
-          billable_hours: s.billable_hours, unbillable_hours: s.unbillable_hours,
-          hours: s.billable_hours + s.unbillable_hours, nentries: s.nentries };
+          hours: s.hours, nentries: s.nentries };
       });
       const projItems = juneData.filter(w => !memberGids.has(w.gid)).map(w => Object.assign({ isGroup: false }, w));
       rows = [...groupItems, ...projItems].filter(w => w.hours > 0).sort((a, b) => b.hours - a.hours);
@@ -1241,10 +1224,10 @@ async function renderDashboard() {
     const labels = chartRows.map(w => w.name);
     const gids = chartRows.map(w => w.gid), ents = chartRows.map(w => w.nentries);
     const caps = chartRows.map(w => (w.cap == null ? null : w.cap));
-    // Total logged hours (billable + unbillable) per person for a row; groups sum their members.
+    // Total logged hours per person for a row; groups sum their members.
     const rowPersons = (w) => {
       const src = w.isGroup ? (w.gids || []) : [w.gid], out = {};
-      src.forEach(g => { const m = pcache[g]; if (m) Object.entries(m).forEach(([p, v]) => { out[p] = (out[p] || 0) + v.b + v.u; }); });
+      src.forEach(g => { const m = pcache[g]; if (m) Object.entries(m).forEach(([p, v]) => { out[p] = (out[p] || 0) + v; }); });
       return out;
     };
     const datasets = personStacks(chartRows, rowPersons);
@@ -1270,12 +1253,12 @@ async function renderDashboard() {
               label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
               afterBody: items => {
                 const r = chartRows[items[0].dataIndex], lines = [`Total ${h2(r.hours)} h · ${r.nentries} entries`];
-                if (r.cap != null) lines.push(`Budget ${h2(r.cap)} h billable`);
+                if (r.cap != null) lines.push(`Budget ${h2(r.cap)} h`);
                 if (r.isGroup) {
                   lines.push('', 'By project:');
                   (r.members || []).slice().sort((a, b) => b.hours - a.hours).forEach(m => {
                     lines.push(`  ${m.name} — ${h2(m.hours)} h`);
-                    Object.entries(pcache[m.gid] || {}).map(([p, v]) => [p, v.b + v.u])
+                    Object.entries(pcache[m.gid] || {})
                       .filter(x => x[1] > 0).sort((a, b) => b[1] - a[1])
                       .forEach(([p, v]) => lines.push(`     ${p}: ${h2(v)} h`));
                   });
@@ -1292,28 +1275,27 @@ async function renderDashboard() {
   function renderActualSummary(rows_) {
     const box = document.getElementById('actual-summary');
     if (!box) return;
-    const statRow = (name, b, u, cls) =>
+    const statRow = (name, h, cls) =>
       `<tr${cls ? ' class="' + cls + '"' : ''}><td>${esc(name)}</td>` +
-      `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td></tr>`;
+      `<td class="hours">${h2(h)} h</td></tr>`;
     // Same as statRow but the Project cell leads with a checkbox that toggles the project's
     // visibility in the bar chart above (unchecking adds it to actualHiddenProjects).
-    const projStatRow = (name, b, u) => {
+    const projStatRow = (name, h) => {
       const checked = actualHiddenProjects.has(name) ? '' : ' checked';
       const attr = esc(name).replace(/"/g, '&quot;');
       return `<tr><td><label class="proj-toggle"><input type="checkbox" class="proj-check" data-proj="${attr}"${checked}> ${esc(name)}</label></td>` +
-        `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td></tr>`;
+        `<td class="hours">${h2(h)} h</td></tr>`;
     };
 
     // By project — mirrors the chart's rows (combined buckets / drilled-in members).
     const projRows = (rows_ || juneData.filter(w => w.hours > 0)).slice().sort((a, b) => b.hours - a.hours);
-    const pjB = projRows.reduce((a, w) => a + w.billable_hours, 0);
-    const pjU = projRows.reduce((a, w) => a + w.unbillable_hours, 0);
+    const pjTot = projRows.reduce((a, w) => a + w.hours, 0);
     const projTable =
       `<h2 class="section-h">By project</h2>
        <table class="tasks">
-         <thead><tr><th>Project</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
-         <tbody>${projRows.map(w => projStatRow(w.name, w.billable_hours, w.unbillable_hours)).join('')}
-           ${statRow('All projects', pjB, pjU, 'parent')}</tbody>
+         <thead><tr><th>Project</th><th class="hours">Hours</th></tr></thead>
+         <tbody>${projRows.map(w => projStatRow(w.name, w.hours)).join('')}
+           ${statRow('All projects', pjTot, 'parent')}</tbody>
        </table>`;
 
     // By person — aggregated across every project's detail for this range (loaded on demand).
@@ -1323,22 +1305,21 @@ async function renderDashboard() {
     if (actualDrillGroup && projPersonCache[key]) {
       const pc = projPersonCache[key], g = (groupsConfig || []).find(x => x.name === actualDrillGroup), pa = {};
       (g ? g.gids : []).forEach(gid => Object.entries(pc[gid] || {}).forEach(([p, v]) => {
-        const a = pa[p] || (pa[p] = { billable: 0, unbillable: 0 }); a.billable += v.b; a.unbillable += v.u; }));
-      people = Object.keys(pa).map(name => ({ name, billable: pa[name].billable, unbillable: pa[name].unbillable }))
-        .sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
+        pa[p] = (pa[p] || 0) + v; }));
+      people = Object.keys(pa).map(name => ({ name, hours: pa[name] }))
+        .sort((a, b) => b.hours - a.hours);
     }
     let personTable;
     if (!people) {
       personTable = '<h2 class="section-h">By person</h2><p class="muted" id="person-loading">Loading per-person totals…</p>';
     } else {
-      const ppB = people.reduce((a, p) => a + p.billable, 0);
-      const ppU = people.reduce((a, p) => a + p.unbillable, 0);
+      const ppTot = people.reduce((a, p) => a + p.hours, 0);
       personTable =
         `<h2 class="section-h">By person</h2>
          <table class="tasks">
-           <thead><tr><th>Person</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
-           <tbody>${people.map(p => statRow(p.name, p.billable, p.unbillable)).join('')}
-             ${statRow('Everyone', ppB, ppU, 'parent')}</tbody>
+           <thead><tr><th>Person</th><th class="hours">Hours</th></tr></thead>
+           <tbody>${people.map(p => statRow(p.name, p.hours)).join('')}
+             ${statRow('Everyone', ppTot, 'parent')}</tbody>
          </table>`;
     }
     box.innerHTML = projTable + personTable;
@@ -1354,7 +1335,7 @@ async function renderDashboard() {
     if (!people) loadPersonStats(key);
   }
 
-  // Pull each logged project's detail and split billable/unbillable per person — both globally
+  // Pull each logged project's detail and total the hours per person — both globally
   // (summary table) and per project (the stacked chart) — then cache + re-render.
   async function loadPersonStats(key) {
     if (personLoading[key] || personStatsCache[key]) return;   // already loading / loaded
@@ -1376,10 +1357,8 @@ async function renderDashboard() {
     gids.forEach((g, idx) => {
       const d = details[idx], pm = byGid[g] = {};
       (d.labels || []).forEach((name, i) => {
-        const a = agg[name] || (agg[name] = { billable: 0, unbillable: 0 });
-        a.billable += d.billable[i]; a.unbillable += d.unbillable[i];
-        const p = pm[name] || (pm[name] = { b: 0, u: 0 });
-        p.b += d.billable[i]; p.u += d.unbillable[i];
+        agg[name] = (agg[name] || 0) + d.hours[i];
+        pm[name] = (pm[name] || 0) + d.hours[i];
       });
       // Roll each project's time entries up by task AND the person who logged them, so the
       // Items tab can list every worked-on item with who logged the time and how much. Key by
@@ -1387,19 +1366,19 @@ async function renderDashboard() {
       (d.entries || []).forEach(e => {
         const person = e.by || 'Unknown';
         const ikey = (d.name || '') + ' | ' + e.task + ' | ' + person;
-        const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', person: person, billable: 0, unbillable: 0, entries: 0 });
-        if (e.billable) it.billable += e.hours; else it.unbillable += e.hours;
+        const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', person: person, hours: 0, entries: 0 });
+        it.hours += e.hours;
         it.entries += 1;
       });
     });
     projPersonCache[key] = byGid;
     personStatsCache[key] = Object.keys(agg)
-      .map(name => ({ name, billable: agg[name].billable, unbillable: agg[name].unbillable }))
-      .sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
+      .map(name => ({ name, hours: agg[name] }))
+      .sort((a, b) => b.hours - a.hours);
     itemStatsCache[key] = Object.values(items)
       // Group by project (A→Z), then heaviest items first within each project.
       .sort((a, b) => a.project.localeCompare(b.project)
-        || (b.billable + b.unbillable) - (a.billable + a.unbillable)
+        || b.hours - a.hours
         || a.task.localeCompare(b.task));
     // Re-render the whole tab so the chart (which needs the per-project split) draws too.
     if (dashTab === 'actualproj') renderActualProj();
@@ -1408,7 +1387,7 @@ async function renderDashboard() {
   }
 
   // Actual Hours › Items: every task worked on in the selected range, with its logged
-  // hours (billable / unbillable / total) and a grand total. Reuses the per-item rollup
+  // hours and a grand total. Reuses the per-item rollup
   // that loadPersonStats builds from each project's time entries.
   function renderActualItems() {
     const picker = rangePicker();
@@ -1436,15 +1415,14 @@ async function renderDashboard() {
         ${people.map(p => `<option value="${esc(p)}"${p === itemFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
       </select>
     </div>`;
-    const totB = items.reduce((a, it) => a + it.billable, 0);
-    const totU = items.reduce((a, it) => a + it.unbillable, 0);
-    const hoursCells = (b, u) =>
-      `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td>`;
+    const tot = items.reduce((a, it) => a + it.hours, 0);
+    const totEntries = items.reduce((a, it) => a + it.entries, 0);
+    const hoursCells = (h) => `<td class="hours">${h2(h)} h</td>`;
     // Headline summary: total hours logged across every project for the selected range.
     const summary = `<div class="summary-bar">
-      <div class="summary-stat"><span class="n">${h2(totB + totU)} h</span><span class="l">Total hours logged</span></div>
-      <div class="summary-stat"><span class="n">${h2(totB)} h</span><span class="l">Billable</span></div>
-      <div class="summary-stat"><span class="n">${h2(totU)} h</span><span class="l">Unbillable</span></div>
+      <div class="summary-stat"><span class="n">${h2(tot)} h</span><span class="l">Total hours logged</span></div>
+      <div class="summary-stat"><span class="n">${items.length}</span><span class="l">Tasks</span></div>
+      <div class="summary-stat"><span class="n">${totEntries}</span><span class="l">Time entries</span></div>
     </div>`;
     // One titled section per project: a heading, a table of that project's logged tasks
     // (with who logged them), and a project total row. `items` is already sorted by project,
@@ -1453,15 +1431,14 @@ async function renderDashboard() {
     items.forEach(it => (byProject[it.project] = byProject[it.project] || []).push(it));
     const sections = Object.keys(byProject).map(proj => {
       const list = byProject[proj];
-      const pB = list.reduce((a, it) => a + it.billable, 0);
-      const pU = list.reduce((a, it) => a + it.unbillable, 0);
+      const pTot = list.reduce((a, it) => a + it.hours, 0);
       const body = list.map(it =>
-        `<tr><td>${esc(it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.billable, it.unbillable)}</tr>`).join('');
+        `<tr><td>${esc(it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.hours)}</tr>`).join('');
       return `<h2 class="section-h">${esc(proj)}</h2>
         <table class="tasks">
-          <thead><tr><th>Task</th><th>Logged by</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+          <thead><tr><th>Task</th><th>Logged by</th><th class="hours">Hours</th></tr></thead>
           <tbody>${body}
-            <tr class="parent"><td>Total</td><td></td>${hoursCells(pB, pU)}</tr></tbody>
+            <tr class="parent"><td>Total</td><td></td>${hoursCells(pTot)}</tr></tbody>
         </table>`;
     }).join('');
     const noneMsg = items.length ? '' : `<p class="muted">No hours logged by ${esc(itemFilterPerson)} in ${rangeLabel(dateStart, dateEnd)}.</p>`;
@@ -1619,8 +1596,7 @@ async function renderDashboard() {
       wireRangeSel(); loadPersonStats(key); return;
     }
     const cap = (teamData && teamData.cap) || 128;
-    const rows = people.map(p => ({ name: p.name, billable: p.billable, unbillable: p.unbillable,
-        total: p.billable + p.unbillable }))
+    const rows = people.map(p => ({ name: p.name, total: p.hours }))
       .filter(p => p.total > 0)
       .sort((a, b) => b.total - a.total);
     view.innerHTML = picker + '<div class="chart-box"><canvas id="chart"></canvas></div>';
@@ -1636,8 +1612,7 @@ async function renderDashboard() {
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
       data: { labels, datasets: [{ label: 'Actual hours logged', data: totals,
-        backgroundColor: colors, borderColor: colors, borderWidth: 1,
-        _bill: rows.map(r => r.billable), _unbill: rows.map(r => r.unbillable) }] },
+        backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
       options: { responsive: true, maintainAspectRatio: false,
         onClick: (evt, els) => { if (els.length) showLoggedBreakdown(rows[els[0].index].name); },
         onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
@@ -1647,8 +1622,7 @@ async function renderDashboard() {
                        title: { display: true, text: 'Actual hours logged' }, ticks: { callback: v => h2(v) } } },
         plugins: { legend: { display: false }, capLine: { value: cap },
           tooltip: { callbacks: {
-            label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)`,
-            afterLabel: ctx => `${h2(ctx.dataset._bill[ctx.dataIndex])} h billable · ${h2(ctx.dataset._unbill[ctx.dataIndex])} h unbillable` } } } }
+            label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)` } } } }
     });
   }
 
@@ -1661,25 +1635,25 @@ async function renderDashboard() {
     const rows_ = [];
     Object.entries(pc).forEach(([gid, pm]) => {
       const v = pm[person];
-      if (v && (v.b + v.u) > 0) rows_.push({ project: nameOf[gid] || gid, billable: v.b, unbillable: v.u });
+      if (v > 0) rows_.push({ project: nameOf[gid] || gid, hours: v });
     });
-    rows_.sort((a, b) => (b.billable + b.unbillable) - (a.billable + a.unbillable));
-    const totB = rows_.reduce((a, r) => a + r.billable, 0), totU = rows_.reduce((a, r) => a + r.unbillable, 0);
+    rows_.sort((a, b) => b.hours - a.hours);
+    const tot = rows_.reduce((a, r) => a + r.hours, 0);
     const cap = (teamData && teamData.cap) || 128;
-    const pct = ((totB + totU) / cap * 100).toFixed(0);
-    const cell = (b, u) => `<td class="hours">${h2(b)} h</td><td class="hours">${h2(u)} h</td><td class="hours">${h2(b + u)} h</td>`;
-    let body = rows_.map(r => `<tr><td>${esc(r.project)}</td>${cell(r.billable, r.unbillable)}</tr>`).join('');
-    if (!rows_.length) body = '<tr><td colspan="4" class="muted">No hours logged.</td></tr>';
+    const pct = (tot / cap * 100).toFixed(0);
+    const cell = (h) => `<td class="hours">${h2(h)} h</td>`;
+    let body = rows_.map(r => `<tr><td>${esc(r.project)}</td>${cell(r.hours)}</tr>`).join('');
+    if (!rows_.length) body = '<tr><td colspan="2" class="muted">No hours logged.</td></tr>';
     view.innerHTML =
       `<div class="drill-head">
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(person)}</h2>
        </div>
-       <p class="drill-total">${h2(totB + totU)} h logged of ${h2(cap)} (${pct}%) · ${h2(totB)} h billable / ${h2(totU)} h unbillable · ${rows_.length} project(s)</p>
+       <p class="drill-total">${h2(tot)} h logged of ${h2(cap)} (${pct}%) · ${rows_.length} project(s)</p>
        <table class="tasks">
-         <thead><tr><th>Project</th><th class="hours">Billable</th><th class="hours">Unbillable</th><th class="hours">Total</th></tr></thead>
+         <thead><tr><th>Project</th><th class="hours">Hours</th></tr></thead>
          <tbody>${body}
-           <tr class="parent"><td>All projects</td>${cell(totB, totU)}</tr></tbody>
+           <tr class="parent"><td>All projects</td>${cell(tot)}</tr></tbody>
        </table>`;
     document.getElementById('tochart').onclick = renderTeamActual;
   }
@@ -1733,7 +1707,7 @@ async function renderDashboard() {
         const groups = (groupsConfig || []).map(g => buildGroupSummary(g, juneData))
                          .filter(g => g.members.length);
         const standalone = juneData.filter(w => w.cap != null && !memberGids.has(w.gid))
-                             .sort((a, b) => b.billable_hours - a.billable_hours);
+                             .sort((a, b) => b.hours - a.hours);
         const others = juneData.filter(w => w.cap == null && !memberGids.has(w.gid))
                          .sort((a, b) => b.hours - a.hours);
         view.innerHTML = picker;
@@ -1961,16 +1935,14 @@ async function renderJuneDetail(gid) {
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
       data:{ labels:data.labels, datasets:[
-        { label:'Billable', data:data.billable, backgroundColor:'#4cc085', borderColor:'#6cd49d',
-          borderWidth:1, _counts:data.counts },
-        { label:'Unbillable', data:data.unbillable, backgroundColor:'#8a929c', borderColor:'#a3aab4',
+        { label:'Hours logged', data:data.hours, backgroundColor:'#4cc085', borderColor:'#6cd49d',
           borderWidth:1 } ] },
       options:{ responsive:true, maintainAspectRatio:false,
         onClick:(evt, els) => { if (els.length) showEntries(data.labels[els[0].index]); },
         onHover:(evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-        plugins:{ legend:{display:true}, tooltip:{ callbacks:{
-          label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
-          afterLabel: ctx => ctx.datasetIndex === 0 ? `Entries: ${data.counts[ctx.dataIndex]}` : '' } } },
+        plugins:{ legend:{display:false}, tooltip:{ callbacks:{
+          label: ctx => `${h2(ctx.parsed.y)} h`,
+          afterLabel: ctx => `Entries: ${data.counts[ctx.dataIndex]}` } } },
         scales:{ x:{ title:{display:true,text:'Logged by'}, ticks:{ callback:(v,i) => [data.labels[i], h2(data.hours[i]) + ' h'] } },
                  y:{ beginAtZero:true, title:{display:true,text:'Hours logged'}, ticks:{ callback:v => h2(v) } } } }
     });
@@ -1982,23 +1954,20 @@ async function renderJuneDetail(gid) {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name, fn:showChart}, {label:person}]);
     const rows_ = data.entries.filter(e => e.by === person);
     const total = rows_.reduce((a, e) => a + e.hours, 0);
-    const billTotal = rows_.reduce((a, e) => a + (e.billable ? e.hours : 0), 0);
-    const unbillTotal = total - billTotal;
     let rows = '';
     rows_.forEach(e => {
       rows += `<tr><td>${esc(e.date)}</td><td>${esc(e.task)}</td>` +
-        `<td>${e.billable ? '<span class="badge">Billable</span>' : '<span class="badge" style="color:#a3aab4">Unbillable</span>'}</td>` +
         `<td class="hours">${h2(e.hours)} h</td></tr>`;
     });
-    if (!rows_.length) rows = '<tr><td colspan="4" class="muted">No entries.</td></tr>';
+    if (!rows_.length) rows = '<tr><td colspan="3" class="muted">No entries.</td></tr>';
     document.getElementById('view').innerHTML =
       `<div class="drill-head">
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(person)}</h2>
        </div>
-       <p class="drill-total">${rows_.length} entr${rows_.length === 1 ? 'y' : 'ies'} · ${total.toFixed(2)} h logged in ${ml} · ${h2(billTotal)} h billable / ${h2(unbillTotal)} h unbillable</p>
+       <p class="drill-total">${rows_.length} entr${rows_.length === 1 ? 'y' : 'ies'} · ${total.toFixed(2)} h logged in ${ml}</p>
        <table class="tasks">
-         <thead><tr><th>Date</th><th>Task</th><th>Billable?</th><th class="hours">Hours</th></tr></thead>
+         <thead><tr><th>Date</th><th>Task</th><th class="hours">Hours</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>`;
     document.getElementById('tochart').onclick = showChart;
@@ -2008,7 +1977,7 @@ async function renderJuneDetail(gid) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     try {
       data = await (await fetch('/api/june/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
-      document.getElementById('sub').textContent = `Hours logged ${rangeLabel(data.start, data.end)} per person · ${data.nentries} time entries · ${h2(data.billable_hours)} h billable / ${h2(data.unbillable_hours)} h unbillable`;
+      document.getElementById('sub').textContent = `Hours logged ${rangeLabel(data.start, data.end)} per person · ${data.nentries} time entries · ${h2(data.total_hours)} h total`;
       document.getElementById('dash-updated').textContent = data.updated ? ('Updated ' + data.updated) : '';
       showChart();
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
