@@ -548,15 +548,26 @@ PAGE = r"""<!DOCTYPE html>
   .cap-bar.over .fill { background:var(--red); }
   .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; }
   /* Filter toolbar. Every tab that filters anything uses exactly one of these, directly
-     under the page sub-heading, and it always opens with a bold .tb-label. */
-  .toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:0 0 18px;
-             font-size:13px; color:var(--muted); }
+     under the stat strip, and it always opens with a bold .tb-label. It sits in its own
+     panel so the controls read as one strip instead of floating on the page. */
+  .toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:10px 14px; margin:0 0 20px;
+             background:var(--panel); border:1px solid var(--border); border-radius:10px;
+             padding:11px 16px; font-size:13px; color:var(--muted); }
   .toolbar label { margin-left:6px; }
   .toolbar label:first-child { margin-left:0; }
   .toolbar select, .toolbar input[type=date] { background:var(--panel2); color:var(--text);
-                    border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer; }
+                    border:1px solid var(--border); border-radius:7px; padding:6px 9px; font-size:13px; cursor:pointer; }
+  .toolbar select:hover, .toolbar input[type=date]:hover { border-color:#4d5666; }
   .toolbar input[type=date]::-webkit-calendar-picker-indicator { filter:invert(.8); cursor:pointer; }
+  /* Search re-runs the range; Refresh (top right) is the page's primary action, so this
+     one stays secondary and doesn't compete with it. */
+  .toolbar .btn { background:var(--panel2); color:var(--text); border:1px solid var(--border);
+                  padding:6px 14px; font-size:13px; }
+  .toolbar .btn:hover { background:#414854; border-color:#4d5666; }
   .toolbar .tb-label { font-weight:600; color:var(--text); margin-left:0; }
+  /* A label and its control wrap as one unit, so a narrow window never strands a label
+     on the end of a line with its <select> on the next. */
+  .toolbar .tb-group { display:inline-flex; align-items:center; gap:8px; }
   .toolbar .chk { display:inline-flex; align-items:center; gap:5px; margin-left:0; cursor:pointer; }
   .toolbar .chk input { cursor:pointer; margin:0; }
   .toolbar .tb-sep { width:1px; align-self:stretch; background:var(--border); margin:2px 4px; }
@@ -575,18 +586,20 @@ PAGE = r"""<!DOCTYPE html>
   .content { flex:1; min-width:0; }
   .content .head { margin-bottom:4px; }
   .content h1 { font-size:20px; margin:0; }
+  .content .sub { margin:3px 0 16px; }   /* tighter than the standalone .sub default */
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
   .section-h.flush { margin-top:8px; padding-top:0; border-top:0; }   /* first heading under the filter */
-  /* Daily Log: day headings sit under a person heading, so they read one level quieter */
-  .section-h.day-h { font-size:13px; font-weight:600; color:var(--muted); text-transform:uppercase;
-                     letter-spacing:.04em; margin:18px 0 8px; padding-top:0; border-top:0; }
-  /* Headline stat banner. Every tab opens with one so the top-line numbers are always in
-     the same place. Green numbers on Actual-Hours tabs, blue on Estimated (.est). */
-  .summary-bar { display:flex; flex-wrap:wrap; gap:24px 40px; background:var(--panel2);
-                 border:1px solid var(--border); border-radius:12px; padding:18px 24px; margin:0 0 18px; }
-  .summary-stat { display:flex; flex-direction:column; gap:4px; }
-  .summary-stat .n { font-size:28px; font-weight:700; color:var(--green-d); font-variant-numeric:tabular-nums; }
-  .summary-stat .l { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  /* Headline stat strip. Every tab opens with one so the top-line numbers are always in
+     the same place. Deliberately quieter than the <h1> above it — it summarises the page,
+     it isn't the page. Green numbers on Actual-Hours tabs, blue on Estimated (.est). */
+  /* No box of its own — a boxed strip stacked above the boxed toolbar reads as clutter.
+     A hairline underneath is enough to set it apart from the controls below. */
+  .summary-bar { display:flex; flex-wrap:wrap; gap:12px 36px; padding:2px 2px 15px; margin:0 0 16px;
+                 border-bottom:1px solid var(--border); }
+  .summary-stat { display:flex; flex-direction:column; gap:2px; }
+  .summary-stat .n { font-size:19px; font-weight:600; line-height:1.2; color:var(--green-d);
+                     font-variant-numeric:tabular-nums; }
+  .summary-stat .l { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.05em; }
   .summary-bar.est .summary-stat .n { color:var(--blue-d); }
   .summary-stat .n.neg { color:var(--red); }
   .card.june:hover { border-color:var(--green); }
@@ -653,6 +666,15 @@ PAGE = r"""<!DOCTYPE html>
   table.tasks td { padding:9px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
   table.tasks tr.parent td { font-weight:600; }
   table.tasks tr.sub td { font-weight:400; color:var(--muted); }
+  /* Daily Log: the date cell spans its day's rows and carries that day's total. A rule
+     above each new day's first row keeps the days visually separate without headings. */
+  table.daylog td.day { white-space:nowrap; vertical-align:top; color:var(--muted); }
+  table.daylog td.day .day-tot { display:block; margin-top:3px; font-size:12px; color:var(--faint);
+                                 font-variant-numeric:tabular-nums; }
+  /* Rule between days only, not between every row — each day reads as one block. */
+  table.daylog tbody td { border-bottom:0; }
+  table.daylog tbody tr.day-start td { border-top:1px solid var(--border); }
+  table.daylog tbody tr:first-child td { border-top:0; }
   .proj-toggle { display:inline-flex; align-items:center; gap:8px; cursor:pointer; }
   .proj-toggle input { cursor:pointer; margin:0; flex:0 0 auto; }
   .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; background:var(--panel2); color:var(--text); }
@@ -975,10 +997,11 @@ function rangeLabel(s, e){ return fmtDate(s) + ' – ' + fmtDate(e); }
 // extra controls that tab needs appended after a separator — one toolbar, never two stacked.
 function rangePicker(extra){
   return `<div class="toolbar">
-      <span class="tb-label">Date range</span>
-      <label for="d-start">From</label><input type="date" id="d-start" value="${dateStart}">
-      <label for="d-end">To</label><input type="date" id="d-end" value="${dateEnd}">
-      <button class="btn" id="range-go">Search</button>
+      <span class="tb-group"><span class="tb-label">Date range</span>
+        <input type="date" id="d-start" value="${dateStart}" aria-label="From">
+        <span>to</span>
+        <input type="date" id="d-end" value="${dateEnd}" aria-label="To">
+        <button class="btn" id="range-go">Search</button></span>
       ${extra ? '<span class="tb-sep"></span>' + extra : ''}
     </div>`;
 }
@@ -1618,11 +1641,11 @@ async function renderDashboard() {
     if (itemFilterPerson && !people.includes(itemFilterPerson)) itemFilterPerson = null;
     const items = itemFilterPerson ? allItems.filter(it => it.person === itemFilterPerson) : allItems;
     // Range + assignee live in the one toolbar this tab shows.
-    const picker = rangePicker(`<span class="tb-label">Assignee</span>
+    const picker = rangePicker(`<span class="tb-group"><span class="tb-label">Assignee</span>
       <select id="item-assignee">
         <option value="">All assignees</option>
         ${people.map(p => `<option value="${esc(p)}"${p === itemFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
-      </select>`);
+      </select></span>`);
     const tot = items.reduce((a, it) => a + it.hours, 0);
     const totEntries = items.reduce((a, it) => a + it.entries, 0);
     const nproj = new Set(items.map(it => it.project)).size;
@@ -1645,11 +1668,11 @@ async function renderDashboard() {
       const body = list.map(it =>
         `<tr><td>${esc(it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.hours)}</tr>`).join('');
       // Heading carries the project total, matching how the Daily Log heads its sections.
+      // The heading carries the project total, so the table needs no total row.
       return `<h2 class="section-h${i ? '' : ' flush'}">${esc(proj)} · ${h2(pTot)} h</h2>
         <table class="tasks">
           <thead><tr><th>Task</th><th>Logged by</th><th class="hours">Hours</th></tr></thead>
-          <tbody>${body}
-            <tr class="parent"><td>Project total</td><td></td>${hoursCells(pTot)}</tr></tbody>
+          <tbody>${body}</tbody>
         </table>`;
     }).join('');
     const noneMsg = items.length ? '' : note(`No hours logged by ${itemFilterPerson} in ${rangeLabel(dateStart, dateEnd)}.`);
@@ -1681,16 +1704,16 @@ async function renderDashboard() {
     if (dailyFilterPerson && !people.includes(dailyFilterPerson)) dailyFilterPerson = null;
     const rows = dailyFilterPerson ? allRows.filter(r => r.person === dailyFilterPerson) : allRows;
     // Range, assignee and day order all live in the one toolbar this tab shows.
-    const picker = rangePicker(`<span class="tb-label">Assignee</span>
+    const picker = rangePicker(`<span class="tb-group"><span class="tb-label">Assignee</span>
       <select id="daily-assignee">
         <option value="">All assignees</option>
         ${people.map(p => `<option value="${esc(p)}"${p === dailyFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
-      </select>
-      <span class="tb-label">Order</span>
+      </select></span>
+      <span class="tb-group"><span class="tb-label">Order</span>
       <select id="daily-order">
         <option value="old"${dailyNewestFirst ? '' : ' selected'}>Oldest day first</option>
         <option value="new"${dailyNewestFirst ? ' selected' : ''}>Newest day first</option>
-      </select>`);
+      </select></span>`);
     const tot = rows.reduce((a, r) => a + r.hours, 0);
     const totEntries = rows.reduce((a, r) => a + r.entries, 0);
     const days = new Set(rows.map(r => r.person + '|' + r.date));
@@ -1698,7 +1721,6 @@ async function renderDashboard() {
     const summary = summaryBar([
       { n: h2(tot) + ' h', l: 'Hours logged' },
       { n: days.size, l: 'Person-days' },
-      { n: days.size ? h2(tot / days.size) + ' h' : '0.00 h', l: 'Avg per person-day' },
       { n: totEntries, l: 'Time entries' },
     ]);
     // Group person → day. `rows` is already sorted person A→Z then date ascending, so the
@@ -1708,24 +1730,28 @@ async function renderDashboard() {
       const p = byPerson[r.person] = byPerson[r.person] || {};
       (p[r.date] = p[r.date] || []).push(r);
     });
+    // One table per person — not one per day. The date cell spans that day's rows and
+    // carries the day's total underneath it, so nothing is stated twice and the column
+    // headers appear once instead of once per day.
     const sections = Object.keys(byPerson).map((person, pi) => {
       const dayMap = byPerson[person];
       const dayKeys = Object.keys(dayMap);
       if (dailyNewestFirst) dayKeys.reverse();
       const pTot = dayKeys.reduce((a, d) => a + dayMap[d].reduce((x, r) => x + r.hours, 0), 0);
-      const dayTables = dayKeys.map(d => {
+      const body = dayKeys.map(d => {
         const list = dayMap[d];
         const dTot = list.reduce((a, r) => a + r.hours, 0);
-        const body = list.map(r =>
-          `<tr><td>${esc(r.task)}</td><td>${esc(r.project)}</td>${hoursCells(r.hours)}</tr>`).join('');
-        return `<h3 class="section-h day-h">${d ? esc(fmtDate(d)) : 'No date'} · ${h2(dTot)} h</h3>
-          <table class="tasks">
-            <thead><tr><th>Task</th><th>Project</th><th class="hours">Hours</th></tr></thead>
-            <tbody>${body}
-              <tr class="parent"><td>Day total</td><td></td>${hoursCells(dTot)}</tr></tbody>
-          </table>`;
+        const dayCell = `<td class="day" rowspan="${list.length}">${d ? esc(fmtDate(d)) : 'No date'}` +
+          `<span class="day-tot">${h2(dTot)} h</span></td>`;
+        return list.map((r, i) =>
+          `<tr class="${i ? '' : 'day-start'}">${i ? '' : dayCell}` +
+          `<td>${esc(r.task)}</td><td>${esc(r.project)}</td>${hoursCells(r.hours)}</tr>`).join('');
       }).join('');
-      return `<h2 class="section-h${pi ? '' : ' flush'}">${esc(person)} · ${h2(pTot)} h</h2>` + dayTables;
+      return `<h2 class="section-h${pi ? '' : ' flush'}">${esc(person)} · ${h2(pTot)} h</h2>
+        <table class="tasks daylog">
+          <thead><tr><th>Day</th><th>Task</th><th>Project</th><th class="hours">Hours</th></tr></thead>
+          <tbody>${body}</tbody>
+        </table>`;
     }).join('');
     const noneMsg = rows.length ? '' : note(`No hours logged by ${dailyFilterPerson} in ${rangeLabel(dateStart, dateEnd)}.`);
     view.innerHTML = summary + picker + (noneMsg || sections);
@@ -2071,7 +2097,7 @@ async function renderDashboard() {
           { n: h2(totUsed) + ' h', l: 'Hours used' },
           { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
           { n: (totCap ? (totUsed / totCap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
-          { n: overCount, l: 'Budgets over', neg: overCount > 0 },
+          { n: overCount, l: overCount === 1 ? 'Budget over' : 'Budgets over', neg: overCount > 0 },
         ]);
         view.innerHTML = (hasCap ? summary : '') + picker;
         if (!hasCap && !others.length) {
