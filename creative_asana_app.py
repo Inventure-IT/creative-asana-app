@@ -48,6 +48,7 @@ PROJECTS = [
     {"gid": "1216154609521581", "name": "NuNu"},
     {"gid": "1216640931651593", "name": "Ross Wood Website Redesign", "cap": 30},   # one-month cap, not a recurring MSA
     {"gid": "1216208009045309", "name": "Marsh and Main"},
+    {"gid": "1217239377209835", "name": "Sales"},
 ]
 
 # Budget groups: several projects that share ONE combined monthly capacity.
@@ -512,7 +513,7 @@ PAGE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark">
-<title>Asana Dashboard</title>
+<title>Creative Hours Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root { --blue:#6aa9e0; --blue-d:#9cc7f0; --green:#4cc085; --green-d:#6cd49d; --red:#e26b66;
@@ -532,20 +533,29 @@ PAGE = r"""<!DOCTYPE html>
   .stat .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .card .go { margin-top:14px; font-size:12px; color:var(--blue-d); }
   .head-right { display:flex; align-items:center; gap:12px; }
+  /* Loading / empty / "nothing matches the filter" states. One component everywhere, so
+     every tab announces itself the same way. .box centers it inside a chart frame. */
+  .note { color:var(--muted); font-size:13px; margin:14px 0; }
+  .note.box { display:flex; align-items:center; justify-content:center; height:100%;
+              margin:0; padding:24px; text-align:center; }
+  /* A number that has gone the wrong way (over budget). Listed against the card/summary
+     selectors too, so it wins over the blue/green accent those numbers normally take. */
+  .neg, .card .stat .n.neg, .card.june .stat .n.neg { color:var(--red); }
   .dash-updated { font-size:11px; color:var(--faint); white-space:nowrap; }
   .cap-bar { margin-top:14px; }
   .cap-bar .track { height:8px; background:var(--panel2); border-radius:5px; overflow:hidden; }
   .cap-bar .fill { height:100%; background:var(--green); border-radius:5px; }
   .cap-bar.over .fill { background:var(--red); }
   .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; }
-  /* month filter toolbar */
-  .toolbar { display:flex; align-items:center; gap:8px; margin:0 0 18px; font-size:13px; color:var(--muted); }
+  /* Filter toolbar. Every tab that filters anything uses exactly one of these, directly
+     under the page sub-heading, and it always opens with a bold .tb-label. */
+  .toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:0 0 18px;
+             font-size:13px; color:var(--muted); }
   .toolbar label { margin-left:6px; }
   .toolbar label:first-child { margin-left:0; }
   .toolbar select, .toolbar input[type=date] { background:var(--panel2); color:var(--text);
                     border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer; }
   .toolbar input[type=date]::-webkit-calendar-picker-indicator { filter:invert(.8); cursor:pointer; }
-  .toolbar.est-toolbar, .toolbar.team-toolbar { flex-wrap:wrap; }
   .toolbar .tb-label { font-weight:600; color:var(--text); margin-left:0; }
   .toolbar .chk { display:inline-flex; align-items:center; gap:5px; margin-left:0; cursor:pointer; }
   .toolbar .chk input { cursor:pointer; margin:0; }
@@ -570,12 +580,15 @@ PAGE = r"""<!DOCTYPE html>
   /* Daily Log: day headings sit under a person heading, so they read one level quieter */
   .section-h.day-h { font-size:13px; font-weight:600; color:var(--muted); text-transform:uppercase;
                      letter-spacing:.04em; margin:18px 0 8px; padding-top:0; border-top:0; }
-  /* Tasks tab: total-hours summary banner */
-  .summary-bar { display:flex; gap:24px; background:var(--panel2); border:1px solid var(--border);
-                 border-radius:12px; padding:18px 24px; margin:6px 0 4px; }
+  /* Headline stat banner. Every tab opens with one so the top-line numbers are always in
+     the same place. Green numbers on Actual-Hours tabs, blue on Estimated (.est). */
+  .summary-bar { display:flex; flex-wrap:wrap; gap:24px 40px; background:var(--panel2);
+                 border:1px solid var(--border); border-radius:12px; padding:18px 24px; margin:0 0 18px; }
   .summary-stat { display:flex; flex-direction:column; gap:4px; }
   .summary-stat .n { font-size:28px; font-weight:700; color:var(--green-d); font-variant-numeric:tabular-nums; }
   .summary-stat .l { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .summary-bar.est .summary-stat .n { color:var(--blue-d); }
+  .summary-stat .n.neg { color:var(--red); }
   .card.june:hover { border-color:var(--green); }
   .card.june .stat .n, .card.june .go { color:var(--green-d); }
   .card.june .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
@@ -597,7 +610,10 @@ PAGE = r"""<!DOCTYPE html>
   /* detail */
   .head { display:flex; align-items:center; justify-content:space-between; gap:16px; }
   .left { display:flex; align-items:center; gap:14px; }
-  .crumbs { font-size:15px; display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+  /* Breadcrumbs sit above the page title on detail pages, so the <h1> stays the biggest
+     thing on every page — dashboard and drill-in alike. */
+  .crumbs { font-size:12px; display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+            margin:0 0 8px; color:var(--faint); }
   .crumb { color:var(--blue-d); text-decoration:none; cursor:pointer; }
   .crumb:hover { text-decoration:underline; }
   .crumb-sep { color:#5a616b; }
@@ -628,8 +644,8 @@ PAGE = r"""<!DOCTYPE html>
                  font-variant-numeric:tabular-nums; }
   /* drill-down task list */
   .drill-head { display:flex; align-items:center; gap:14px; margin-bottom:14px; }
-  .drill-head h2 { font-size:17px; margin:0; }
-  .drill-total { font-size:13px; color:var(--muted); }
+  .drill-head h2 { font-size:16px; margin:0; }   /* same step as .section-h */
+  .drill-total { font-size:13px; color:var(--muted); margin:0 0 16px; }
   table.tasks { width:100%; border-collapse:collapse; font-size:14px; }
   table.tasks th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
                    color:var(--muted); border-bottom:2px solid var(--border); padding:8px 10px; }
@@ -640,8 +656,14 @@ PAGE = r"""<!DOCTYPE html>
   .proj-toggle { display:inline-flex; align-items:center; gap:8px; cursor:pointer; }
   .proj-toggle input { cursor:pointer; margin:0; flex:0 0 auto; }
   .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; background:var(--panel2); color:var(--text); }
+  .badge.none { color:var(--faint); }   /* the "No status" placeholder badge */
   .sub-name { padding-left:22px; position:relative; }
   .sub-name::before { content:'↳'; position:absolute; left:6px; color:#5a616b; }
+  /* Nesting steps for rows in the breakdown tables: .lvl1 is a task under its project
+     heading row, .lvl2 a subtask under that task (keeps the ↳ aligned with the indent). */
+  .lvl1 { padding-left:22px; }
+  .sub-name.lvl2 { padding-left:34px; }
+  .sub-name.lvl2::before { left:18px; }
   .done { text-decoration:line-through; color:var(--faint); }
   .hours { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
   /* settings: per-person graph colors */
@@ -671,6 +693,14 @@ function destroyCharts(){
   donutCharts = [];
 }
 
+// The :root palette, mirrored for canvas drawing (Chart.js can't read CSS variables).
+// Keep these in lockstep with the --blue/--green/... custom properties in <style>.
+const C = {
+  blue:'#6aa9e0', blueD:'#9cc7f0', green:'#4cc085', greenD:'#6cd49d', red:'#e26b66',
+  panel:'#2a2f38', panel2:'#353b45', border:'#3c4350', muted:'#a3aab4', faint:'#737b86',
+  amber:'#f0c674',   // reserved for capacity/budget markers only — never a data series
+};
+
 // Dark-mode chart defaults: light tick/legend text and faint gridlines.
 Chart.defaults.color = '#9aa0a8';
 Chart.defaults.borderColor = 'rgba(255,255,255,.08)';
@@ -685,9 +715,9 @@ const capLinePlugin = {
     const y = c.scales.y.getPixelForValue(cfg.value);
     const { left, right } = c.chartArea, ctx = c.ctx;
     ctx.save();
-    ctx.beginPath(); ctx.setLineDash([6, 4]); ctx.lineWidth = 2; ctx.strokeStyle = '#8fc0ee';
+    ctx.beginPath(); ctx.setLineDash([6, 4]); ctx.lineWidth = 2; ctx.strokeStyle = C.blueD;
     ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
-    ctx.setLineDash([]); ctx.fillStyle = '#8fc0ee'; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'right';
+    ctx.setLineDash([]); ctx.fillStyle = C.blueD; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'right';
     ctx.fillText(h2(cfg.value) + ' h target', right - 6, y - 6);
     ctx.restore();
   }
@@ -697,10 +727,11 @@ Chart.register(capLinePlugin);
 // Team Capacity bar color: green when a person lands within CAP_TOLERANCE hours of the
 // target (i.e. appropriately loaded), red when they are under- or over-booked past it.
 const CAP_TOLERANCE = 15;
-const capColor = (h, cap) => Math.abs(h - cap) <= CAP_TOLERANCE ? '#4cc085' : '#e26b66';
+const capColor = (h, cap) => Math.abs(h - cap) <= CAP_TOLERANCE ? C.green : C.red;
 
-// Label for task rows that sit in no status column; used by the status filters.
-const NO_STATUS = '(No status)';
+// Label for task rows that sit in no status column; used by the status filters and shown
+// as a muted badge wherever a status column would be.
+const NO_STATUS = 'No status';
 const r2 = v => Math.round(v * 100) / 100;
 
 // Draws a per-bar monthly-budget marker: a short amber line across each bar that
@@ -716,7 +747,7 @@ const capMarksPlugin = {
       const bar = meta.data[i];
       if (cap == null || !bar) return;
       const half = (bar.width || 18) / 2 + 2, py = y.getPixelForValue(cap);
-      ctx.beginPath(); ctx.lineWidth = 2.5; ctx.strokeStyle = '#f0c674';
+      ctx.beginPath(); ctx.lineWidth = 2.5; ctx.strokeStyle = C.amber;
       ctx.moveTo(bar.x - half, py); ctx.lineTo(bar.x + half, py); ctx.stroke();
     });
     ctx.restore();
@@ -724,9 +755,22 @@ const capMarksPlugin = {
 };
 Chart.register(capMarksPlugin);
 
-function fmtErr(e){ return '<p class="muted">Error: '+e+'</p>'; }
+function fmtErr(e){ return '<p class="note">Error: '+e+'</p>'; }
 function esc(s){ return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function h2(x){ return Number(x || 0).toFixed(2); }   // always two decimals: 40.00, 40.50, 40.75
+// One phrasing for every loading / empty / nothing-matches state on every tab.
+function note(text){ return `<p class="note">${esc(text)}</p>`; }
+function noteBox(text){ return `<p class="note box">${esc(text)}</p>`; }
+const LOADING = 'Loading…';
+// "1 project" / "3 projects" — used anywhere a count is read out in prose.
+function plural(n, word, wordPlural){ return `${n} ${n === 1 ? word : (wordPlural || word + 's')}`; }
+// Headline stat banner shown at the top of every tab. stats: [{n, l, neg?}].
+// kind 'est' paints the numbers blue (estimated hours), anything else green (logged hours).
+function summaryBar(stats, kind){
+  return `<div class="summary-bar${kind === 'est' ? ' est' : ''}">` +
+    stats.map(s => `<div class="summary-stat"><span class="n${s.neg ? ' neg' : ''}">${esc(String(s.n))}</span>` +
+      `<span class="l">${esc(s.l)}</span></div>`).join('') + '</div>';
+}
 
 // Stable per-person colors, shared across the estimated & actual per-person stacked charts,
 // so the same employee keeps one color everywhere within a session.
@@ -811,6 +855,9 @@ function sliceColor(label){
   if (label === FREE_SLICE) return '#434a56';
   return projectColor(label);
 }
+// Donut rings are drawn on .donut-card, whose background is --panel2 — the slice borders
+// must match that surface, not the darker --panel used by the outer cards.
+const DONUT_BORDER = C.panel2;
 const sliceRank = label => label === FREE_SLICE ? 2 : label === OTHER_SLICE ? 1 : 0;
 function donutSlices(map){
   const all = Object.entries(map).filter(([, h]) => h > 0).sort((a, b) => b[1] - a[1]);
@@ -845,7 +892,7 @@ function donutGrid(container, rows, opts){
        `<div class="donut-card" data-di="${i}">
           <h4>${esc(r.name)}</h4>
           <div class="donut-box"><canvas id="donut-${i}"></canvas></div>
-          <div class="donut-total">${esc(r.caption || `${h2(r.total)} h · ${r.slices.length} project${r.slices.length === 1 ? '' : 's'}`)}</div>
+          <div class="donut-total">${esc(r.caption || `${h2(r.total)} h · ${plural(r.slices.length, 'project')}`)}</div>
         </div>`).join('')}</div>`);
   rows.forEach((r, i) => {
     const el = document.getElementById('donut-' + i);
@@ -855,7 +902,7 @@ function donutGrid(container, rows, opts){
       type: 'doughnut',
       data: { labels: r.slices.map(s => s.label),
               datasets: [{ data: r.slices.map(s => r2(s.hours)), backgroundColor: colors,
-                           borderColor: '#2a2f38', borderWidth: 2 }] },
+                           borderColor: DONUT_BORDER, borderWidth: 2 }] },
       options: { responsive: true, maintainAspectRatio: false, cutout: '58%',
         plugins: { legend: { display: false },
           tooltip: { callbacks: { label: ctx =>
@@ -924,23 +971,39 @@ function monthRange(now){ const d = now || new Date(), p = n => String(n).padSta
 let [dateStart, dateEnd] = monthRange();
 function fmtDate(d){ const [y,m,day]=d.split('-').map(Number); return new Date(y, m-1, day).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
 function rangeLabel(s, e){ return fmtDate(s) + ' – ' + fmtDate(e); }
-function rangePicker(){
+// The single filter row every Actual-Hours tab opens with: the date range, plus whatever
+// extra controls that tab needs appended after a separator — one toolbar, never two stacked.
+function rangePicker(extra){
   return `<div class="toolbar">
+      <span class="tb-label">Date range</span>
       <label for="d-start">From</label><input type="date" id="d-start" value="${dateStart}">
       <label for="d-end">To</label><input type="date" id="d-end" value="${dateEnd}">
       <button class="btn" id="range-go">Search</button>
+      ${extra ? '<span class="tb-sep"></span>' + extra : ''}
     </div>`;
 }
+// Sidebar labels stay short (they read under their section heading); the page <h1> spells
+// out which half of the dashboard you're on, because several tabs share a short label.
+// Every tab carries a one-line `sub` so no page opens without saying what it shows.
 const TABS = {
-  team: { label:'Team Capacity', title:'Team Capacity' },
-  actualproj: { label:'Bar Chart', title:'Bar Chart' },
-  actualitems: { label:'Task List', title:'Task List' },
-  actualdaily: { label:'Daily Log', title:'Daily Log' },
-  estproj: { label:'Bar Chart', title:'Bar Chart' },
-  estimated: { label:'Statistics', title:'Statistics' },
-  teamactual: { label:'Team Capacity', title:'Team Capacity' },
-  capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity' },
-  settings: { label:'Graph Colors', title:'Graph Colors', sub:'Pick a color for each person — saved in this browser and applied to every per-person chart.' },
+  team: { label:'Team Capacity', title:'Team Capacity · Estimated',
+    sub:'Remaining estimated hours per person against the monthly target. Click a bar or ring for their full breakdown.' },
+  estproj: { label:'Bar Chart', title:'Projects · Estimated',
+    sub:'Remaining estimated hours per project, stacked by the person assigned.' },
+  estimated: { label:'Project Cards', title:'Project Cards · Estimated',
+    sub:'One card per project: estimated hours still on the board and how many tasks they sit in.' },
+  teamactual: { label:'Team Capacity', title:'Team Capacity · Logged',
+    sub:'Hours actually logged per person in the selected range, against the monthly target.' },
+  capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity · Logged',
+    sub:'Hours logged against each retainer budget for the selected range, with what is left.' },
+  actualproj: { label:'Bar Chart', title:'Projects · Logged',
+    sub:'Hours logged per project in the selected range, stacked by the person who logged them.' },
+  actualitems: { label:'Task List', title:'Task List · Logged',
+    sub:'Every task worked on in the selected range, grouped by project.' },
+  actualdaily: { label:'Daily Log', title:'Daily Log · Logged',
+    sub:'Day by day, what each person logged their time to in the selected range.' },
+  settings: { label:'Graph Colors', title:'Graph Colors',
+    sub:'Pick a color for each person — saved in this browser and applied to every per-person chart.' },
 };
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views.
 const NAV_SECTIONS = [
@@ -953,7 +1016,7 @@ const NAV_SECTIONS = [
 // sidebar always stays put. The active item tracks the last-opened tab (dashTab).
 function sidebarHtml() {
   return `<nav class="sidebar">
-      <div class="brand">Asana Dashboard</div>
+      <div class="brand">Creative Hours</div>
       ${NAV_SECTIONS.map(sec =>
         `<div class="nav-section">${sec.title}</div>` +
         sec.tabs.map(k => `<a href="#" class="nav-item${k === dashTab ? ' active' : ''}" data-tab="${k}">${TABS[k].label}</a>`).join('')
@@ -1008,7 +1071,7 @@ function capCard(w) {
     <div class="stats">
       <div class="stat"><div class="n">${h2(w.cap)}</div><div class="l">Capacity h/mo</div></div>
       <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
-      <div class="stat"><div class="n"${remaining < 0 ? ' style="color:#e26b66"' : ''}>${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
+      <div class="stat"><div class="n${remaining < 0 ? ' neg' : ''}">${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
     ${capBar(used, cap)}`;
   c.onclick = () => { location.hash = '#/june/' + w.gid; };
@@ -1042,7 +1105,7 @@ function groupCard(g) {
     <div class="stats">
       <div class="stat"><div class="n">${h2(g.cap)}</div><div class="l">Capacity h/mo</div></div>
       <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
-      <div class="stat"><div class="n"${remaining < 0 ? ' style="color:#e26b66"' : ''}>${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
+      <div class="stat"><div class="n${remaining < 0 ? ' neg' : ''}">${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
     ${capBar(used, cap)}
     <div class="grp-members">${rows}</div>`;
@@ -1066,7 +1129,7 @@ async function renderDashboard() {
           </div>
         </div>
         <p class="sub" id="tab-sub"></p>
-        <div id="tabview"><p class="muted">Loading widgets…</p></div>
+        <div id="tabview"><p class="note">Loading…</p></div>
       </main>
     </div>`;
   const view = document.getElementById('tabview');
@@ -1096,7 +1159,7 @@ async function renderDashboard() {
 
   function cardGrid(items, cardFn, empty, toolbar) {
     view.innerHTML = toolbar || '';
-    if (!items.length) { view.insertAdjacentHTML('beforeend', `<p class="muted">${empty}</p>`); }
+    if (!items.length) { view.insertAdjacentHTML('beforeend', note(empty)); }
     else {
       const grid = document.createElement('div');
       grid.className = 'grid';
@@ -1111,7 +1174,7 @@ async function renderDashboard() {
     // assignee, with filters for the status column and for hiding Unassigned. Caps/gids come from
     // estData; the per-person split and per-status breakdown are inverted out of teamData.breakdown's
     // task rows — the same estimated − actual math the Team Capacity chart uses.
-    if (!estData || !teamData) { view.innerHTML = '<p class="muted">Loading widgets…</p>'; return; }
+    if (!estData || !teamData) { view.innerHTML = note(LOADING); return; }
     // Every status column seen in the data → drives the filter checkboxes.
     const statusList = statusColumns(), allStatuses = new Set(statusList);
     // Forget any remembered status that no longer exists; an empty set collapses back to "all".
@@ -1185,37 +1248,55 @@ async function renderDashboard() {
         const persons = {};
         members.forEach(m => Object.entries(m.persons).forEach(([p, v]) => { persons[p] = (persons[p] || 0) + v; }));
         return { name: g.name, gid: null, isGroup: true, group: g.name, cap: g.cap,
-          hours: round2(members.reduce((a, m) => a + m.hours, 0)),
+          hours: r2(members.reduce((a, m) => a + m.hours, 0)),
           ntasks: members.reduce((a, m) => a + m.ntasks, 0), persons, members };
       }).filter(g => g.hours > 0);
       const others = rows.filter(w => !memberGids.has(w.gid));
       displayRows = [...groupRows, ...others].sort((a, b) => b.hours - a.hours);
     }
     if (!displayRows.length) {
-      view.innerHTML = toolbar + '<p class="muted">No remaining hours match the current filters.</p>';
+      view.innerHTML = toolbar + note('No remaining hours match the current filters.');
       wireFilters(); return;
     }
-    view.innerHTML = toolbar + backBar + '<div class="chart-box"><canvas id="chart"></canvas></div>' +
+    // Headline stats for the rows currently in view, before the By-project checkboxes
+    // narrow the chart down — so the banner always reads as "everything under the filters".
+    const people = new Set();
+    displayRows.forEach(w => Object.entries(w.persons).forEach(([p, v]) => { if (v > 0) people.add(p); }));
+    const summary = summaryBar([
+      { n: h2(displayRows.reduce((a, w) => a + w.hours, 0)) + ' h', l: 'Remaining estimated' },
+      { n: displayRows.length, l: 'Projects' },
+      { n: displayRows.reduce((a, w) => a + w.ntasks, 0), l: 'Tasks' },
+      { n: people.size, l: 'People assigned' },
+    ], 'est');
+    view.innerHTML = summary + toolbar + backBar + '<div class="chart-box"><canvas id="chart"></canvas></div>' +
       '<div id="est-summary"></div>';
     wireFilters();
     const backBtn = document.getElementById('est-drill-back');
     if (backBtn) backBtn.onclick = () => { estDrillGroup = null; renderEstProj(); };
     destroyCharts();
-    const labels = displayRows.map(w => w.name);
-    const gids = displayRows.map(w => w.gid), ntasks = displayRows.map(w => w.ntasks);
-    const caps = displayRows.map(w => (w.cap == null ? null : w.cap));
-    const datasets = personStacks(displayRows, w => w.persons);
-    const top = Math.max(...displayRows.map(w => w.hours), ...caps.filter(c => c != null), 1);
+    renderEstSummary(displayRows);
+    // Projects unchecked in the By-project table drop out of the chart only (same behaviour
+    // as the Actual Hours bar chart); the table below still lists them so they can come back.
+    const chartRows = displayRows.filter(w => !estHiddenProjects.has(w.name));
+    if (!chartRows.length) {
+      const cb = view.querySelector('.chart-box');
+      if (cb) cb.innerHTML = noteBox('All projects hidden — re-check a project below to show it in the chart.');
+      return;
+    }
+    const labels = chartRows.map(w => w.name);
+    const caps = chartRows.map(w => (w.cap == null ? null : w.cap));
+    const datasets = personStacks(chartRows, w => w.persons);
+    const top = Math.max(...chartRows.map(w => w.hours), ...caps.filter(c => c != null), 1);
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
       data: { labels, datasets },
       options: { responsive: true, maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         // Combined buckets split into their projects; single projects open their detail.
-        onClick: (evt, els) => { if (!els.length) return; const r = displayRows[els[0].index];
+        onClick: (evt, els) => { if (!els.length) return; const r = chartRows[els[0].index];
           if (r.isGroup) { estDrillGroup = r.group; renderEstProj(); }
           else if (r.gid) location.hash = '#/p/' + r.gid; },
-        onHover: (evt, els) => { const r = els.length ? displayRows[els[0].index] : null;
+        onHover: (evt, els) => { const r = els.length ? chartRows[els[0].index] : null;
           evt.native.target.style.cursor = (r && (r.isGroup || r.gid)) ? 'pointer' : 'default'; },
         scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
                   y: { stacked: true, beginAtZero: true, suggestedMax: top * 1.05,
@@ -1225,7 +1306,7 @@ async function renderDashboard() {
             callbacks: {
               label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
               afterBody: items => {
-                const r = displayRows[items[0].dataIndex], lines = [`Remaining ${h2(r.hours)} h · ${r.ntasks} tasks`];
+                const r = chartRows[items[0].dataIndex], lines = [`Remaining ${h2(r.hours)} h · ${plural(r.ntasks, 'task')}`];
                 if (r.cap != null) lines.push(`Budget ${h2(r.cap)} h/mo (${(r.hours / r.cap * 100).toFixed(0)}% remaining)`);
                 if (r.isGroup) {
                   lines.push('', 'By project:');
@@ -1239,7 +1320,6 @@ async function renderDashboard() {
                 return lines;
               } } } } }
     });
-    renderEstSummary(displayRows);
   }
 
   // Bottom-of-page summary table for the Estimated Hours bar chart: remaining hours per project.
@@ -1280,7 +1360,7 @@ async function renderDashboard() {
   function renderActualProj() {
     // Stacked bar chart of logged hours per project for the selected date range, split by person.
     const picker = rangePicker();
-    if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
+    if (!juneData) { view.innerHTML = picker + note(LOADING); wireRangeSel(); return; }
     // Roll grouped projects (e.g. CMD) into one combined bucket with the group's cap; clicking
     // that bucket drills in and splits it into its member projects. Every other project stays
     // on its own bar. Then drop anything with no hours.
@@ -1305,10 +1385,16 @@ async function renderDashboard() {
       rows = [...groupItems, ...projItems].filter(w => w.hours > 0).sort((a, b) => b.hours - a.hours);
     }
     if (!rows.length) {
-      view.innerHTML = picker + `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+      view.innerHTML = picker + note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
       wireRangeSel(); return;
     }
-    view.innerHTML = picker + backBar + '<div class="chart-box"><canvas id="chart"></canvas></div>' +
+    // Headline stats for everything in range, before the By-project checkboxes narrow the chart.
+    const summary = summaryBar([
+      { n: h2(rows.reduce((a, w) => a + w.hours, 0)) + ' h', l: 'Hours logged' },
+      { n: rows.length, l: 'Projects' },
+      { n: rows.reduce((a, w) => a + (w.nentries || 0), 0), l: 'Time entries' },
+    ]);
+    view.innerHTML = summary + picker + backBar + '<div class="chart-box"><canvas id="chart"></canvas></div>' +
       '<div id="actual-summary"></div>';
     wireRangeSel();
     const backBtn = document.getElementById('actual-drill-back');
@@ -1320,7 +1406,7 @@ async function renderDashboard() {
     const key = dateStart + ':' + dateEnd, pcache = projPersonCache[key];
     if (!pcache) {
       const cb = view.querySelector('.chart-box');
-      if (cb) cb.innerHTML = '<p class="muted" style="padding:24px">Loading per-person breakdown…</p>';
+      if (cb) cb.innerHTML = noteBox('Loading per-person breakdown…');
       loadPersonStats(key);
       return;
     }
@@ -1328,11 +1414,10 @@ async function renderDashboard() {
     const chartRows = rows.filter(w => !actualHiddenProjects.has(w.name));
     if (!chartRows.length) {
       const cbox = view.querySelector('.chart-box');
-      if (cbox) cbox.innerHTML = '<p class="muted" style="padding:24px">All projects hidden — re-check a project below to show it in the chart.</p>';
+      if (cbox) cbox.innerHTML = noteBox('All projects hidden — re-check a project below to show it in the chart.');
       return;
     }
     const labels = chartRows.map(w => w.name);
-    const gids = chartRows.map(w => w.gid), ents = chartRows.map(w => w.nentries);
     const caps = chartRows.map(w => (w.cap == null ? null : w.cap));
     // Total logged hours per person for a row; groups sum their members.
     const rowPersons = (w) => {
@@ -1362,7 +1447,7 @@ async function renderDashboard() {
             callbacks: {
               label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
               afterBody: items => {
-                const r = chartRows[items[0].dataIndex], lines = [`Total ${h2(r.hours)} h · ${r.nentries} entries`];
+                const r = chartRows[items[0].dataIndex], lines = [`Total ${h2(r.hours)} h · ${plural(r.nentries, 'entry', 'entries')}`];
                 if (r.cap != null) lines.push(`Budget ${h2(r.cap)} h`);
                 if (r.isGroup) {
                   lines.push('', 'By project:');
@@ -1421,7 +1506,7 @@ async function renderDashboard() {
     }
     let personTable;
     if (!people) {
-      personTable = '<h2 class="section-h">By person</h2><p class="muted" id="person-loading">Loading per-person totals…</p>';
+      personTable = '<h2 class="section-h">By person</h2><p class="note" id="person-loading">Loading per-person totals…</p>';
     } else {
       const ppTot = people.reduce((a, p) => a + p.hours, 0);
       personTable =
@@ -1515,15 +1600,14 @@ async function renderDashboard() {
   // hours and a grand total. Reuses the per-item rollup
   // that loadPersonStats builds from each project's time entries.
   function renderActualItems() {
-    const picker = rangePicker();
-    if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
+    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
     if (!juneData.some(w => w.hours > 0)) {
-      view.innerHTML = picker + `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+      view.innerHTML = rangePicker() + note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
       wireRangeSel(); return;
     }
     const key = dateStart + ':' + dateEnd, allItems = itemStatsCache[key];
     if (!allItems) {
-      view.innerHTML = picker + '<p class="muted" id="items-loading">Loading items…</p>';
+      view.innerHTML = rangePicker() + note(LOADING);
       wireRangeSel();
       loadPersonStats(key);
       return;
@@ -1533,41 +1617,43 @@ async function renderDashboard() {
     const people = [...new Set(allItems.map(it => it.person))].sort((a, b) => a.localeCompare(b));
     if (itemFilterPerson && !people.includes(itemFilterPerson)) itemFilterPerson = null;
     const items = itemFilterPerson ? allItems.filter(it => it.person === itemFilterPerson) : allItems;
-    const filterBar = `<div class="toolbar">
-      <label for="item-assignee">Assignee</label>
+    // Range + assignee live in the one toolbar this tab shows.
+    const picker = rangePicker(`<span class="tb-label">Assignee</span>
       <select id="item-assignee">
         <option value="">All assignees</option>
         ${people.map(p => `<option value="${esc(p)}"${p === itemFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
-      </select>
-    </div>`;
+      </select>`);
     const tot = items.reduce((a, it) => a + it.hours, 0);
     const totEntries = items.reduce((a, it) => a + it.entries, 0);
+    const nproj = new Set(items.map(it => it.project)).size;
     const hoursCells = (h) => `<td class="hours">${h2(h)} h</td>`;
     // Headline summary: total hours logged across every project for the selected range.
-    const summary = `<div class="summary-bar">
-      <div class="summary-stat"><span class="n">${h2(tot)} h</span><span class="l">Total hours logged</span></div>
-      <div class="summary-stat"><span class="n">${items.length}</span><span class="l">Tasks</span></div>
-      <div class="summary-stat"><span class="n">${totEntries}</span><span class="l">Time entries</span></div>
-    </div>`;
+    const summary = summaryBar([
+      { n: h2(tot) + ' h', l: 'Hours logged' },
+      { n: nproj, l: 'Projects' },
+      { n: items.length, l: 'Tasks' },
+      { n: totEntries, l: 'Time entries' },
+    ]);
     // One titled section per project: a heading, a table of that project's logged tasks
     // (with who logged them), and a project total row. `items` is already sorted by project,
     // so the keys keep project order.
     const byProject = {};
     items.forEach(it => (byProject[it.project] = byProject[it.project] || []).push(it));
-    const sections = Object.keys(byProject).map(proj => {
+    const sections = Object.keys(byProject).map((proj, i) => {
       const list = byProject[proj];
       const pTot = list.reduce((a, it) => a + it.hours, 0);
       const body = list.map(it =>
         `<tr><td>${esc(it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.hours)}</tr>`).join('');
-      return `<h2 class="section-h">${esc(proj)}</h2>
+      // Heading carries the project total, matching how the Daily Log heads its sections.
+      return `<h2 class="section-h${i ? '' : ' flush'}">${esc(proj)} · ${h2(pTot)} h</h2>
         <table class="tasks">
           <thead><tr><th>Task</th><th>Logged by</th><th class="hours">Hours</th></tr></thead>
           <tbody>${body}
-            <tr class="parent"><td>Total</td><td></td>${hoursCells(pTot)}</tr></tbody>
+            <tr class="parent"><td>Project total</td><td></td>${hoursCells(pTot)}</tr></tbody>
         </table>`;
     }).join('');
-    const noneMsg = items.length ? '' : `<p class="muted">No hours logged by ${esc(itemFilterPerson)} in ${rangeLabel(dateStart, dateEnd)}.</p>`;
-    view.innerHTML = picker + filterBar + summary + (noneMsg || sections);
+    const noneMsg = items.length ? '' : note(`No hours logged by ${itemFilterPerson} in ${rangeLabel(dateStart, dateEnd)}.`);
+    view.innerHTML = summary + picker + (noneMsg || sections);
     wireRangeSel();
     const sel = document.getElementById('item-assignee');
     if (sel) sel.onchange = () => { itemFilterPerson = sel.value || null; renderActualItems(); };
@@ -1577,15 +1663,14 @@ async function renderDashboard() {
   // time to in the selected range — one table per day (task, project, hours) with that day's
   // total. Reuses the per-person/per-day rollup loadPersonStats builds from the time entries.
   function renderActualDaily() {
-    const picker = rangePicker();
-    if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
+    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
     if (!juneData.some(w => w.hours > 0)) {
-      view.innerHTML = picker + `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+      view.innerHTML = rangePicker() + note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
       wireRangeSel(); return;
     }
     const key = dateStart + ':' + dateEnd, allRows = dailyStatsCache[key];
     if (!allRows) {
-      view.innerHTML = picker + '<p class="muted" id="items-loading">Loading daily log…</p>';
+      view.innerHTML = rangePicker() + note(LOADING);
       wireRangeSel();
       loadPersonStats(key);
       return;
@@ -1595,27 +1680,27 @@ async function renderDashboard() {
     const people = [...new Set(allRows.map(r => r.person))].sort((a, b) => a.localeCompare(b));
     if (dailyFilterPerson && !people.includes(dailyFilterPerson)) dailyFilterPerson = null;
     const rows = dailyFilterPerson ? allRows.filter(r => r.person === dailyFilterPerson) : allRows;
-    const filterBar = `<div class="toolbar">
-      <label for="daily-assignee">Assignee</label>
+    // Range, assignee and day order all live in the one toolbar this tab shows.
+    const picker = rangePicker(`<span class="tb-label">Assignee</span>
       <select id="daily-assignee">
         <option value="">All assignees</option>
         ${people.map(p => `<option value="${esc(p)}"${p === dailyFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
       </select>
-      <label for="daily-order">Order</label>
+      <span class="tb-label">Order</span>
       <select id="daily-order">
         <option value="old"${dailyNewestFirst ? '' : ' selected'}>Oldest day first</option>
         <option value="new"${dailyNewestFirst ? ' selected' : ''}>Newest day first</option>
-      </select>
-    </div>`;
+      </select>`);
     const tot = rows.reduce((a, r) => a + r.hours, 0);
     const totEntries = rows.reduce((a, r) => a + r.entries, 0);
     const days = new Set(rows.map(r => r.person + '|' + r.date));
     const hoursCells = (h) => `<td class="hours">${h2(h)} h</td>`;
-    const summary = `<div class="summary-bar">
-      <div class="summary-stat"><span class="n">${h2(tot)} h</span><span class="l">Total hours logged</span></div>
-      <div class="summary-stat"><span class="n">${days.size}</span><span class="l">Person-days</span></div>
-      <div class="summary-stat"><span class="n">${totEntries}</span><span class="l">Time entries</span></div>
-    </div>`;
+    const summary = summaryBar([
+      { n: h2(tot) + ' h', l: 'Hours logged' },
+      { n: days.size, l: 'Person-days' },
+      { n: days.size ? h2(tot / days.size) + ' h' : '0.00 h', l: 'Avg per person-day' },
+      { n: totEntries, l: 'Time entries' },
+    ]);
     // Group person → day. `rows` is already sorted person A→Z then date ascending, so the
     // key order holds; only the day order flips when "newest first" is selected.
     const byPerson = {};
@@ -1623,7 +1708,7 @@ async function renderDashboard() {
       const p = byPerson[r.person] = byPerson[r.person] || {};
       (p[r.date] = p[r.date] || []).push(r);
     });
-    const sections = Object.keys(byPerson).map(person => {
+    const sections = Object.keys(byPerson).map((person, pi) => {
       const dayMap = byPerson[person];
       const dayKeys = Object.keys(dayMap);
       if (dailyNewestFirst) dayKeys.reverse();
@@ -1640,10 +1725,10 @@ async function renderDashboard() {
               <tr class="parent"><td>Day total</td><td></td>${hoursCells(dTot)}</tr></tbody>
           </table>`;
       }).join('');
-      return `<h2 class="section-h">${esc(person)} · ${h2(pTot)} h</h2>` + dayTables;
+      return `<h2 class="section-h${pi ? '' : ' flush'}">${esc(person)} · ${h2(pTot)} h</h2>` + dayTables;
     }).join('');
-    const noneMsg = rows.length ? '' : `<p class="muted">No hours logged by ${esc(dailyFilterPerson)} in ${rangeLabel(dateStart, dateEnd)}.</p>`;
-    view.innerHTML = picker + filterBar + summary + (noneMsg || sections);
+    const noneMsg = rows.length ? '' : note(`No hours logged by ${dailyFilterPerson} in ${rangeLabel(dateStart, dateEnd)}.`);
+    view.innerHTML = summary + picker + (noneMsg || sections);
     wireRangeSel();
     const sel = document.getElementById('daily-assignee');
     if (sel) sel.onchange = () => { dailyFilterPerson = sel.value || null; renderActualDaily(); };
@@ -1712,7 +1797,16 @@ async function renderDashboard() {
             `<label class="chk"><input type="checkbox" id="team-show-unassigned" ${teamShowUnassigned ? 'checked' : ''}>Include Unassigned</label>`
           : '') +
       '</div>';
-    view.innerHTML = toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
+    // Headline stats: what the team still has on its plate versus what it can absorb.
+    const totRem = d.hours.reduce((a, h) => a + h, 0);
+    const headroom = r2(d.cap * d.labels.length - totRem);
+    const summary = summaryBar([
+      { n: h2(totRem) + ' h', l: 'Remaining estimated' },
+      { n: d.labels.length, l: 'People' },
+      { n: h2(d.labels.length ? totRem / d.labels.length : 0) + ' h', l: 'Avg per person' },
+      { n: h2(headroom) + ' h', l: headroom < 0 ? 'Over team capacity' : 'Team headroom', neg: headroom < 0 },
+    ], 'est');
+    view.innerHTML = summary + toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
     view.querySelectorAll('.team-status').forEach(box => box.onchange = () => {
       const on = [...view.querySelectorAll('.team-status')].filter(c => c.checked).map(c => c.value);
       teamStatusFilter = (on.length === statusList.length) ? null : new Set(on);
@@ -1737,7 +1831,7 @@ async function renderDashboard() {
         plugins: { legend: { display: false }, capLine: { value: d.cap },
           tooltip: { callbacks: {
             label: ctx => `Remaining: ${h2(ctx.parsed.y)} h of ${h2(d.cap)} (${(ctx.parsed.y / d.cap * 100).toFixed(0)}%)`,
-            afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} − actual ${h2(ctx.dataset._act[ctx.dataIndex])} · ${ctx.dataset._counts[ctx.dataIndex]} items` } } } }
+            afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} − actual ${h2(ctx.dataset._act[ctx.dataIndex])} · ${plural(ctx.dataset._counts[ctx.dataIndex], 'item')}` } } } }
     });
     // One donut per assignee under the bars: which projects their remaining hours sit in.
     // Projects already fully burned down (remaining ≤ 0) drop out, so the rings only show
@@ -1753,7 +1847,7 @@ async function renderDashboard() {
       const free = r2(d.cap - used);
       if (free > 0) slices.push({ label: FREE_SLICE, hours: free });
       return { name: x.name, slices, total: Math.max(used, d.cap),
-        caption: `${h2(used)} of ${h2(d.cap)} h · ${nproj} project${nproj === 1 ? '' : 's'}` +
+        caption: `${h2(used)} of ${h2(d.cap)} h · ${plural(nproj, 'project')}` +
                  (free > 0 ? '' : ' · at capacity') };
     }), { title: 'Remaining hours by project, per person',
           sub: `Each ring is one assignee, filled out to the ${h2(d.cap)} h monthly target. Click a card for their full project/task breakdown.`,
@@ -1781,9 +1875,10 @@ async function renderDashboard() {
       } else {
         body += tasks.map(t => {
           const ctx = t.context ? ` <span class="muted">(${esc(t.context)})</span>` : '';
-          const indent = t.type === 'subtask' ? 'padding-left:34px' : 'padding-left:22px';
-          return `<tr class="sub"><td class="${t.type === 'subtask' ? 'sub-name' : ''}" style="${indent}">${esc(t.name)}${ctx}</td>` +
-            `<td>${t.status ? `<span class="badge">${esc(t.status)}</span>` : '—'}</td>` +
+          const cls = t.type === 'subtask' ? 'sub-name lvl2' : 'lvl1';
+          return `<tr class="sub"><td class="${cls}">${esc(t.name)}${ctx}</td>` +
+            `<td>${t.status ? `<span class="badge">${esc(t.status)}</span>`
+                             : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
             `<td class="hours">${h2(t.estimated)} h</td>` +
             `<td class="hours">${h2(t.actual)} h</td>` +
             `<td class="hours">${h2(t.remaining)} h</td></tr>`;
@@ -1797,7 +1892,7 @@ async function renderDashboard() {
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(name)}</h2>
        </div>
-       <p class="drill-total">${h2(totRem)} h remaining of ${h2(teamData.cap)} (${pct}%) · ${h2(totEst)} est − ${h2(totAct)} actual · ${rows_.length} project(s)${esc(filterNote)}</p>
+       <p class="drill-total">${h2(totRem)} h remaining of ${h2(teamData.cap)} (${pct}%) · ${h2(totEst)} est − ${h2(totAct)} actual · ${plural(rows_.length, 'project')}${esc(filterNote)}</p>
        <table class="tasks">
          <thead><tr><th>Project / Task</th><th>Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
@@ -1810,22 +1905,30 @@ async function renderDashboard() {
   // rollup as the By-person summary (personStatsCache), so it matches the rest of Actual Hours
   // (e.g. Grant's logged time on a project), not Asana's task tracked-time totals.
   function renderTeamActual() {
-    const picker = rangePicker();
-    if (!juneData) { view.innerHTML = picker + '<p class="muted">Loading widgets…</p>'; wireRangeSel(); return; }
+    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
     const key = dateStart + ':' + dateEnd, people = personStatsCache[key];
     if (!people) {
-      view.innerHTML = picker + '<p class="muted" id="person-loading">Loading per-person totals…</p>';
+      view.innerHTML = rangePicker() + note(LOADING);
       wireRangeSel(); loadPersonStats(key); return;
     }
     const cap = (teamData && teamData.cap) || 128;
     const rows = people.map(p => ({ name: p.name, total: p.hours }))
       .filter(p => p.total > 0)
       .sort((a, b) => b.total - a.total);
-    view.innerHTML = picker + '<div class="chart-box"><canvas id="chart"></canvas></div>';
+    // Headline stats: what the team actually booked against what it could have.
+    const totLogged = rows.reduce((a, r) => a + r.total, 0);
+    const teamCap = cap * rows.length;
+    const summary = summaryBar([
+      { n: h2(totLogged) + ' h', l: 'Hours logged' },
+      { n: rows.length, l: 'People' },
+      { n: h2(rows.length ? totLogged / rows.length : 0) + ' h', l: 'Avg per person' },
+      { n: (teamCap ? (totLogged / teamCap * 100).toFixed(0) : '0') + '%', l: 'Of team capacity' },
+    ]);
+    view.innerHTML = summary + rangePicker() + '<div class="chart-box"><canvas id="chart"></canvas></div>';
     wireRangeSel();
     if (!rows.length) {
       const cb = view.querySelector('.chart-box');
-      if (cb) cb.innerHTML = `<p class="muted" style="padding:24px">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`;
+      if (cb) cb.innerHTML = noteBox(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
       return;
     }
     destroyCharts();
@@ -1833,15 +1936,15 @@ async function renderDashboard() {
     const colors = totals.map(h => capColor(h, cap));
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
-      data: { labels, datasets: [{ label: 'Actual hours logged', data: totals,
+      data: { labels, datasets: [{ label: 'Hours logged', data: totals,
         backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
       options: { responsive: true, maintainAspectRatio: false,
         onClick: (evt, els) => { if (els.length) showLoggedBreakdown(rows[els[0].index].name); },
         onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-        scales: { x: { title: { display: true, text: 'Person' },
+        scales: { x: { title: { display: true, text: 'Logged by' },
                        ticks: { callback: (v, i) => [labels[i], h2(totals[i]) + ' h'] } },
                   y: { beginAtZero: true, suggestedMax: Math.max(cap * 1.1, ...totals, 1),
-                       title: { display: true, text: 'Actual hours logged' }, ticks: { callback: v => h2(v) } } },
+                       title: { display: true, text: 'Hours logged' }, ticks: { callback: v => h2(v) } } },
         plugins: { legend: { display: false }, capLine: { value: cap },
           tooltip: { callbacks: {
             label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)` } } } }
@@ -1879,13 +1982,13 @@ async function renderDashboard() {
     const pct = (tot / cap * 100).toFixed(0);
     const cell = (h) => `<td class="hours">${h2(h)} h</td>`;
     let body = rows_.map(r => `<tr><td>${esc(r.project)}</td>${cell(r.hours)}</tr>`).join('');
-    if (!rows_.length) body = '<tr><td colspan="2" class="muted">No hours logged.</td></tr>';
+    if (!rows_.length) body = '<tr><td colspan="2" class="muted">No hours logged in this range.</td></tr>';
     view.innerHTML =
       `<div class="drill-head">
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(person)}</h2>
        </div>
-       <p class="drill-total">${h2(tot)} h logged of ${h2(cap)} (${pct}%) · ${rows_.length} project(s)</p>
+       <p class="drill-total">${h2(tot)} h logged of ${h2(cap)} (${pct}%) · ${plural(rows_.length, 'project')}</p>
        <table class="tasks">
          <thead><tr><th>Project</th><th class="hours">Hours</th></tr></thead>
          <tbody>${body}
@@ -1918,7 +2021,7 @@ async function renderDashboard() {
     document.getElementById('tab-title').textContent = TABS[dashTab].title;
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     subEl.textContent = sub; subEl.style.display = sub ? '' : 'none';
-    const loading = '<p class="muted">Loading widgets…</p>';
+    const loading = note(LOADING);
 
     if (dashTab === 'team') {
       teamData ? renderTeam() : (view.innerHTML = loading);
@@ -1933,7 +2036,15 @@ async function renderDashboard() {
     } else if (dashTab === 'actualdaily') {
       renderActualDaily();
     } else if (dashTab === 'estimated') {
-      estData ? cardGrid(estData, estCard, 'No projects.') : (view.innerHTML = loading);
+      if (!estData) view.innerHTML = loading;
+      else {
+        const summary = summaryBar([
+          { n: h2(estData.reduce((a, w) => a + (w.hours || 0), 0)) + ' h', l: 'Estimated remaining' },
+          { n: estData.length, l: 'Projects' },
+          { n: estData.reduce((a, w) => a + (w.ntasks || 0), 0), l: 'Tasks' },
+        ], 'est');
+        cardGrid(estData, estCard, 'No projects.', summary);
+      }
     } else if (dashTab === 'capacity') {
       const picker = rangePicker();
       if (!juneData) { view.innerHTML = picker + loading; wireRangeSel(); }
@@ -1948,10 +2059,23 @@ async function renderDashboard() {
                              .sort((a, b) => b.hours - a.hours);
         const others = juneData.filter(w => w.cap == null && !memberGids.has(w.gid))
                          .sort((a, b) => b.hours - a.hours);
-        view.innerHTML = picker;
         const hasCap = groups.length || standalone.length;
+        // Headline stats cover the budgeted work only — the retainer picture in one line.
+        const budgeted = [...groups, ...standalone];
+        const totCap = budgeted.reduce((a, w) => a + (w.cap || 0), 0);
+        const totUsed = budgeted.reduce((a, w) => a + (w.hours || 0), 0);
+        const left = r2(totCap - totUsed);
+        const overCount = budgeted.filter(w => (w.hours || 0) > (w.cap || 0)).length;
+        const summary = summaryBar([
+          { n: h2(totCap) + ' h', l: 'Budgeted capacity' },
+          { n: h2(totUsed) + ' h', l: 'Hours used' },
+          { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
+          { n: (totCap ? (totUsed / totCap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
+          { n: overCount, l: 'Budgets over', neg: overCount > 0 },
+        ]);
+        view.innerHTML = (hasCap ? summary : '') + picker;
         if (!hasCap && !others.length) {
-          view.insertAdjacentHTML('beforeend', `<p class="muted">No hours logged in ${rangeLabel(dateStart, dateEnd)}.</p>`);
+          view.insertAdjacentHTML('beforeend', note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`));
         } else {
           if (hasCap) {
             view.insertAdjacentHTML('beforeend', '<h2 class="section-h flush">MSA projects · monthly capacity</h2>');
@@ -2046,17 +2170,16 @@ async function renderDetail(gid) {
     <div class="layout">
       ${sidebarHtml()}
       <main class="content">
+        <div id="crumbs" class="crumbs">Loading…</div>
         <div class="head">
-          <div id="crumbs" class="crumbs">Loading…</div>
+          <h1 id="page-title"></h1>
           <div class="head-right">
             <span id="dash-updated" class="dash-updated"></span>
             <button class="btn" id="refresh">Refresh</button>
           </div>
         </div>
         <p class="sub" id="sub"></p>
-        <div class="panel">
-          <div id="view"></div>
-        </div>
+        <div id="view"></div>
       </main>
     </div>`;
   wireSidebar(null);
@@ -2073,13 +2196,13 @@ async function renderDetail(gid) {
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
       data:{ labels:d.labels, datasets:[{ label:'Estimated hours', data:d.hours,
-        backgroundColor:'#6aa9e0', borderColor:'#9cc7f0', borderWidth:1, _counts:d.counts }] },
+        backgroundColor:C.blue, borderColor:C.blueD, borderWidth:1, _counts:d.counts }] },
       options:{ responsive:true, maintainAspectRatio:false,
         onClick:(evt, els) => { if (els.length) showTasks(d.labels[els[0].index]); },
         onHover:(evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
         plugins:{ legend:{display:false}, tooltip:{ callbacks:{
           label: ctx => `Estimated: ${h2(ctx.parsed.y)} h`,
-          afterLabel: ctx => `Items: ${ctx.dataset._counts[ctx.dataIndex]}` } } },
+          afterLabel: ctx => plural(ctx.dataset._counts[ctx.dataIndex], 'item') } } },
         scales:{ x:{ title:{display:true,text:'Assignee'}, ticks:{ callback:(v,i) => [d.labels[i], h2(d.hours[i]) + ' h'] } },
                  y:{ beginAtZero:true, title:{display:true,text:'Estimated hours'}, ticks:{ callback:v => h2(v) } } } }
     });
@@ -2093,8 +2216,9 @@ async function renderDetail(gid) {
 
     function subRow(s, context) {
       total += s.hours; items++;
+      // Subtasks carry no status column of their own, so the cell states what the row is.
       return `<tr class="sub"><td class="sub-name">${esc(s.name)}${context}</td>` +
-        `<td class="muted">subtask</td>` +
+        `<td><span class="badge none">Subtask</span></td>` +
         `<td class="hours">${s.hours ? h2(s.hours) + ' h' : '—'}</td></tr>`;
     }
 
@@ -2102,7 +2226,8 @@ async function renderDetail(gid) {
     all.filter(t => t.assignee === assignee).forEach(t => {
       total += t.hours; items++;
       rows += `<tr class="parent"><td>${esc(t.name)}</td>` +
-        `<td><span class="badge">${esc(t.section) || '—'}</span></td>` +
+        `<td>${t.section ? `<span class="badge">${esc(t.section)}</span>`
+                         : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
         `<td class="hours">${h2(t.hours)} h</td></tr>`;
       t.subtasks.filter(s => s.assignee === assignee).forEach(s => { rows += subRow(s, ''); });
     });
@@ -2120,9 +2245,9 @@ async function renderDetail(gid) {
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(assignee)}</h2>
        </div>
-       <p class="drill-total">${items} item(s) · ${h2(total)} estimated hours (excludes Completed)</p>
+       <p class="drill-total">${plural(items, 'item')} · ${h2(total)} estimated hours (excludes Completed)</p>
        <table class="tasks">
-         <thead><tr><th>Task / Subtask</th><th>Type / Status</th><th class="hours">Est. hours</th></tr></thead>
+         <thead><tr><th>Task / Subtask</th><th>Type / Status</th><th class="hours">Est.</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>`;
     document.getElementById('tochart').onclick = showChart;
@@ -2132,7 +2257,9 @@ async function renderDetail(gid) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     try {
       detailData = await (await fetch('/api/project/' + gid + (refresh ? '?refresh=1' : ''))).json();
-      document.getElementById('sub').textContent = `Estimated hours per assignee · ${detailData.ntasks} tasks (excludes Completed)`;
+      document.getElementById('page-title').textContent = detailData.name;
+      document.getElementById('sub').textContent =
+        `Estimated hours per assignee · ${plural(detailData.ntasks, 'task')} (excludes Completed)`;
       document.getElementById('dash-updated').textContent = detailData.updated ? ('Updated ' + detailData.updated) : '';
       showChart();
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
@@ -2147,17 +2274,16 @@ async function renderJuneDetail(gid) {
     <div class="layout">
       ${sidebarHtml()}
       <main class="content">
+        <div id="crumbs" class="crumbs">Loading…</div>
         <div class="head">
-          <div id="crumbs" class="crumbs">Loading…</div>
+          <h1 id="page-title"></h1>
           <div class="head-right">
             <span id="dash-updated" class="dash-updated"></span>
             <button class="btn" id="refresh">Refresh</button>
           </div>
         </div>
         <p class="sub" id="sub"></p>
-        <div class="panel">
-          <div id="view"></div>
-        </div>
+        <div id="view"></div>
       </main>
     </div>`;
   wireSidebar(null);
@@ -2173,14 +2299,14 @@ async function renderJuneDetail(gid) {
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
       data:{ labels:data.labels, datasets:[
-        { label:'Hours logged', data:data.hours, backgroundColor:'#4cc085', borderColor:'#6cd49d',
+        { label:'Hours logged', data:data.hours, backgroundColor:C.green, borderColor:C.greenD,
           borderWidth:1 } ] },
       options:{ responsive:true, maintainAspectRatio:false,
         onClick:(evt, els) => { if (els.length) showEntries(data.labels[els[0].index]); },
         onHover:(evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
         plugins:{ legend:{display:false}, tooltip:{ callbacks:{
-          label: ctx => `${h2(ctx.parsed.y)} h`,
-          afterLabel: ctx => `Entries: ${data.counts[ctx.dataIndex]}` } } },
+          label: ctx => `Logged: ${h2(ctx.parsed.y)} h`,
+          afterLabel: ctx => plural(data.counts[ctx.dataIndex], 'entry', 'entries') } } },
         scales:{ x:{ title:{display:true,text:'Logged by'}, ticks:{ callback:(v,i) => [data.labels[i], h2(data.hours[i]) + ' h'] } },
                  y:{ beginAtZero:true, title:{display:true,text:'Hours logged'}, ticks:{ callback:v => h2(v) } } } }
     });
@@ -2203,7 +2329,7 @@ async function renderJuneDetail(gid) {
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(person)}</h2>
        </div>
-       <p class="drill-total">${rows_.length} entr${rows_.length === 1 ? 'y' : 'ies'} · ${total.toFixed(2)} h logged in ${ml}</p>
+       <p class="drill-total">${plural(rows_.length, 'entry', 'entries')} · ${h2(total)} h logged in ${ml}</p>
        <table class="tasks">
          <thead><tr><th>Date</th><th>Task</th><th class="hours">Hours</th></tr></thead>
          <tbody>${rows}</tbody>
@@ -2215,7 +2341,9 @@ async function renderJuneDetail(gid) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     try {
       data = await (await fetch('/api/june/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
-      document.getElementById('sub').textContent = `Hours logged ${rangeLabel(data.start, data.end)} per person · ${data.nentries} time entries · ${h2(data.total_hours)} h total`;
+      document.getElementById('page-title').textContent = data.name;
+      document.getElementById('sub').textContent =
+        `Hours logged ${rangeLabel(data.start, data.end)} per person · ${plural(data.nentries, 'time entry', 'time entries')} · ${h2(data.total_hours)} h total`;
       document.getElementById('dash-updated').textContent = data.updated ? ('Updated ' + data.updated) : '';
       showChart();
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
