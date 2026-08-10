@@ -548,14 +548,22 @@ PAGE = r"""<!DOCTYPE html>
   .cap-bar.over .fill { background:var(--red); }
   .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; }
   /* Filter toolbar. Every tab that filters anything uses exactly one of these, directly
-     under the page sub-heading, and it always opens with a bold .tb-label. */
-  .toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:0 0 18px;
-             font-size:13px; color:var(--muted); }
+     under the stat strip, and it always opens with a bold .tb-label. It sits in its own
+     panel so the controls read as one strip instead of floating on the page. */
+  .toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:10px 14px; margin:0 0 20px;
+             background:var(--panel); border:1px solid var(--border); border-radius:10px;
+             padding:11px 16px; font-size:13px; color:var(--muted); }
   .toolbar label { margin-left:6px; }
   .toolbar label:first-child { margin-left:0; }
   .toolbar select, .toolbar input[type=date] { background:var(--panel2); color:var(--text);
-                    border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer; }
+                    border:1px solid var(--border); border-radius:7px; padding:6px 9px; font-size:13px; cursor:pointer; }
+  .toolbar select:hover, .toolbar input[type=date]:hover { border-color:#4d5666; }
   .toolbar input[type=date]::-webkit-calendar-picker-indicator { filter:invert(.8); cursor:pointer; }
+  /* Search re-runs the range; Refresh (top right) is the page's primary action, so this
+     one stays secondary and doesn't compete with it. */
+  .toolbar .btn { background:var(--panel2); color:var(--text); border:1px solid var(--border);
+                  padding:6px 14px; font-size:13px; }
+  .toolbar .btn:hover { background:#414854; border-color:#4d5666; }
   .toolbar .tb-label { font-weight:600; color:var(--text); margin-left:0; }
   /* A label and its control wrap as one unit, so a narrow window never strands a label
      on the end of a line with its <select> on the next. */
@@ -578,15 +586,20 @@ PAGE = r"""<!DOCTYPE html>
   .content { flex:1; min-width:0; }
   .content .head { margin-bottom:4px; }
   .content h1 { font-size:20px; margin:0; }
+  .content .sub { margin:3px 0 16px; }   /* tighter than the standalone .sub default */
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
   .section-h.flush { margin-top:8px; padding-top:0; border-top:0; }   /* first heading under the filter */
-  /* Headline stat banner. Every tab opens with one so the top-line numbers are always in
-     the same place. Green numbers on Actual-Hours tabs, blue on Estimated (.est). */
-  .summary-bar { display:flex; flex-wrap:wrap; gap:24px 40px; background:var(--panel2);
-                 border:1px solid var(--border); border-radius:12px; padding:18px 24px; margin:0 0 18px; }
-  .summary-stat { display:flex; flex-direction:column; gap:4px; }
-  .summary-stat .n { font-size:28px; font-weight:700; color:var(--green-d); font-variant-numeric:tabular-nums; }
-  .summary-stat .l { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  /* Headline stat strip. Every tab opens with one so the top-line numbers are always in
+     the same place. Deliberately quieter than the <h1> above it — it summarises the page,
+     it isn't the page. Green numbers on Actual-Hours tabs, blue on Estimated (.est). */
+  /* No box of its own — a boxed strip stacked above the boxed toolbar reads as clutter.
+     A hairline underneath is enough to set it apart from the controls below. */
+  .summary-bar { display:flex; flex-wrap:wrap; gap:12px 36px; padding:2px 2px 15px; margin:0 0 16px;
+                 border-bottom:1px solid var(--border); }
+  .summary-stat { display:flex; flex-direction:column; gap:2px; }
+  .summary-stat .n { font-size:19px; font-weight:600; line-height:1.2; color:var(--green-d);
+                     font-variant-numeric:tabular-nums; }
+  .summary-stat .l { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.05em; }
   .summary-bar.est .summary-stat .n { color:var(--blue-d); }
   .summary-stat .n.neg { color:var(--red); }
   .card.june:hover { border-color:var(--green); }
@@ -658,7 +671,9 @@ PAGE = r"""<!DOCTYPE html>
   table.daylog td.day { white-space:nowrap; vertical-align:top; color:var(--muted); }
   table.daylog td.day .day-tot { display:block; margin-top:3px; font-size:12px; color:var(--faint);
                                  font-variant-numeric:tabular-nums; }
-  table.daylog tr.day-start td { border-top:1px solid var(--border); }
+  /* Rule between days only, not between every row — each day reads as one block. */
+  table.daylog tbody td { border-bottom:0; }
+  table.daylog tbody tr.day-start td { border-top:1px solid var(--border); }
   table.daylog tbody tr:first-child td { border-top:0; }
   .proj-toggle { display:inline-flex; align-items:center; gap:8px; cursor:pointer; }
   .proj-toggle input { cursor:pointer; margin:0; flex:0 0 auto; }
@@ -2082,7 +2097,7 @@ async function renderDashboard() {
           { n: h2(totUsed) + ' h', l: 'Hours used' },
           { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
           { n: (totCap ? (totUsed / totCap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
-          { n: overCount, l: 'Budgets over', neg: overCount > 0 },
+          { n: overCount, l: overCount === 1 ? 'Budget over' : 'Budgets over', neg: overCount > 0 },
         ]);
         view.innerHTML = (hasCap ? summary : '') + picker;
         if (!hasCap && !others.length) {
