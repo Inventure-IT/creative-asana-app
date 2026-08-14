@@ -236,6 +236,7 @@ const TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roa
 const PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40}, {"gid": "1216989200658405", "name": "My Pest Solutions SEO", "cap": 4}, {"gid": "1214228966572508", "name": "Firebird MSA"}, {"gid": "1214228966572503", "name": "Myrick Marine"}, {"gid": "1214229029715234", "name": "Savannah Bee: Zendesk"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic"}, {"gid": "1214228966572541", "name": "DocSmith.md MSA", "cap": 24}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2026"}, {"gid": "1214755322546416", "name": "Project Twilight"}, {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"}, {"gid": "1214228966572573", "name": "Autotask Reporting"}, {"gid": "1214228966572568", "name": "Brain Dump"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}, {"gid": "1216154609521581", "name": "NuNu"}, {"gid": "1216640931651593", "name": "Ross Wood Website Redesign", "cap": 30}, {"gid": "1216208009045309", "name": "Marsh and Main"}, {"gid": "1217239377209835", "name": "Sales"}];
 const GROUPS = [{"name": "CMD", "cap": 244, "gids": ["1214228966572536", "1214228966572531", "1214228966572526", "1216154609521581"]}];
 const DEF_START = "2026-06-01", DEF_END = "2026-06-30";
+const PROJECT_ROSTER = PROJECTS.map(p => p.name);
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
 const PROJECT_CAPS  = Object.fromEntries(PROJECTS.map(p => [p.gid, p.cap == null ? null : p.cap]));
 
@@ -671,14 +672,62 @@ function personStacks(rows, hoursOf){
   return persons.map(p => ({ label: p, data: maps.map(m => Math.max(0, Math.round((m[p] || 0) * 100) / 100)),
     backgroundColor: personColor(p), borderColor: personColor(p), borderWidth: 0 }));
 }
+// Donut slice colors get their own palette, not the 10-color person palette: there are more
+// projects than people, and reusing PERSON_PALETTE meant the eleventh project wrapped around
+// and repeated a color. This list is longer than the project roster so every project in a
+// ring is a different color, ordered most-distinct-first because slices are colored in
+// descending-hours order. No greys (the two synthetic slices below own those) and no near-
+// duplicates of the fixed colors in PROJECT_COLORS.
+const PROJECT_PALETTE = [
+  '#1f77b4', // blue
+  '#d62728', // red
+  '#9467bd', // purple
+  '#17becf', // cyan
+  '#ff7f0e', // orange
+  '#e377c2', // pink
+  '#8c564b', // brown
+  '#bcbd22', // olive
+  '#393b79', // deep indigo
+  '#66c2a5', // seafoam
+  '#a55194', // plum
+  '#e7969c', // salmon
+  '#6b6ecf', // periwinkle
+  '#8ca252', // moss
+  '#ce6dbd', // orchid
+  '#ad494a', // brick
+  '#c49c94', // tan
+  '#5254a3', // blue-violet
+  '#b5cf6b', // pale olive
+  '#e6550d', // burnt orange
+  '#9c9ede', // pale periwinkle
+  '#f7b6d2', // light pink
+  '#843c39', // oxblood
+  '#9edae5', // pale cyan
+  '#756bb1', // muted violet
+  '#fdae6b', // apricot
+];
+// Projects with a color chosen by hand rather than taken from the palette above. These are
+// reserved: the auto-assignment skips them so nothing else can land on the same hue.
+const PROJECT_COLORS = {
+  'Georgia Grown Market MSA': '#2ca02c',   // green
+};
 // Stable per-project colors for the Team Capacity donuts, so one project reads as the same
-// color in every person's ring. Shares the categorical palette used for people.
+// color in every person's ring.
 const _projColors = {};
 let _projColorN = 0;
 function projectColor(name){
+  if (name in PROJECT_COLORS) return PROJECT_COLORS[name];
   if (name in _projColors) return _projColors[name];
-  return (_projColors[name] = PERSON_PALETTE[_projColorN++ % PERSON_PALETTE.length]);
+  // Skip palette entries already spoken for (a fixed color or an earlier project), so two
+  // projects never share a hue while any unused one is left.
+  const used = new Set([...Object.values(_projColors), ...Object.values(PROJECT_COLORS)]);
+  while (used.size < PROJECT_PALETTE.length && used.has(PROJECT_PALETTE[_projColorN % PROJECT_PALETTE.length])) _projColorN++;
+  return (_projColors[name] = PROJECT_PALETTE[_projColorN++ % PROJECT_PALETTE.length]);
 }
+// Claim a color for every configured project up front, in config order, so the assignment
+// never depends on which tab drew first: a project is the same color on the Estimated donuts
+// and the Logged donuts, in every person's ring, for the whole session.
+PROJECT_ROSTER.forEach(projectColor);
 
 // Fold a { project: hours } map into donut slices: biggest first, with everything past the
 // top DONUT_MAX_SLICES rolled into a single "Other projects" slice so small rings stay legible.

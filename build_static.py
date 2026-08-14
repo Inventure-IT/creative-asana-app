@@ -37,6 +37,7 @@ const TEAM_MEMBERS = __TEAM__;
 const PROJECTS = __PROJECTS__;
 const GROUPS = __GROUPS__;
 const DEF_START = __DEFSTART__, DEF_END = __DEFEND__;
+const PROJECT_ROSTER = PROJECTS.map(p => p.name);
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
 const PROJECT_CAPS  = Object.fromEntries(PROJECTS.map(p => [p.gid, p.cap == null ? null : p.cap]));
 

@@ -878,14 +878,62 @@ function personStacks(rows, hoursOf){
   return persons.map(p => ({ label: p, data: maps.map(m => Math.max(0, Math.round((m[p] || 0) * 100) / 100)),
     backgroundColor: personColor(p), borderColor: personColor(p), borderWidth: 0 }));
 }
+// Donut slice colors get their own palette, not the 10-color person palette: there are more
+// projects than people, and reusing PERSON_PALETTE meant the eleventh project wrapped around
+// and repeated a color. This list is longer than the project roster so every project in a
+// ring is a different color, ordered most-distinct-first because slices are colored in
+// descending-hours order. No greys (the two synthetic slices below own those) and no near-
+// duplicates of the fixed colors in PROJECT_COLORS.
+const PROJECT_PALETTE = [
+  '#1f77b4', // blue
+  '#d62728', // red
+  '#9467bd', // purple
+  '#17becf', // cyan
+  '#ff7f0e', // orange
+  '#e377c2', // pink
+  '#8c564b', // brown
+  '#bcbd22', // olive
+  '#393b79', // deep indigo
+  '#66c2a5', // seafoam
+  '#a55194', // plum
+  '#e7969c', // salmon
+  '#6b6ecf', // periwinkle
+  '#8ca252', // moss
+  '#ce6dbd', // orchid
+  '#ad494a', // brick
+  '#c49c94', // tan
+  '#5254a3', // blue-violet
+  '#b5cf6b', // pale olive
+  '#e6550d', // burnt orange
+  '#9c9ede', // pale periwinkle
+  '#f7b6d2', // light pink
+  '#843c39', // oxblood
+  '#9edae5', // pale cyan
+  '#756bb1', // muted violet
+  '#fdae6b', // apricot
+];
+// Projects with a color chosen by hand rather than taken from the palette above. These are
+// reserved: the auto-assignment skips them so nothing else can land on the same hue.
+const PROJECT_COLORS = {
+  'Georgia Grown Market MSA': '#2ca02c',   // green
+};
 // Stable per-project colors for the Team Capacity donuts, so one project reads as the same
-// color in every person's ring. Shares the categorical palette used for people.
+// color in every person's ring.
 const _projColors = {};
 let _projColorN = 0;
 function projectColor(name){
+  if (name in PROJECT_COLORS) return PROJECT_COLORS[name];
   if (name in _projColors) return _projColors[name];
-  return (_projColors[name] = PERSON_PALETTE[_projColorN++ % PERSON_PALETTE.length]);
+  // Skip palette entries already spoken for (a fixed color or an earlier project), so two
+  // projects never share a hue while any unused one is left.
+  const used = new Set([...Object.values(_projColors), ...Object.values(PROJECT_COLORS)]);
+  while (used.size < PROJECT_PALETTE.length && used.has(PROJECT_PALETTE[_projColorN % PROJECT_PALETTE.length])) _projColorN++;
+  return (_projColors[name] = PROJECT_PALETTE[_projColorN++ % PROJECT_PALETTE.length]);
 }
+// Claim a color for every configured project up front, in config order, so the assignment
+// never depends on which tab drew first: a project is the same color on the Estimated donuts
+// and the Logged donuts, in every person's ring, for the whole session.
+PROJECT_ROSTER.forEach(projectColor);
 
 // Fold a { project: hours } map into donut slices: biggest first, with everything past the
 // top DONUT_MAX_SLICES rolled into a single "Other projects" slice so small rings stay legible.
@@ -2430,7 +2478,8 @@ route();
 # injects via its PREPEND. When serving the page ourselves we inject the same values here,
 # in a <script> that runs before the UI script, so identifiers like TEAM_MEMBERS are defined.
 def render_page():
-    boot = "<script>\nconst TEAM_MEMBERS = %s;\n</script>\n" % json.dumps(TEAM_MEMBERS)
+    boot = ("<script>\nconst TEAM_MEMBERS = %s;\nconst PROJECT_ROSTER = %s;\n</script>\n"
+            % (json.dumps(TEAM_MEMBERS), json.dumps([p["name"] for p in PROJECTS])))
     return PAGE.replace('<div class="wrap" id="app"></div>\n<script>',
                         '<div class="wrap" id="app"></div>\n' + boot + '<script>', 1)
 

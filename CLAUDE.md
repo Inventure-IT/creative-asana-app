@@ -27,9 +27,11 @@ implementation in `build_static.py`'s `PREPEND`. Keep the two functions named al
 (`project_detail` / `projectDetail`, `get_assignee_load` / `getAssigneeLoad`) so the pairing
 stays obvious.
 
-**The UI script may only use identifiers it defines itself, plus `TEAM_MEMBERS`.** `PREPEND`
-runs before it in the static build but *not* in the local app, which injects only
-`TEAM_MEMBERS`. Reaching for a `PREPEND` helper (`round2`, `sum`, `asanaGet`, …) from the UI
+**The UI script may only use identifiers it defines itself, plus `TEAM_MEMBERS` and
+`PROJECT_ROSTER`** (the configured project names, in `PROJECTS` order). `PREPEND` runs before
+it in the static build but *not* in the local app, which injects only those two — if the UI
+script ever needs another config value, add it to **both** `render_page()`'s boot script and
+`PREPEND`. Reaching for a `PREPEND` helper (`round2`, `sum`, `asanaGet`, …) from the UI
 script works on GitHub Pages and throws a `ReferenceError` locally. The UI script has its own
 `r2()` for rounding — use that.
 
