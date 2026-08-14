@@ -576,13 +576,28 @@ PAGE = r"""<!DOCTYPE html>
   .sidebar { flex:0 0 210px; position:sticky; top:32px; background:var(--panel); border-radius:12px;
              padding:14px 12px; box-shadow:0 1px 3px rgba(0,0,0,.4); border:1px solid var(--border); }
   .sidebar .brand { font-size:15px; font-weight:600; padding:6px 12px 14px; color:var(--text); }
+  /* Sidebar sections carry the same blue = estimated / green = logged semantics as the rest
+     of the app, so the two halves of the nav are told apart at a glance: a colored dot and
+     heading, a colored rail down the group, and an active item in that section's accent.
+     A hairline between sections stops the eight items reading as one flat list. */
+  .nav-sec + .nav-sec { margin-top:12px; padding-top:2px; border-top:1px solid var(--border); }
   .nav-section { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
                  color:var(--faint); padding:14px 12px 6px; }
-  .nav-section:first-of-type { padding-top:4px; }
+  .nav-sec:first-child .nav-section { padding-top:4px; }
+  .nav-section::before { content:''; display:inline-block; width:6px; height:6px; border-radius:50%;
+                         margin-right:6px; vertical-align:middle; background:var(--faint); }
+  .nav-sec.est .nav-section { color:var(--blue); }
+  .nav-sec.est .nav-section::before { background:var(--blue); }
+  .nav-sec.act .nav-section { color:var(--green); }
+  .nav-sec.act .nav-section::before { background:var(--green); }
+  .nav-group { border-left:2px solid var(--border); padding-left:7px; margin-left:3px; }
+  .nav-sec.est .nav-group { border-left-color:var(--blue); }
+  .nav-sec.act .nav-group { border-left-color:var(--green); }
   .nav-item { display:block; padding:10px 12px; margin-bottom:4px; border-radius:8px;
               font-size:14px; color:var(--muted); text-decoration:none; cursor:pointer; }
   .nav-item:hover { background:var(--panel2); color:var(--text); }
   .nav-item.active { background:var(--blue); color:#10141a; font-weight:600; }
+  .nav-sec.act .nav-item.active { background:var(--green); }
   .content { flex:1; min-width:0; }
   .content .head { margin-bottom:4px; }
   .content h1 { font-size:20px; margin:0; }
@@ -750,6 +765,11 @@ Chart.register(capLinePlugin);
 // target (i.e. appropriately loaded), red when they are under- or over-booked past it.
 const CAP_TOLERANCE = 15;
 const capColor = (h, cap) => Math.abs(h - cap) <= CAP_TOLERANCE ? C.green : C.red;
+// Team Capacity · Estimated uses a flat threshold instead of the tolerance band: a person
+// carrying more than CAP_GREEN_MIN remaining hours is booked up (green); anyone below it has
+// room and needs work assigned (red).
+const CAP_GREEN_MIN = 80;
+const capColorEst = h => h > CAP_GREEN_MIN ? C.green : C.red;
 
 // Label for task rows that sit in no status column; used by the status filters and shown
 // as a muted badge wherever a status column would be.
@@ -852,7 +872,10 @@ function personStacks(rows, hoursOf){
   const maps = rows.map(hoursOf), totals = {};
   maps.forEach(m => Object.entries(m).forEach(([p, h]) => { totals[p] = (totals[p] || 0) + h; }));
   const persons = Object.keys(totals).sort((a, b) => totals[b] - totals[a]);
-  return persons.map(p => ({ label: p, data: maps.map(m => Math.round((m[p] || 0) * 100) / 100),
+  // An over-run task leaves a person with negative remaining hours. Stacking that below zero
+  // drags the axis into the negatives and shrinks every other bar, so segments floor at 0;
+  // tooltips already skip zero-height segments.
+  return persons.map(p => ({ label: p, data: maps.map(m => Math.max(0, Math.round((m[p] || 0) * 100) / 100)),
     backgroundColor: personColor(p), borderColor: personColor(p), borderWidth: 0 }));
 }
 // Stable per-project colors for the Team Capacity donuts, so one project reads as the same
@@ -982,8 +1005,9 @@ let itemFilterPerson = null;
 // Daily Log: filter to a single assignee; null = show everyone. Kept separate from the Task
 // List filter so switching between the two tabs doesn't clobber either selection.
 let dailyFilterPerson = null;
-// Daily Log: oldest day first by default; toggled by the Order control.
-let dailyNewestFirst = false;
+// Daily Log: newest day first by default (a PM reads today's work first); toggled by the
+// Order control.
+let dailyNewestFirst = true;
 // Selected date range (YYYY-MM-DD) for the "Actual Hours" view; shared by the tab and drill-in.
 // Defaults to the current calendar month so the dashboard opens on "this month" every time.
 function monthRange(now){ const d = now || new Date(), p = n => String(n).padStart(2, '0'),
@@ -1028,10 +1052,11 @@ const TABS = {
   settings: { label:'Graph Colors', title:'Graph Colors',
     sub:'Pick a color for each person — saved in this browser and applied to every per-person chart.' },
 };
-// Sidebar groups: estimated/planned views vs. logged-hours & progress views.
+// Sidebar groups: estimated/planned views vs. logged-hours & progress views. `tone` picks the
+// section's accent — 'est' = blue, 'act' = green, omitted for neutral (Settings).
 const NAV_SECTIONS = [
-  { title: 'Estimated Hours', tabs: ['team', 'estproj', 'estimated'] },
-  { title: 'Actual Hours', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily'] },
+  { title: 'Estimated Hours', tone: 'est', tabs: ['team', 'estproj', 'estimated'] },
+  { title: 'Actual Hours', tone: 'act', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily'] },
   { title: 'Settings', tabs: ['settings'] },
 ];
 
@@ -1041,8 +1066,10 @@ function sidebarHtml() {
   return `<nav class="sidebar">
       <div class="brand">Creative Hours</div>
       ${NAV_SECTIONS.map(sec =>
-        `<div class="nav-section">${sec.title}</div>` +
-        sec.tabs.map(k => `<a href="#" class="nav-item${k === dashTab ? ' active' : ''}" data-tab="${k}">${TABS[k].label}</a>`).join('')
+        `<div class="nav-sec${sec.tone ? ' ' + sec.tone : ''}">` +
+          `<div class="nav-section">${sec.title}</div><div class="nav-group">` +
+          sec.tabs.map(k => `<a href="#" class="nav-item${k === dashTab ? ' active' : ''}" data-tab="${k}">${TABS[k].label}</a>`).join('') +
+        '</div></div>'
       ).join('')}
     </nav>`;
 }
@@ -1841,10 +1868,14 @@ async function renderDashboard() {
     const cb = document.getElementById('team-show-unassigned');
     if (cb) cb.onchange = () => { teamShowUnassigned = cb.checked; renderTeam(); };
     destroyCharts();
-    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : capColor(h, d.cap));
+    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : capColorEst(h));
+    // Someone who has tracked more time than was estimated has negative remaining hours. That
+    // is real, but drawing it pulls the axis below zero and squashes everyone else, so the bars
+    // bottom out at 0 — the true est/actual split stays in the tooltip and the drill-in.
+    const barHours = d.hours.map(h => Math.max(0, h));
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
-      data: { labels: d.labels, datasets: [{ label: 'Remaining hours', data: d.hours,
+      data: { labels: d.labels, datasets: [{ label: 'Remaining hours', data: barHours,
         backgroundColor: colors, borderColor: colors, borderWidth: 1,
         _counts: d.counts, _est: d.estimated, _act: d.actual }] },
       options: { responsive: true, maintainAspectRatio: false,
@@ -1852,11 +1883,11 @@ async function renderDashboard() {
         onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
         scales: { x: { title: { display: true, text: 'Assignee' },
                        ticks: { callback: (v, i) => [d.labels[i], h2(d.hours[i]) + ' h'] } },
-                  y: { beginAtZero: true, suggestedMax: Math.max(d.cap * 1.1, ...d.hours, 1),
+                  y: { min: 0, suggestedMax: Math.max(d.cap * 1.1, ...barHours, 1),
                        title: { display: true, text: 'Remaining hours' }, ticks: { callback: v => h2(v) } } },
         plugins: { legend: { display: false }, capLine: { value: d.cap },
           tooltip: { callbacks: {
-            label: ctx => `Remaining: ${h2(ctx.parsed.y)} h of ${h2(d.cap)} (${(ctx.parsed.y / d.cap * 100).toFixed(0)}%)`,
+            label: ctx => `Remaining: ${h2(d.hours[ctx.dataIndex])} h of ${h2(d.cap)} (${(d.hours[ctx.dataIndex] / d.cap * 100).toFixed(0)}%)`,
             afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} − actual ${h2(ctx.dataset._act[ctx.dataIndex])} · ${plural(ctx.dataset._counts[ctx.dataIndex], 'item')}` } } } }
     });
     // One donut per assignee under the bars: which projects their remaining hours sit in.
