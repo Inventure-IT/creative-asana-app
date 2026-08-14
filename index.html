@@ -2089,21 +2089,35 @@ async function renderDetail(gid) {
   function showChart() {
     const d = detailData;
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:d.name}]);
+    // Bars are REMAINING hours (estimated − time already tracked), the same measure as the
+    // Projects · Estimated chart this page is clicked from, sorted most-remaining-first.
+    // Over-run people would push the axis below zero, so bars floor at 0 and the true numbers
+    // stay in the tooltip and the task table.
+    // Honors the Projects · Estimated tab's "Exclude Unassigned" checkbox, so drilling into a
+    // project shows the same set of people the bar you clicked was stacked from.
+    const people = d.labels.map((name, i) => ({ name, est: d.hours[i],
+      act: (d.actual_hours || [])[i] || 0, count: d.counts[i] }))
+      .filter(p => !(estHideUnassigned && p.name === 'Unassigned'))
+      .map(p => ({ ...p, rem: r2(p.est - p.act) }))
+      .sort((a, b) => b.rem - a.rem);
+    const labels = people.map(p => p.name), rem = people.map(p => p.rem);
+    const barHours = rem.map(h => Math.max(0, h));
     document.getElementById('view').innerHTML =
       '<div class="chart-box"><canvas id="chart"></canvas></div>';
     destroyCharts();
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
-      data:{ labels:d.labels, datasets:[{ label:'Estimated hours', data:d.hours,
-        backgroundColor:C.blue, borderColor:C.blueD, borderWidth:1, _counts:d.counts }] },
+      data:{ labels, datasets:[{ label:'Remaining hours', data:barHours,
+        backgroundColor:C.blue, borderColor:C.blueD, borderWidth:1, _people:people }] },
       options:{ responsive:true, maintainAspectRatio:false,
-        onClick:(evt, els) => { if (els.length) showTasks(d.labels[els[0].index]); },
+        onClick:(evt, els) => { if (els.length) showTasks(labels[els[0].index]); },
         onHover:(evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
         plugins:{ legend:{display:false}, tooltip:{ callbacks:{
-          label: ctx => `Estimated: ${h2(ctx.parsed.y)} h`,
-          afterLabel: ctx => plural(ctx.dataset._counts[ctx.dataIndex], 'item') } } },
-        scales:{ x:{ title:{display:true,text:'Assignee'}, ticks:{ callback:(v,i) => [d.labels[i], h2(d.hours[i]) + ' h'] } },
-                 y:{ beginAtZero:true, title:{display:true,text:'Estimated hours'}, ticks:{ callback:v => h2(v) } } } }
+          label: ctx => `Remaining: ${h2(ctx.dataset._people[ctx.dataIndex].rem)} h`,
+          afterLabel: ctx => { const p = ctx.dataset._people[ctx.dataIndex];
+            return `Est ${h2(p.est)} − actual ${h2(p.act)} · ${plural(p.count, 'item')}`; } } } },
+        scales:{ x:{ title:{display:true,text:'Assignee'}, ticks:{ callback:(v,i) => [labels[i], h2(rem[i]) + ' h'] } },
+                 y:{ min:0, title:{display:true,text:'Remaining hours'}, ticks:{ callback:v => h2(v) } } } }
     });
   }
 
@@ -2111,23 +2125,29 @@ async function renderDetail(gid) {
     destroyCharts();
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:detailData.name, fn:showChart}, {label:assignee}]);
     const all = detailData.tasks;
-    let rows = '', total = 0, items = 0;
+    // Est / actual / remaining per row, so the column of remaining hours adds up to the bar.
+    let rows = '', totEst = 0, totAct = 0, items = 0;
+    const remCell = (est, act) => `<td class="hours">${h2(r2(est - act))} h</td>`;
 
     function subRow(s, context) {
-      total += s.hours; items++;
+      totEst += s.hours; totAct += s.actual || 0; items++;
       // Subtasks carry no status column of their own, so the cell states what the row is.
       return `<tr class="sub"><td class="sub-name">${esc(s.name)}${context}</td>` +
         `<td><span class="badge none">Subtask</span></td>` +
-        `<td class="hours">${s.hours ? h2(s.hours) + ' h' : '—'}</td></tr>`;
+        `<td class="hours">${s.hours ? h2(s.hours) + ' h' : '—'}</td>` +
+        `<td class="hours">${s.actual ? h2(s.actual) + ' h' : '—'}</td>` +
+        remCell(s.hours, s.actual || 0) + '</tr>';
     }
 
     // 1. Tasks owned by this assignee, with only THEIR subtasks nested underneath.
     all.filter(t => t.assignee === assignee).forEach(t => {
-      total += t.hours; items++;
+      totEst += t.hours; totAct += t.actual || 0; items++;
       rows += `<tr class="parent"><td>${esc(t.name)}</td>` +
         `<td>${t.section ? `<span class="badge">${esc(t.section)}</span>`
                          : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
-        `<td class="hours">${h2(t.hours)} h</td></tr>`;
+        `<td class="hours">${h2(t.hours)} h</td>` +
+        `<td class="hours">${h2(t.actual || 0)} h</td>` +
+        remCell(t.hours, t.actual || 0) + '</tr>';
       t.subtasks.filter(s => s.assignee === assignee).forEach(s => { rows += subRow(s, ''); });
     });
 
@@ -2138,15 +2158,15 @@ async function renderDetail(gid) {
       });
     });
 
-    if (!items) rows = '<tr><td colspan="3" class="muted">No items.</td></tr>';
+    if (!items) rows = '<tr><td colspan="5" class="muted">No items.</td></tr>';
     document.getElementById('view').innerHTML =
       `<div class="drill-head">
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(assignee)}</h2>
        </div>
-       <p class="drill-total">${plural(items, 'item')} · ${h2(total)} estimated hours (excludes Completed)</p>
+       <p class="drill-total">${plural(items, 'item')} · ${h2(r2(totEst - totAct))} h remaining · ${h2(totEst)} est − ${h2(totAct)} actual (excludes Completed)</p>
        <table class="tasks">
-         <thead><tr><th>Task / Subtask</th><th>Type / Status</th><th class="hours">Est.</th></tr></thead>
+         <thead><tr><th>Task / Subtask</th><th>Type / Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>`;
     document.getElementById('tochart').onclick = showChart;
@@ -2158,7 +2178,8 @@ async function renderDetail(gid) {
       detailData = await (await fetch('/api/project/' + gid + (refresh ? '?refresh=1' : ''))).json();
       document.getElementById('page-title').textContent = detailData.name;
       document.getElementById('sub').textContent =
-        `Estimated hours per assignee · ${plural(detailData.ntasks, 'task')} (excludes Completed)`;
+        `Remaining estimated hours per assignee (estimated − time tracked) · ${plural(detailData.ntasks, 'task')} (excludes Completed)` +
+        (estHideUnassigned ? ' · Unassigned excluded' : '');
       document.getElementById('dash-updated').textContent = detailData.updated ? ('Updated ' + detailData.updated) : '';
       showChart();
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
