@@ -133,8 +133,38 @@ def _drop_conn():
     _LOCAL.conn = None
 
 
+# Every Asana round trip is counted by kind, so the console can report what a load actually
+# cost ("/api/projects  71 Asana calls") instead of leaving it a mystery.
+REQ_COUNTS = {}
+REQ_LOCK = threading.Lock()
+
+
+def _count(target):
+    kind = ("batch" if "batch_requests" in target else
+            "entries" if "time_tracking_entries" in target else
+            "subtasks" if "/subtasks" in target else
+            "tasks" if "/tasks?" in target else "other")
+    with REQ_LOCK:
+        REQ_COUNTS[kind] = REQ_COUNTS.get(kind, 0) + 1
+
+
+def req_snapshot():
+    with REQ_LOCK:
+        return dict(REQ_COUNTS)
+
+
 def api_get(path_or_url, tries=4):
-    """GET one Asana URL (path or absolute) and return its decoded JSON body.
+    """GET one Asana URL (path or absolute) and return its decoded JSON body."""
+    return _api_call("GET", path_or_url, None, tries)
+
+
+def api_post(path, body, tries=4):
+    """POST a JSON body to one Asana path and return its decoded JSON response."""
+    return _api_call("POST", path, json.dumps(body).encode(), tries)
+
+
+def _api_call(method, path_or_url, payload, tries=4):
+    """One Asana request over the thread's keep-alive connection.
 
     Retries a rate limit (429), a 5xx, and a connection the server closed between calls —
     an idle keep-alive connection can go away at any time, which is not an error worth
@@ -146,13 +176,16 @@ def api_get(path_or_url, tries=4):
     target = parts.path + (("?" + parts.query) if parts.query else "")
     headers = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json",
                "Accept-Encoding": "gzip"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    _count(target)
     for attempt in range(tries):
         last = attempt == tries - 1
         try:
             conn = getattr(_LOCAL, "conn", None)
             if conn is None:
                 conn = _LOCAL.conn = http.client.HTTPSConnection(_ASANA_HOST, timeout=60)
-            conn.request("GET", target, headers=headers)
+            conn.request(method, target, body=payload, headers=headers)
             resp = conn.getresponse()
             raw = resp.read()          # drain in full, or the connection can't be reused
         except (http.client.HTTPException, OSError):
@@ -186,6 +219,50 @@ def api_pages(path):
     return out
 
 
+# Asana's /batch_requests runs up to 10 reads in one HTTP request. Startup is dominated by
+# hundreds of tiny per-task reads (time entries, subtasks), so batching them cuts the round
+# trips — the thing that actually costs seconds — by ~10x.
+BATCH_MAX = 10
+
+
+def _batch_chunk(paths):
+    """One /batch_requests call covering up to BATCH_MAX paths -> {path: data list}.
+
+    Any batch Asana rejects, or answers in a shape we don't recognise, falls back to plain
+    per-path GETs. Batching is an optimization only: it can cost requests, never data.
+    """
+    actions = [{"method": "get", "relative_path": p} for p in paths]
+    try:
+        results = api_post("/batch_requests", {"data": {"actions": actions}}).get("data")
+        if not isinstance(results, list) or len(results) != len(paths):
+            raise ValueError("unexpected /batch_requests response")
+    except (urllib.error.HTTPError, http.client.HTTPException, OSError, ValueError,
+            json.JSONDecodeError):
+        return {p: api_pages(p) for p in paths}
+    out = {}
+    for path, res in zip(paths, results):
+        body = (res or {}).get("body") or {}
+        # A per-action failure, or a first page that says there are more: fetch that one
+        # directly rather than dropping rows. Batch actions return only their first page.
+        if (res or {}).get("status_code") != 200 or "data" not in body or body.get("next_page"):
+            out[path] = api_pages(path)
+        else:
+            out[path] = body["data"]
+    return out
+
+
+def api_batch(paths):
+    """GET many small collections, BATCH_MAX per HTTP request. Returns {path: data list}."""
+    paths = list(paths)
+    if not paths:
+        return {}
+    chunks = [paths[i:i + BATCH_MAX] for i in range(0, len(paths), BATCH_MAX)]
+    out = {}
+    for part in LEAF_POOL.map(_batch_chunk, chunks):
+        out.update(part)
+    return out
+
+
 # One field set for both halves of the app. `num_subtasks` lets fetch_tree skip the subtask
 # call for a leaf task (most tasks are leaves), and `completed_at` is what the logged-hours
 # path needs — asking for it here means that path no longer re-fetches the same lists.
@@ -201,9 +278,13 @@ def fetch_tasks(gid):
     return api_pages(f"/projects/{gid}/tasks?opt_fields={TASK_FIELDS}&limit=100")
 
 
-def fetch_subtasks(task_gid):
-    """Return subtasks for a task (name + assignee + estimated/actual time + completed)."""
-    return api_pages(f"/tasks/{task_gid}/subtasks?opt_fields={SUBTASK_FIELDS}&limit=100")
+def subtasks_path(task_gid):
+    return f"/tasks/{task_gid}/subtasks?opt_fields={SUBTASK_FIELDS}&limit=100"
+
+
+def entries_path(task_gid):
+    fields = "duration_minutes,entered_on,created_by.name"
+    return f"/tasks/{task_gid}/time_tracking_entries?opt_fields={fields}&limit=100"
 
 
 # A refresh landing within this many seconds of the last one reuses the fetched tree. The
@@ -249,7 +330,8 @@ def fetch_tree(gid, refresh=False):
             return hit
         tasks = fetch_tasks(gid)
         parents = [t["gid"] for t in tasks if (t.get("num_subtasks") or 0) > 0]
-        subs = dict(zip(parents, LEAF_POOL.map(fetch_subtasks, parents)))
+        by_path = api_batch(subtasks_path(g) for g in parents)
+        subs = {g: by_path[subtasks_path(g)] for g in parents}
         entry = {"tasks": tasks, "subs": subs, "at": time.time()}
         with CACHE_LOCK:
             CACHE["tree"][gid] = entry
@@ -475,46 +557,30 @@ def get_assignee_load(refresh=False):
 
 # ---- "Hours logged": actual time-tracking entries dated in a given month (YYYY-MM) ----
 
-def fetch_time_entries(task_gid):
-    fields = "duration_minutes,entered_on,created_by.name"
-    return api_pages(f"/tasks/{task_gid}/time_tracking_entries?opt_fields={fields}&limit=100")
+def entries_for_tasks(task_gids, refresh=False):
+    """Time entries for many tasks -> {task gid: rows}.
 
-
-def entries_for_task(task_gid, refresh=False):
-    """Cached time entries for one task. Entries don't depend on the date range, so a range
-    change re-filters what is already here instead of re-querying Asana."""
-    def usable():
-        with CACHE_LOCK:
-            e = CACHE["entries"].get(task_gid)
-        if e and (not refresh or time.time() - e["at"] < REFRESH_SHARE_WINDOW):
-            return e
-        return None
-
-    hit = usable()
-    if hit:
-        return hit["rows"]
-    rows = fetch_time_entries(task_gid)
+    This is the call that used to dominate a load — one request per task with tracked time —
+    so anything not already cached is fetched BATCH_MAX at a time. Entries don't depend on the
+    selected date range, so a range change re-filters these instead of re-querying Asana.
+    """
+    out, missing, now = {}, [], time.time()
     with CACHE_LOCK:
-        CACHE["entries"][task_gid] = {"rows": rows, "at": time.time()}
-    return rows
-
-
-def logged_entries_for_item(item):
-    """item = (task_name, task_gid, start, end, refresh). Entries logged in [start, end]."""
-    name, gid, start, end, refresh = item
-    res = []
-    for e in entries_for_task(gid, refresh=refresh):
-        entered = e.get("entered_on") or ""
-        if entered and start <= entered <= end:
-            res.append({
-                "entry_gid": e.get("gid"),
-                "task": name,
-                "by": (e.get("created_by") or {}).get("name") or "Unknown",
-                "date": entered,
-                # Every logged entry counts the same, regardless of Asana's billable flag.
-                "minutes": e.get("duration_minutes") or 0,
-            })
-    return res
+        for g in task_gids:
+            e = CACHE["entries"].get(g)
+            if e and (not refresh or now - e["at"] < REFRESH_SHARE_WINDOW):
+                out[g] = e["rows"]
+            else:
+                missing.append(g)
+    if missing:
+        by_path = api_batch(entries_path(g) for g in missing)
+        fetched = time.time()
+        with CACHE_LOCK:
+            for g in missing:
+                rows = by_path[entries_path(g)]
+                CACHE["entries"][g] = {"rows": rows, "at": fetched}
+                out[g] = rows
+    return out
 
 
 def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
@@ -548,17 +614,28 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
             note_completed(s)
             if (s.get("actual_time_minutes") or 0) > 0:
                 cand_by_gid[s["gid"]] = s.get("name", "(untitled)")
-    candidates = [(name, tgid, start, end, refresh) for tgid, name in cand_by_gid.items()]
+    # One batched read for every candidate task, then filter to the range in memory.
+    by_gid = entries_for_tasks(cand_by_gid.keys(), refresh=refresh)
 
     # Collect entries, deduping by entry gid as a final guard against any double-pull.
     seen, entries = set(), []
-    for lst in LEAF_POOL.map(logged_entries_for_item, candidates):
-        for e in lst:
-            if e["entry_gid"] and e["entry_gid"] in seen:
+    for tgid, name in cand_by_gid.items():
+        for e in by_gid.get(tgid, []):
+            entered = e.get("entered_on") or ""
+            if not entered or not (start <= entered <= end):
                 continue
-            if e["entry_gid"]:
-                seen.add(e["entry_gid"])
-            entries.append(e)
+            egid = e.get("gid")
+            if egid and egid in seen:
+                continue
+            if egid:
+                seen.add(egid)
+            entries.append({
+                "task": name,
+                "by": (e.get("created_by") or {}).get("name") or "Unknown",
+                "date": entered,
+                # Every logged entry counts the same, regardless of Asana's billable flag.
+                "minutes": e.get("duration_minutes") or 0,
+            })
 
     # Per person: total minutes logged. All logged time counts toward project budgets.
     totals, counts = {}, {}
@@ -2734,6 +2811,7 @@ PAGE_HTML = render_page()
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        self._t0, self._c0 = time.time(), req_snapshot()
         parts = self.path.split("?")
         path = parts[0]
         query = urllib.parse.parse_qs(parts[1] if len(parts) > 1 else "")
@@ -2766,7 +2844,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(502, {"error": f"Asana {e.code}"})
 
     def _json(self, code, obj):
-        self._send(code, "application/json", json.dumps(obj).encode())
+        body = json.dumps(obj).encode()
+        # What this route actually cost, by request kind — so a slow load can be read off the
+        # console instead of guessed at ("/api/logged  48 Asana calls (batch 40, tasks 8)").
+        after = req_snapshot()
+        spent = {k: v - self._c0.get(k, 0) for k, v in after.items() if v - self._c0.get(k, 0)}
+        total = sum(spent.values())
+        detail = ", ".join(f"{k} {n}" for k, n in sorted(spent.items(), key=lambda x: -x[1]))
+        print(f"{self.path.split('?')[0]:<22} {total:>4} Asana calls"
+              f"  {time.time() - self._t0:5.1f}s  {len(body) / 1024:6.0f} KB"
+              + (f"  ({detail})" if detail else ""))
+        self._send(code, "application/json", body)
 
     def _send(self, code, ctype, body):
         self.send_response(code)

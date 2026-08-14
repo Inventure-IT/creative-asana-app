@@ -277,6 +277,52 @@ async function asanaGet(pathOrUrl){
 }
 const mapAll = (arr, fn) => Promise.all(arr.map(fn));
 
+// POST one JSON body (only /batch_requests uses this), with the same 429 retry as asanaGet.
+async function asanaPost(path, body){
+  return _gate(async () => {
+    for (;;){
+      const r = await _realFetch(ASANA_API + path, { method: 'POST',
+        headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (r.status === 429){ const ra = Number(r.headers.get('Retry-After') || 1); await new Promise(s => setTimeout(s, ra * 1000)); continue; }
+      if (!r.ok) throw new Error('Asana ' + r.status);
+      return r.json();
+    }
+  });
+}
+
+// Mirrors api_batch: Asana's /batch_requests runs up to 10 reads per HTTP request, and a load
+// is dominated by hundreds of tiny per-task reads. Any batch Asana rejects — and any action
+// that failed or has a second page — falls back to a plain GET, so batching can cost requests
+// but can never lose rows.
+const BATCH_MAX = 10;
+async function asanaBatchChunk(paths){
+  const out = {};
+  let results = null;
+  try {
+    const res = await asanaPost('/batch_requests',
+      { data: { actions: paths.map(p => ({ method: 'get', relative_path: p })) } });
+    results = res && res.data;
+    if (!Array.isArray(results) || results.length !== paths.length) results = null;
+  } catch (err) { results = null; }
+  if (!results){
+    for (const [i, rows] of (await mapAll(paths, asanaGet)).entries()) out[paths[i]] = rows;
+    return out;
+  }
+  await mapAll(paths.map((p, i) => [p, results[i]]), async ([p, r]) => {
+    const body = (r && r.body) || {};
+    out[p] = (r && r.status_code === 200 && body.data && !body.next_page)
+      ? body.data : await asanaGet(p);
+  });
+  return out;
+}
+async function asanaBatch(paths){
+  paths = [...paths];
+  const chunks = [];
+  for (let i = 0; i < paths.length; i += BATCH_MAX) chunks.push(paths.slice(i, i + BATCH_MAX));
+  return Object.assign({}, ...await mapAll(chunks, asanaBatchChunk));
+}
+
 // ---- Estimated-hours layer (mirrors project_detail / get_summaries / get_assignee_load) ----
 function taskMinutes(t){ for (const cf of (t.custom_fields || [])){ if (cf.name === EST_FIELD && cf.number_value != null) return cf.number_value; } return 0; }
 function actualMinutes(t){ return t.actual_time_minutes || 0; }
@@ -289,7 +335,8 @@ function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).tri
 const TASK_FIELDS = 'name,assignee.name,completed,completed_at,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
 const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,actual_time_minutes,custom_fields.name,custom_fields.number_value';
 function fetchTasks(gid){ return asanaGet(`/projects/${gid}/tasks?opt_fields=${TASK_FIELDS}&limit=100`); }
-function fetchSubtasks(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=${SUBTASK_FIELDS}&limit=100`); }
+const subtasksPath = g => `/tasks/${g}/subtasks?opt_fields=${SUBTASK_FIELDS}&limit=100`;
+const entriesPath = g => `/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`;
 
 // Every task and subtask of one project, fetched once and shared by the estimated and
 // logged-hours layers (mirrors fetch_tree). The in-flight promise is cached, not just the
@@ -300,9 +347,9 @@ function fetchTree(gid, refresh){
   return (_trees[gid] = (async () => {
     const tasks = await fetchTasks(gid);
     const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
-    const lists = await mapAll(parents, fetchSubtasks);
+    const byPath = await asanaBatch(parents.map(subtasksPath));
     const subs = {};
-    parents.forEach((g, i) => { subs[g] = lists[i]; });
+    parents.forEach(g => { subs[g] = byPath[subtasksPath(g)]; });
     return { tasks, subs };
   })());
 }
@@ -394,24 +441,21 @@ async function getAssigneeLoad(refresh){
 }
 
 // ---- Logged-hours layer for a date range (mirrors logged_detail / get_logged_summaries) ----
-function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`); }
-// Entries don't depend on the date range, so cache the promise per task (mirrors
-// entries_for_task): picking a different range re-filters these instead of re-querying.
+// Mirrors entries_for_tasks: the per-task entry reads were the bulk of every load, so
+// uncached ones go out BATCH_MAX at a time. Entries don't depend on the selected range, so a
+// range change re-filters what is already here instead of re-querying.
 const _entries = {};
-function entriesForTask(g, refresh){
-  if (!refresh && _entries[g]) return _entries[g];
-  return (_entries[g] = fetchTimeEntries(g));
-}
-
-async function entriesForItem(name, gid, start, end, refresh){
-  const res = [];
-  for (const e of await entriesForTask(gid, refresh)){
-    const entered = e.entered_on || '';
-    if (entered && start <= entered && entered <= end)
-      res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
-        minutes: e.duration_minutes || 0 });
+async function entriesForTasks(gids, refresh){
+  const out = {}, missing = [];
+  for (const g of gids){
+    if (!refresh && _entries[g]) out[g] = _entries[g];
+    else missing.push(g);
   }
-  return res;
+  if (missing.length){
+    const byPath = await asanaBatch(missing.map(entriesPath));
+    for (const g of missing) out[g] = _entries[g] = byPath[entriesPath(g)];
+  }
+  return out;
 }
 async function loggedDetail(gid, start, end, refresh){
   // Shares the estimated side's project tree, so the only calls left here are the per-item
@@ -428,10 +472,18 @@ async function loggedDetail(gid, start, end, refresh){
   for (const t of tasks){ noteCompleted(t); if ((t.actual_time_minutes || 0) > 0) cand[t.gid] = t.name || '(untitled)'; }
   for (const subs of Object.values(tree.subs))
     for (const s of subs){ noteCompleted(s); if ((s.actual_time_minutes || 0) > 0) cand[s.gid] = s.name || '(untitled)'; }
-  const candidates = Object.entries(cand);   // [gid, name]
+  // One batched read for every candidate task, then filter to the range in memory.
+  const byGid = await entriesForTasks(Object.keys(cand), refresh);
   const seen = new Set(), entries = [];
-  for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end, refresh)))
-    for (const e of lst){ if (e.entry_gid && seen.has(e.entry_gid)) continue; if (e.entry_gid) seen.add(e.entry_gid); entries.push(e); }
+  for (const [g, name] of Object.entries(cand))
+    for (const e of byGid[g] || []){
+      const entered = e.entered_on || '';
+      if (!entered || entered < start || entered > end) continue;
+      if (e.gid && seen.has(e.gid)) continue;
+      if (e.gid) seen.add(e.gid);
+      entries.push({ task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
+        minutes: e.duration_minutes || 0 });
+    }
   const totals = {}, counts = {};
   for (const e of entries){
     totals[e.by] = (totals[e.by] || 0) + e.minutes; counts[e.by] = (counts[e.by] || 0) + 1;

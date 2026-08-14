@@ -160,9 +160,16 @@ existing `capLinePlugin` / `capMarksPlugin` and are enabled per-chart through
   Navigation must never re-hit the Asana API. Respect the two thread pools — `LEAF_POOL` for
   small per-task calls, `PROJECT_POOL` for whole projects — and never create ad-hoc pools;
   Asana rate-limits hard.
-- **Every Asana call goes through `api_get()` / `api_pages()`** (`fetchTree` / `asanaGet` in the
-  static build). They keep one connection alive per worker thread, ask for gzip, retry 429/5xx,
-  and follow pagination. Never hand-roll a `urllib.request` call or a `while next_page` loop.
+- **Every Asana call goes through `api_get()` / `api_pages()` / `api_batch()`** (`asanaGet` /
+  `asanaBatch` in the static build). They keep one connection alive per worker thread, ask for
+  gzip, retry 429/5xx, and follow pagination. Never hand-roll a `urllib.request` call or a
+  `while next_page` loop.
+- **Many small reads of the same shape go through `api_batch()`**, which posts them to Asana's
+  `/batch_requests` `BATCH_MAX` (10) at a time — the per-task time-entry reads were ~90% of a
+  load. Batching is an optimization only: a rejected batch, a failed action, or a response with
+  a `next_page` falls back to a plain GET for that path, so it can cost requests but must never
+  lose rows. Keep that fallback if you touch it. Console prints per-route call counts
+  (`/api/logged  48 Asana calls`) — use it to check a change actually reduced requests.
 - **Fetch a project's tasks once.** `fetch_tree(gid)` returns `{tasks, subs}` and is shared by
   the estimated and logged-hours paths (single-flighted per project, so the two concurrent
   startup requests can't duplicate it); `entries_for_task(gid)` caches time entries, which are
