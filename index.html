@@ -296,6 +296,15 @@ async function asanaPost(path, body){
 // that failed or has a second page — falls back to a plain GET, so batching can cost requests
 // but can never lose rows.
 const BATCH_MAX = 10;
+// Warn once if batching isn't working: the load still completes (each read falls back to its
+// own GET) but at ~10x the requests, which is the difference between a fast and a slow start.
+let _batchWarned = false;
+function warnBatch(why){
+  if (_batchWarned) return;
+  _batchWarned = true;
+  console.warn('Asana /batch_requests unavailable (' + why + ') — falling back to one request '
+    + 'per read, so this load will be slow. Data is unaffected.');
+}
 async function asanaBatchChunk(paths){
   const out = {};
   let results = null;
@@ -303,8 +312,11 @@ async function asanaBatchChunk(paths){
     const res = await asanaPost('/batch_requests',
       { data: { actions: paths.map(p => ({ method: 'get', relative_path: p })) } });
     results = res && res.data;
-    if (!Array.isArray(results) || results.length !== paths.length) results = null;
-  } catch (err) { results = null; }
+    if (!Array.isArray(results) || results.length !== paths.length){
+      warnBatch('unexpected response shape');
+      results = null;
+    }
+  } catch (err) { warnBatch(String((err && err.message) || err)); results = null; }
   if (!results){
     for (const [i, rows] of (await mapAll(paths, asanaGet)).entries()) out[paths[i]] = rows;
     return out;

@@ -223,6 +223,17 @@ def api_pages(path):
 # hundreds of tiny per-task reads (time entries, subtasks), so batching them cuts the round
 # trips — the thing that actually costs seconds — by ~10x.
 BATCH_MAX = 10
+_BATCH_WARNED = []
+
+
+def _warn_batch(why):
+    """Say once, loudly, that batching isn't working. The load still completes — every read
+    falls back to its own request — but at ~10x the requests, i.e. a slow start."""
+    if _BATCH_WARNED:
+        return
+    _BATCH_WARNED.append(True)
+    print(f"WARNING: Asana /batch_requests unavailable ({why}) — falling back to one request "
+          f"per read, so this load will be slow. Data is unaffected.")
 
 
 def _batch_chunk(paths):
@@ -237,7 +248,8 @@ def _batch_chunk(paths):
         if not isinstance(results, list) or len(results) != len(paths):
             raise ValueError("unexpected /batch_requests response")
     except (urllib.error.HTTPError, http.client.HTTPException, OSError, ValueError,
-            json.JSONDecodeError):
+            json.JSONDecodeError) as e:
+        _warn_batch(e)
         return {p: api_pages(p) for p in paths}
     out = {}
     for path, res in zip(paths, results):
