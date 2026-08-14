@@ -85,20 +85,32 @@ function actualMinutes(t){ return t.actual_time_minutes || 0; }
 function sectionName(t, gid){ let fb = ''; for (const m of (t.memberships || [])){ const sec = (m.section || {}).name; if (!sec) continue; if ((m.project || {}).gid === gid) return sec; fb = fb || sec; } return fb; }
 function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).trim().toLowerCase()); }
 
-function fetchTasks(gid){
-  // num_subtasks lets buildTask skip the subtask request for a leaf task — most tasks are
-  // leaves, so that one extra field removes most of the calls this load used to make.
-  const f = 'name,assignee.name,completed,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
-  return asanaGet(`/projects/${gid}/tasks?opt_fields=${f}&limit=100`);
-}
-function fetchSubtasks(g){
-  const f = 'name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value';
-  return asanaGet(`/tasks/${g}/subtasks?opt_fields=${f}&limit=100`);
+// One field set for both halves of the app (mirrors TASK_FIELDS / SUBTASK_FIELDS): num_subtasks
+// lets fetchTree skip the subtask call for a leaf task, and completed_at is what the
+// logged-hours layer needs, so it no longer re-fetches these same lists.
+const TASK_FIELDS = 'name,assignee.name,completed,completed_at,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,actual_time_minutes,custom_fields.name,custom_fields.number_value';
+function fetchTasks(gid){ return asanaGet(`/projects/${gid}/tasks?opt_fields=${TASK_FIELDS}&limit=100`); }
+function fetchSubtasks(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=${SUBTASK_FIELDS}&limit=100`); }
+
+// Every task and subtask of one project, fetched once and shared by the estimated and
+// logged-hours layers (mirrors fetch_tree). The in-flight promise is cached, not just the
+// result, so the two concurrent startup requests share one fetch instead of racing.
+const _trees = {};
+function fetchTree(gid, refresh){
+  if (!refresh && _trees[gid]) return _trees[gid];
+  return (_trees[gid] = (async () => {
+    const tasks = await fetchTasks(gid);
+    const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
+    const lists = await mapAll(parents, fetchSubtasks);
+    const subs = {};
+    parents.forEach((g, i) => { subs[g] = lists[i]; });
+    return { tasks, subs };
+  })());
 }
 
-async function buildTask(t, gid){
+function buildTask(t, gid, children){
   const subs = [];
-  const children = (t.num_subtasks || 0) > 0 ? await fetchSubtasks(t.gid) : [];
   for (const s of children){
     if (s.completed) continue;
     subs.push({ name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
@@ -108,9 +120,10 @@ async function buildTask(t, gid){
     hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: sectionName(t, gid), subtasks: subs };
 }
 
-async function projectDetail(gid){
-  const tasks = (await fetchTasks(gid)).filter(t => !t.completed && !isExcluded(t, gid));
-  const detailed = await mapAll(tasks, t => buildTask(t, gid));
+async function projectDetail(gid, refresh){
+  const tree = await fetchTree(gid, refresh);
+  const tasks = tree.tasks.filter(t => !t.completed && !isExcluded(t, gid));
+  const detailed = tasks.map(t => buildTask(t, gid, tree.subs[t.gid] || []));
   const totals = {}, actuals = {}, counts = {};
   for (const d of detailed){
     totals[d.assignee] = (totals[d.assignee] || 0) + d.hours;
@@ -128,7 +141,7 @@ async function projectDetail(gid){
     counts: ordered.map(n => counts[n]), ntasks: detailed.length, tasks: detailed, updated: nowStr() };
 }
 
-const CACHE = { summaries: null, detail: {}, june_summaries: {}, june_detail: {}, me: null };
+const CACHE = { summaries: null, detail: {}, logged_summaries: {}, logged_detail: {}, me: null };
 // Mirrors get_me: the display name behind the PAT, so the UI can default a filter to "you".
 // asanaGet always hands back an array, and /users/me is a single object, so take the first.
 async function getMe(refresh){
@@ -140,7 +153,7 @@ function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntas
 
 async function getDetail(gid, refresh){
   if (!refresh && CACHE.detail[gid]) return CACHE.detail[gid];
-  const data = await projectDetail(gid);
+  const data = await projectDetail(gid, refresh);
   CACHE.detail[gid] = data;
   if (CACHE.summaries) CACHE.summaries = CACHE.summaries.map(s => s.gid === gid ? summaryFromDetail(data) : s);
   return data;
@@ -182,13 +195,19 @@ async function getAssigneeLoad(refresh){
     breakdown: Object.fromEntries(ordered.map(n => [n, breakdown[n] || []])), updated: nowStr() };
 }
 
-// ---- Logged-hours layer for a date range (mirrors june_detail / get_june_summaries) ----
+// ---- Logged-hours layer for a date range (mirrors logged_detail / get_logged_summaries) ----
 function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`); }
-function fetchSubtasksTime(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=name,actual_time_minutes,completed,completed_at&limit=100`); }
+// Entries don't depend on the date range, so cache the promise per task (mirrors
+// entries_for_task): picking a different range re-filters these instead of re-querying.
+const _entries = {};
+function entriesForTask(g, refresh){
+  if (!refresh && _entries[g]) return _entries[g];
+  return (_entries[g] = fetchTimeEntries(g));
+}
 
-async function entriesForItem(name, gid, start, end){
+async function entriesForItem(name, gid, start, end, refresh){
   const res = [];
-  for (const e of await fetchTimeEntries(gid)){
+  for (const e of await entriesForTask(gid, refresh)){
     const entered = e.entered_on || '';
     if (entered && start <= entered && entered <= end)
       res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
@@ -196,8 +215,11 @@ async function entriesForItem(name, gid, start, end){
   }
   return res;
 }
-async function juneDetail(gid, start, end){
-  const tasks = await asanaGet(`/projects/${gid}/tasks?opt_fields=name,actual_time_minutes,num_subtasks,completed,completed_at&limit=100`);
+async function loggedDetail(gid, start, end, refresh){
+  // Shares the estimated side's project tree, so the only calls left here are the per-item
+  // time-entry lookups.
+  const tree = await fetchTree(gid, refresh);
+  const tasks = tree.tasks;
   // Tasks/subtasks completed within the date range (by completed_at), deduped by gid.
   const completedDates = {};
   const noteCompleted = it => {
@@ -206,12 +228,11 @@ async function juneDetail(gid, start, end){
   };
   const cand = {};
   for (const t of tasks){ noteCompleted(t); if ((t.actual_time_minutes || 0) > 0) cand[t.gid] = t.name || '(untitled)'; }
-  const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
-  for (const subs of await mapAll(parents, fetchSubtasksTime))
+  for (const subs of Object.values(tree.subs))
     for (const s of subs){ noteCompleted(s); if ((s.actual_time_minutes || 0) > 0) cand[s.gid] = s.name || '(untitled)'; }
   const candidates = Object.entries(cand);   // [gid, name]
   const seen = new Set(), entries = [];
-  for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end)))
+  for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end, refresh)))
     for (const e of lst){ if (e.entry_gid && seen.has(e.entry_gid)) continue; if (e.entry_gid) seen.add(e.entry_gid); entries.push(e); }
   const totals = {}, counts = {};
   for (const e of entries){
@@ -227,21 +248,21 @@ async function juneDetail(gid, start, end){
     nentries: entries.length,
     entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60) })), updated: nowStr() };
 }
-function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+function loggedSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
 
-async function getJuneDetail(gid, refresh, start, end){
+async function getLoggedDetail(gid, refresh, start, end){
   const key = start + ':' + end;
-  if (!refresh && CACHE.june_detail[key] && CACHE.june_detail[key][gid]) return CACHE.june_detail[key][gid];
-  const data = await juneDetail(gid, start, end);
-  (CACHE.june_detail[key] = CACHE.june_detail[key] || {})[gid] = data;
-  if (CACHE.june_summaries[key]) CACHE.june_summaries[key] = CACHE.june_summaries[key].map(s => s.gid === gid ? juneSummaryFromDetail(data) : s);
+  if (!refresh && CACHE.logged_detail[key] && CACHE.logged_detail[key][gid]) return CACHE.logged_detail[key][gid];
+  const data = await loggedDetail(gid, start, end, refresh);
+  (CACHE.logged_detail[key] = CACHE.logged_detail[key] || {})[gid] = data;
+  if (CACHE.logged_summaries[key]) CACHE.logged_summaries[key] = CACHE.logged_summaries[key].map(s => s.gid === gid ? loggedSummaryFromDetail(data) : s);
   return data;
 }
-async function getJuneSummaries(refresh, start, end){
+async function getLoggedSummaries(refresh, start, end){
   const key = start + ':' + end;
-  if (!refresh && CACHE.june_summaries[key]) return CACHE.june_summaries[key];
-  const details = await mapAll(PROJECTS, p => getJuneDetail(p.gid, refresh, start, end));
-  return (CACHE.june_summaries[key] = details.map(juneSummaryFromDetail));
+  if (!refresh && CACHE.logged_summaries[key]) return CACHE.logged_summaries[key];
+  const details = await mapAll(PROJECTS, p => getLoggedDetail(p.gid, refresh, start, end));
+  return (CACHE.logged_summaries[key] = details.map(loggedSummaryFromDetail));
 }
 
 // ---- Route /api/* (same shapes the existing UI expects) ----
@@ -251,11 +272,11 @@ async function handleApi(p){
   let start = q.get('start') || DEF_START, end = q.get('end') || DEF_END;
   if (start > end){ const t = start; start = end; end = t; }
   if (path === '/api/projects') return getSummaries(refresh);
-  if (path === '/api/june') return getJuneSummaries(refresh, start, end);
+  if (path === '/api/logged') return getLoggedSummaries(refresh, start, end);
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
   if (path === '/api/groups') return GROUPS;
   if (path === '/api/me') return getMe(refresh);
-  if (path.startsWith('/api/june/')) return getJuneDetail(path.split('/').pop(), refresh, start, end);
+  if (path.startsWith('/api/logged/')) return getLoggedDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
   throw new Error('Unknown API ' + path);
 }

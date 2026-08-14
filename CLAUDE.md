@@ -72,7 +72,7 @@ In order, top to bottom — do not reorder, and do not skip a step:
 4. The chart (`.chart-box`) and/or the tables, with `.section-h` headings (`.flush` on the
    first one, which has no chart above it to sit under).
 
-Detail pages (`#/p/…`, `#/june/…`) use the same skeleton, with breadcrumbs in a `.crumbs`
+Detail pages (`#/p/…`, `#/logged/…`) use the same skeleton, with breadcrumbs in a `.crumbs`
 row *above* the `<h1>`. They render straight onto the page background — `.panel` is only for
 the Settings form.
 
@@ -86,7 +86,7 @@ accent, buttons, active nav) · `--green`/`--green-d` (actual/logged-hours accen
 `--red` (over budget).
 
 The blue/green split is semantic and load-bearing: **blue = estimated/planned, green =
-actual/logged.** A "hours logged" card is `.card.june`; an estimated card is plain `.card`.
+actual/logged.** A "hours logged" card is `.card.logged`; an estimated card is plain `.card`.
 
 Canvas can't read CSS variables, so the same palette is mirrored in the `C` object
 (`C.blue`, `C.green`, `C.red`, `C.panel2`, `C.amber`, …). Use `C.*` for anything drawn on a
@@ -97,11 +97,18 @@ Chart data colors come from helpers, never literals:
 - `personColor(name)` — stable per-person hue, shared across every per-person chart, and
   user-overridable in the Graph Colors tab (persisted in `localStorage`). Use it anywhere a
   series represents a person.
-- `projectColor(name)` — stable per-project hue for the capacity donuts.
+- `projectColor(name)` — stable per-project hue for the donuts, off its own `PROJECT_PALETTE`
+  (longer than the project roster, so no two projects ever share a color). Colors are claimed
+  for the whole `PROJECT_ROSTER` up front, so a project looks the same on the Estimated and
+  Logged donuts. Pin one by hand in `PROJECT_COLORS` (Georgia Grown is green) — those hues are
+  reserved and never auto-assigned.
 - `PERSON_PALETTE` deliberately contains **no orange/amber/gold**, because `#f0c674` is
-  reserved for the per-bar capacity marker. Keep it that way.
-- `capColor(hours, cap)` — green within `CAP_TOLERANCE` (15 h) of target, red outside it.
-  Red means "needs attention" (over *or* under booked), not merely "over".
+  reserved for the per-bar capacity marker. Keep it that way. `Unassigned` is always grey
+  (seeded into `_personColors`); real people get their color from the Graph Colors tab.
+- `capColor(hours, cap)` — Team Capacity · **Logged**: green within `CAP_TOLERANCE` (15 h) of
+  target, red outside it. Red means "needs attention" (over *or* under booked), not merely "over".
+- `capColorEst(hours)` — Team Capacity · **Estimated**: green above `CAP_GREEN_MIN` (80 h)
+  remaining, red at or below it (that person has room and needs work assigned).
 
 ### Layout & components
 
@@ -110,7 +117,7 @@ Chart data colors come from helpers, never literals:
 - Nav is data-driven: add a tab to `TABS` (label + title, optional `sub`) and list its key
   in the right `NAV_SECTIONS` group ("Estimated Hours" / "Actual Hours" / "Settings").
   Don't hand-write nav markup.
-- Card grids are `.grid` with `.card`; reuse `estCard` / `juneCard` / `capCard` / `groupCard`
+- Card grids are `.grid` with `.card`; reuse `estCard` / `loggedCard` / `capCard` / `groupCard`
   rather than writing new card HTML. Stats inside a card are `.stats > .stat > .n` + `.l`
   (uppercase micro-label). A number that has gone the wrong way gets `.neg`.
 - Filter bars are `.toolbar` (`.tb-label`, `.chk`, `.tb-sep`). Charts go in `.chart-box`.
@@ -119,7 +126,7 @@ Chart data colors come from helpers, never literals:
 - Loading and empty states go through `note()` / `noteBox()` (the latter fills a `.chart-box`)
   with the shared `LOADING` string — never a bespoke `<p class="muted">Loading…`.
 - Breadcrumbs via `setCrumbs()`. Routes are hash-based: `#/p/<gid>` (estimated detail),
-  `#/june/<gid>` (logged-hours detail); anything else is the dashboard.
+  `#/logged/<gid>` (logged-hours detail); anything else is the dashboard.
 
 ### Numbers & text
 
@@ -153,6 +160,17 @@ existing `capLinePlugin` / `capMarksPlugin` and are enabled per-chart through
   Navigation must never re-hit the Asana API. Respect the two thread pools — `LEAF_POOL` for
   small per-task calls, `PROJECT_POOL` for whole projects — and never create ad-hoc pools;
   Asana rate-limits hard.
+- **Every Asana call goes through `api_get()` / `api_pages()`** (`fetchTree` / `asanaGet` in the
+  static build). They keep one connection alive per worker thread, ask for gzip, retry 429/5xx,
+  and follow pagination. Never hand-roll a `urllib.request` call or a `while next_page` loop.
+- **Fetch a project's tasks once.** `fetch_tree(gid)` returns `{tasks, subs}` and is shared by
+  the estimated and logged-hours paths (single-flighted per project, so the two concurrent
+  startup requests can't duplicate it); `entries_for_task(gid)` caches time entries, which are
+  range-independent, so changing the date range costs no API calls. A task with
+  `num_subtasks == 0` is never queried for subtasks. `TASK_FIELDS` / `SUBTASK_FIELDS` are the
+  union both paths need — add a field there rather than making a second request for it.
+- `/api/me` is the PAT owner's display name, used to default the Daily Log's assignee filter to
+  "you". Anything that defaults to the signed-in user should read `currentUser`.
 
 ## Don'ts
 

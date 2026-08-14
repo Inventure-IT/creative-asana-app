@@ -81,7 +81,10 @@ PROJECT_CAPS = {p["gid"]: p.get("cap") for p in PROJECTS}   # monthly hour capac
 # In-memory cache so navigating between pages never re-hits the Asana API.
 # Data is fetched once and reused until the user explicitly clicks Refresh.
 # The "hours logged" caches are keyed by month: {month: ...}.
-CACHE = {"summaries": None, "detail": {}, "june_summaries": {}, "june_detail": {}, "me": None}
+CACHE = {"summaries": None, "detail": {}, "logged_summaries": {}, "logged_detail": {}, "me": None,
+         # Raw Asana reads, shared by both halves of the app so nothing is fetched twice:
+         #   tree    = {project gid: {tasks, subs, at}}   entries = {task gid: {rows, at}}
+         "tree": {}, "entries": {}}
 CACHE_LOCK = threading.Lock()
 
 
@@ -183,12 +186,13 @@ def api_pages(path):
     return out
 
 
-# `num_subtasks` is what lets build_task skip the subtask call for a leaf task — most tasks
-# have no subtasks, and that one field removes most of the requests startup used to make.
-TASK_FIELDS = ("name,assignee.name,completed,actual_time_minutes,num_subtasks,"
+# One field set for both halves of the app. `num_subtasks` lets fetch_tree skip the subtask
+# call for a leaf task (most tasks are leaves), and `completed_at` is what the logged-hours
+# path needs — asking for it here means that path no longer re-fetches the same lists.
+TASK_FIELDS = ("name,assignee.name,completed,completed_at,actual_time_minutes,num_subtasks,"
                "custom_fields.name,custom_fields.number_value,"
                "memberships.section.name,memberships.project.gid")
-SUBTASK_FIELDS = ("name,assignee.name,completed,actual_time_minutes,"
+SUBTASK_FIELDS = ("name,assignee.name,completed,completed_at,actual_time_minutes,"
                   "custom_fields.name,custom_fields.number_value")
 
 
@@ -200,6 +204,56 @@ def fetch_tasks(gid):
 def fetch_subtasks(task_gid):
     """Return subtasks for a task (name + assignee + estimated/actual time + completed)."""
     return api_pages(f"/tasks/{task_gid}/subtasks?opt_fields={SUBTASK_FIELDS}&limit=100")
+
+
+# A refresh landing within this many seconds of the last one reuses the fetched tree. The
+# dashboard refreshes estimated and logged hours as two concurrent requests, and they must not
+# pull the same project twice; a real refresh minutes later still re-reads Asana.
+REFRESH_SHARE_WINDOW = 30
+_TREE_LOCKS = {}
+
+
+def _tree_lock(gid):
+    with CACHE_LOCK:
+        lk = _TREE_LOCKS.get(gid)
+        if lk is None:
+            lk = _TREE_LOCKS[gid] = threading.Lock()
+        return lk
+
+
+def fetch_tree(gid, refresh=False):
+    """Every task and subtask of one project, fetched once and shared by both halves of the app.
+
+    The estimated and logged-hours paths need the same two lists; they used to fetch them
+    separately, so every project's tasks were pulled twice and every parent's subtasks twice.
+    Returns {"tasks": [...], "subs": {parent_gid: [...]}, "at": <fetch time>}.
+
+    Single-flighted per project: the two concurrent startup requests share one fetch instead
+    of racing to make the same calls. The per-gid lock is held across the network work, which
+    is the point — the second caller waits for the first's result — and it never holds
+    CACHE_LOCK or a PROJECT_POOL slot while doing so.
+    """
+    def usable():
+        with CACHE_LOCK:
+            e = CACHE["tree"].get(gid)
+        if e and (not refresh or time.time() - e["at"] < REFRESH_SHARE_WINDOW):
+            return e
+        return None
+
+    hit = usable()
+    if hit:
+        return hit
+    with _tree_lock(gid):
+        hit = usable()          # another thread may have fetched it while we waited
+        if hit:
+            return hit
+        tasks = fetch_tasks(gid)
+        parents = [t["gid"] for t in tasks if (t.get("num_subtasks") or 0) > 0]
+        subs = dict(zip(parents, LEAF_POOL.map(fetch_subtasks, parents)))
+        entry = {"tasks": tasks, "subs": subs, "at": time.time()}
+        with CACHE_LOCK:
+            CACHE["tree"][gid] = entry
+        return entry
 
 
 def get_me(refresh=False):
@@ -249,15 +303,13 @@ def is_excluded(t, gid):
     return section_name(t, gid).strip().lower() in EXCLUDE_SECTIONS
 
 
-def build_task(t, gid):
+def build_task(t, gid, children):
     """Shape one task plus its (incomplete) subtasks for the drill-down list.
 
-    A task Asana reports as having no subtasks is not queried for them — that skip is where
-    most of the startup time went, since the roster is mostly leaf tasks.
+    `children` comes from the shared project tree, so this makes no API calls of its own.
     """
     parent_min = task_minutes(t)
     subs, sub_min = [], 0
-    children = fetch_subtasks(t["gid"]) if (t.get("num_subtasks") or 0) > 0 else []
     for s in children:
         if s.get("completed"):
             continue  # completed subtasks are not shown or counted
@@ -280,11 +332,12 @@ def build_task(t, gid):
     }
 
 
-def project_detail(gid):
+def project_detail(gid, refresh=False):
+    tree = fetch_tree(gid, refresh=refresh)
     # Drop checked-off tasks and anything in an excluded (e.g. Completed) section.
-    tasks = [t for t in fetch_tasks(gid) if not t.get("completed") and not is_excluded(t, gid)]
-    # Fetch subtasks for all tasks concurrently (shared pool) to keep the drill-down snappy.
-    detailed = list(LEAF_POOL.map(lambda t: build_task(t, gid), tasks))
+    tasks = [t for t in tree["tasks"] if not t.get("completed") and not is_excluded(t, gid)]
+    # Pure shaping now — the tree already holds every subtask, so this makes no API calls.
+    detailed = [build_task(t, gid, tree["subs"].get(t["gid"], [])) for t in tasks]
 
     # Attribute each task's own hours to its assignee, and each subtask's hours to
     # the subtask's assignee (not the parent owner). Estimated and actual time are
@@ -333,7 +386,7 @@ def get_detail(gid, refresh=False):
             cached = CACHE["detail"].get(gid)
         if cached is not None:
             return cached
-    data = project_detail(gid)
+    data = project_detail(gid, refresh=refresh)
     with CACHE_LOCK:
         CACHE["detail"][gid] = data
         # Keep any cached dashboard summary in sync with this fresh detail.
@@ -427,16 +480,30 @@ def fetch_time_entries(task_gid):
     return api_pages(f"/tasks/{task_gid}/time_tracking_entries?opt_fields={fields}&limit=100")
 
 
-def fetch_subtasks_time(task_gid):
-    fields = "name,actual_time_minutes,completed,completed_at"
-    return api_pages(f"/tasks/{task_gid}/subtasks?opt_fields={fields}&limit=100")
+def entries_for_task(task_gid, refresh=False):
+    """Cached time entries for one task. Entries don't depend on the date range, so a range
+    change re-filters what is already here instead of re-querying Asana."""
+    def usable():
+        with CACHE_LOCK:
+            e = CACHE["entries"].get(task_gid)
+        if e and (not refresh or time.time() - e["at"] < REFRESH_SHARE_WINDOW):
+            return e
+        return None
+
+    hit = usable()
+    if hit:
+        return hit["rows"]
+    rows = fetch_time_entries(task_gid)
+    with CACHE_LOCK:
+        CACHE["entries"][task_gid] = {"rows": rows, "at": time.time()}
+    return rows
 
 
-def june_entries_for_item(item):
-    """item = (task_name, task_gid, start, end). Return time entries logged in [start, end]."""
-    name, gid, start, end = item
+def logged_entries_for_item(item):
+    """item = (task_name, task_gid, start, end, refresh). Entries logged in [start, end]."""
+    name, gid, start, end, refresh = item
     res = []
-    for e in fetch_time_entries(gid):
+    for e in entries_for_task(gid, refresh=refresh):
         entered = e.get("entered_on") or ""
         if entered and start <= entered <= end:
             res.append({
@@ -450,10 +517,15 @@ def june_entries_for_item(item):
     return res
 
 
-def june_detail(gid, start=DEFAULT_START, end=DEFAULT_END):
-    """Per-person hours logged in [start, end] for one project (tasks + subtasks)."""
-    tfields = "name,actual_time_minutes,num_subtasks,completed,completed_at"
-    tasks = api_pages(f"/projects/{gid}/tasks?opt_fields={tfields}&limit=100")
+def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
+    """Per-person hours logged in [start, end] for one project (tasks + subtasks).
+
+    Reads the shared project tree, so on a normal load the only calls this makes are the
+    per-item time-entry lookups — the task and subtask lists come from the estimated side's
+    fetch (or vice versa, whichever got there first).
+    """
+    tree = fetch_tree(gid, refresh=refresh)
+    tasks = tree["tasks"]
 
     # Tasks/subtasks completed within the date range (by completed_at), deduped by gid.
     completed_dates = {}
@@ -471,17 +543,16 @@ def june_detail(gid, start=DEFAULT_START, end=DEFAULT_END):
         note_completed(t)
         if (t.get("actual_time_minutes") or 0) > 0:
             cand_by_gid[t["gid"]] = t.get("name", "(untitled)")
-    parents = [t["gid"] for t in tasks if (t.get("num_subtasks") or 0) > 0]
-    for subs in LEAF_POOL.map(fetch_subtasks_time, parents):
+    for subs in tree["subs"].values():
         for s in subs:
             note_completed(s)
             if (s.get("actual_time_minutes") or 0) > 0:
                 cand_by_gid[s["gid"]] = s.get("name", "(untitled)")
-    candidates = [(name, gid, start, end) for gid, name in cand_by_gid.items()]
+    candidates = [(name, tgid, start, end, refresh) for tgid, name in cand_by_gid.items()]
 
     # Collect entries, deduping by entry gid as a final guard against any double-pull.
     seen, entries = set(), []
-    for lst in LEAF_POOL.map(june_entries_for_item, candidates):
+    for lst in LEAF_POOL.map(logged_entries_for_item, candidates):
         for e in lst:
             if e["entry_gid"] and e["entry_gid"] in seen:
                 continue
@@ -516,7 +587,7 @@ def june_detail(gid, start=DEFAULT_START, end=DEFAULT_END):
     }
 
 
-def june_summary_from_detail(d):
+def logged_summary_from_detail(d):
     return {
         "gid": d["gid"],
         "name": d["name"],
@@ -530,39 +601,39 @@ def june_summary_from_detail(d):
     }
 
 
-def get_june_detail(gid, refresh=False, start=DEFAULT_START, end=DEFAULT_END):
+def get_logged_detail(gid, refresh=False, start=DEFAULT_START, end=DEFAULT_END):
     """Cached per-project logged-hours detail for a date range. Cache key = 'start:end'."""
     key = f"{start}:{end}"
     if not refresh:
         with CACHE_LOCK:
-            cached = CACHE["june_detail"].get(key, {}).get(gid)
+            cached = CACHE["logged_detail"].get(key, {}).get(gid)
         if cached is not None:
             return cached
-    data = june_detail(gid, start, end)
+    data = logged_detail(gid, start, end, refresh=refresh)
     with CACHE_LOCK:
-        CACHE["june_detail"].setdefault(key, {})[gid] = data
+        CACHE["logged_detail"].setdefault(key, {})[gid] = data
         # Keep this range's cached summary in sync with the fresh detail.
-        rsum = CACHE["june_summaries"].get(key)
+        rsum = CACHE["logged_summaries"].get(key)
         if rsum is not None:
-            CACHE["june_summaries"][key] = [
-                june_summary_from_detail(data) if s["gid"] == gid else s
+            CACHE["logged_summaries"][key] = [
+                logged_summary_from_detail(data) if s["gid"] == gid else s
                 for s in rsum
             ]
     return data
 
 
-def get_june_summaries(refresh=False, start=DEFAULT_START, end=DEFAULT_END):
+def get_logged_summaries(refresh=False, start=DEFAULT_START, end=DEFAULT_END):
     key = f"{start}:{end}"
     if not refresh:
         with CACHE_LOCK:
-            cached = CACHE["june_summaries"].get(key)
+            cached = CACHE["logged_summaries"].get(key)
         if cached is not None:
             return cached
     # Build every project's logged-hours detail concurrently instead of one-at-a-time.
-    details = PROJECT_POOL.map(lambda p: get_june_detail(p["gid"], refresh=refresh, start=start, end=end), PROJECTS)
-    out = [june_summary_from_detail(d) for d in details]
+    details = PROJECT_POOL.map(lambda p: get_logged_detail(p["gid"], refresh=refresh, start=start, end=end), PROJECTS)
+    out = [logged_summary_from_detail(d) for d in details]
     with CACHE_LOCK:
-        CACHE["june_summaries"][key] = out
+        CACHE["logged_summaries"][key] = out
     return out
 
 
@@ -599,7 +670,7 @@ PAGE = r"""<!DOCTYPE html>
               margin:0; padding:24px; text-align:center; }
   /* A number that has gone the wrong way (over budget). Listed against the card/summary
      selectors too, so it wins over the blue/green accent those numbers normally take. */
-  .neg, .card .stat .n.neg, .card.june .stat .n.neg { color:var(--red); }
+  .neg, .card .stat .n.neg, .card.logged .stat .n.neg { color:var(--red); }
   .dash-updated { font-size:11px; color:var(--faint); white-space:nowrap; }
   .cap-bar { margin-top:14px; }
   .cap-bar .track { height:8px; background:var(--panel2); border-radius:5px; overflow:hidden; }
@@ -676,9 +747,9 @@ PAGE = r"""<!DOCTYPE html>
   .summary-stat .l { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.05em; }
   .summary-bar.est .summary-stat .n { color:var(--blue-d); }
   .summary-stat .n.neg { color:var(--red); }
-  .card.june:hover { border-color:var(--green); }
-  .card.june .stat .n, .card.june .go { color:var(--green-d); }
-  .card.june .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
+  .card.logged:hover { border-color:var(--green); }
+  .card.logged .stat .n, .card.logged .go { color:var(--green-d); }
+  .card.logged .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
   /* MSA/capacity cards: lighter panel + brighter border so they stand out at the top of the list */
   .card.cap { background:var(--panel2); border-color:#5c6b86; }
   .grp-card { grid-column: 1 / -1; }   /* combined buckets (e.g. CMD) span the whole row */
@@ -760,7 +831,6 @@ PAGE = r"""<!DOCTYPE html>
   .lvl1 { padding-left:22px; }
   .sub-name.lvl2 { padding-left:34px; }
   .sub-name.lvl2::before { left:18px; }
-  .done { text-decoration:line-through; color:var(--faint); }
   .hours { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
   /* settings: per-person graph colors */
   .color-list { display:flex; flex-direction:column; gap:2px; }
@@ -895,11 +965,10 @@ const PERSON_PALETTE = [
   '#393b79', // deep indigo
   '#a55194', // plum
 ];
-// Fixed colors for specific people; everyone else auto-assigns a still-unused palette hue.
-// Seeded into _personColors so an override is reserved up front and never clashes with an
-// auto-assigned person, even if that person is colored first.
-const PERSON_COLOR_OVERRIDES = { 'Miranda Osborn': '#9467bd', 'Unassigned': '#7f7f7f' };   // Miranda purple (was orange); Unassigned always grey
-const _personColors = Object.assign({}, PERSON_COLOR_OVERRIDES);
+// Unassigned is always grey — it isn't a person, so it shouldn't take a person's hue. Seeded
+// into _personColors so the grey is reserved up front and auto-assignment can't hand it out.
+// Per-person preferences live in the Graph Colors tab, not here.
+const _personColors = { 'Unassigned': '#7f7f7f' };
 let _personColorN = 0;
 // User-picked colors (Settings tab), persisted per-browser. These win over the built-in
 // defaults/auto-assignment so a chosen color applies everywhere the same person is drawn.
@@ -1238,16 +1307,16 @@ function estCard(w) {
   return c;
 }
 
-function juneCard(w) {
+function loggedCard(w) {
   const c = document.createElement('div');
-  c.className = 'card june';
+  c.className = 'card logged';
   c.innerHTML = `<h3>${esc(w.name)}</h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(w.hours)}</div><div class="l">Hours Logged</div></div>
       <div class="stat"><div class="n">${w.nentries}</div><div class="l">Time Entries</div></div>
       <div class="stat"><div class="n">${w.completed}</div><div class="l">Completed Tasks</div></div>
     </div>`;
-  c.onclick = () => { location.hash = '#/june/' + w.gid; };
+  c.onclick = () => { location.hash = '#/logged/' + w.gid; };
   return c;
 }
 
@@ -1256,7 +1325,7 @@ function capCard(w) {
   const used = Number(w.hours || 0), cap = Number(w.cap || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
-  c.className = 'card june';
+  c.className = 'card logged';
   c.innerHTML = `<h3>${esc(w.name)}</h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(w.cap)}</div><div class="l">Capacity h/mo</div></div>
@@ -1264,7 +1333,7 @@ function capCard(w) {
       <div class="stat"><div class="n${remaining < 0 ? ' neg' : ''}">${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
     ${capBar(used, cap)}`;
-  c.onclick = () => { location.hash = '#/june/' + w.gid; };
+  c.onclick = () => { location.hash = '#/logged/' + w.gid; };
   return c;
 }
 
@@ -1285,7 +1354,7 @@ function groupCard(g) {
   const used = Number(g.hours || 0), cap = Number(g.cap || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
-  c.className = 'card june grp-card';
+  c.className = 'card logged grp-card';
   const rows = g.members.map(m =>
     `<div class="grp-row" data-gid="${m.gid}" title="Open ${esc(m.name)}">
        <span class="grp-name">${esc(m.name)}</span>
@@ -1301,7 +1370,7 @@ function groupCard(g) {
     <div class="grp-members">${rows}</div>`;
   // Each member row opens that project's own Hours-Logged detail.
   c.querySelectorAll('.grp-row[data-gid]').forEach(r =>
-    r.onclick = (e) => { e.stopPropagation(); location.hash = '#/june/' + r.dataset.gid; });
+    r.onclick = (e) => { e.stopPropagation(); location.hash = '#/logged/' + r.dataset.gid; });
   return c;
 }
 
@@ -1324,7 +1393,7 @@ async function renderDashboard() {
     </div>`;
   const view = document.getElementById('tabview');
   const btn = document.getElementById('dash-refresh');
-  let estData = null, juneData = null, teamData = null;   // cached so switching tabs is instant
+  let estData = null, loggedData = null, teamData = null;   // cached so switching tabs is instant
   let groupsConfig = null;   // budget-group definitions (loaded once); combined per current range
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
   let projPersonCache = {};    // per-project person split { gid: { person: hours } }, keyed by 'start:end'
@@ -1341,7 +1410,7 @@ async function renderDashboard() {
     const apply = () => {
       if (s.value) dateStart = s.value;
       if (e.value) dateEnd = e.value;
-      juneData = null; renderTab(); loadJune(false);
+      loggedData = null; renderTab(); loadLogged(false);
     };
     go.onclick = apply;
     [s, e].forEach(inp => inp.onkeydown = ev => { if (ev.key === 'Enter') apply(); });
@@ -1550,7 +1619,7 @@ async function renderDashboard() {
   function renderActualProj() {
     // Stacked bar chart of logged hours per project for the selected date range, split by person.
     const picker = rangePicker();
-    if (!juneData) { view.innerHTML = picker + note(LOADING); wireRangeSel(); return; }
+    if (!loggedData) { view.innerHTML = picker + note(LOADING); wireRangeSel(); return; }
     // Roll grouped projects (e.g. CMD) into one combined bucket with the group's cap; clicking
     // that bucket drills in and splits it into its member projects. Every other project stays
     // on its own bar. Then drop anything with no hours.
@@ -1559,7 +1628,7 @@ async function renderDashboard() {
     let rows, backBar = '';
     if (drill) {
       const gset = new Set(drill.gids);
-      rows = juneData.filter(w => gset.has(w.gid) && w.hours > 0)
+      rows = loggedData.filter(w => gset.has(w.gid) && w.hours > 0)
         .map(w => Object.assign({ isGroup: false }, w))
         .sort((a, b) => b.hours - a.hours);
       if (!rows.length) { actualDrillGroup = null; return renderActualProj(); }
@@ -1567,11 +1636,11 @@ async function renderDashboard() {
                 `<h2>${esc(drill.name)} · split by project</h2></div>`;
     } else {
       const groupItems = (groupsConfig || []).map(g => {
-        const s = buildGroupSummary(g, juneData);
+        const s = buildGroupSummary(g, loggedData);
         return { name: g.name, gid: null, isGroup: true, gids: g.gids, cap: g.cap, members: s.members,
           hours: s.hours, nentries: s.nentries };
       });
-      const projItems = juneData.filter(w => !memberGids.has(w.gid)).map(w => Object.assign({ isGroup: false }, w));
+      const projItems = loggedData.filter(w => !memberGids.has(w.gid)).map(w => Object.assign({ isGroup: false }, w));
       rows = [...groupItems, ...projItems].filter(w => w.hours > 0).sort((a, b) => b.hours - a.hours);
     }
     if (!rows.length) {
@@ -1626,7 +1695,7 @@ async function renderDashboard() {
         // Combined buckets split into their projects; single projects open their detail.
         onClick: (evt, els) => { if (!els.length) return; const r = chartRows[els[0].index];
           if (r.isGroup) { actualDrillGroup = r.name; renderActualProj(); }
-          else if (r.gid) location.hash = '#/june/' + r.gid; },
+          else if (r.gid) location.hash = '#/logged/' + r.gid; },
         onHover: (evt, els) => { const r = els.length ? chartRows[els[0].index] : null;
           evt.native.target.style.cursor = (r && (r.isGroup || r.gid)) ? 'pointer' : 'default'; },
         scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
@@ -1673,7 +1742,7 @@ async function renderDashboard() {
     };
 
     // By project — mirrors the chart's rows (combined buckets / drilled-in members).
-    const projRows = (rows_ || juneData.filter(w => w.hours > 0)).slice().sort((a, b) => b.hours - a.hours);
+    const projRows = (rows_ || loggedData.filter(w => w.hours > 0)).slice().sort((a, b) => b.hours - a.hours);
     const pjTot = projRows.reduce((a, w) => a + w.hours, 0);
     const projTable =
       `<h2 class="section-h">By project</h2>
@@ -1725,11 +1794,11 @@ async function renderDashboard() {
   async function loadPersonStats(key) {
     if (personLoading[key] || personStatsCache[key]) return;   // already loading / loaded
     personLoading[key] = true;
-    const gids = juneData.filter(w => w.hours > 0).map(w => w.gid);
+    const gids = loggedData.filter(w => w.hours > 0).map(w => w.gid);
     let details;
     try {
       details = await Promise.all(gids.map(g =>
-        fetch(`/api/june/${g}?start=${dateStart}&end=${dateEnd}`).then(r => r.json())));
+        fetch(`/api/logged/${g}?start=${dateStart}&end=${dateEnd}`).then(r => r.json())));
     } catch (e) {
       const el = document.getElementById('person-loading');
       if (el) el.innerHTML = fmtErr(e);
@@ -1790,8 +1859,8 @@ async function renderDashboard() {
   // hours and a grand total. Reuses the per-item rollup
   // that loadPersonStats builds from each project's time entries.
   function renderActualItems() {
-    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
-    if (!juneData.some(w => w.hours > 0)) {
+    if (!loggedData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
+    if (!loggedData.some(w => w.hours > 0)) {
       view.innerHTML = rangePicker() + note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
       wireRangeSel(); return;
     }
@@ -1853,8 +1922,8 @@ async function renderDashboard() {
   // time to in the selected range — one table per day (task, project, hours) with that day's
   // total. Reuses the per-person/per-day rollup loadPersonStats builds from the time entries.
   function renderActualDaily() {
-    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
-    if (!juneData.some(w => w.hours > 0)) {
+    if (!loggedData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
+    if (!loggedData.some(w => w.hours > 0)) {
       view.innerHTML = rangePicker() + note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
       wireRangeSel(); return;
     }
@@ -2108,7 +2177,7 @@ async function renderDashboard() {
   // rollup as the By-person summary (personStatsCache), so it matches the rest of Actual Hours
   // (e.g. Grant's logged time on a project), not Asana's task tracked-time totals.
   function renderTeamActual() {
-    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
+    if (!loggedData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
     const key = dateStart + ':' + dateEnd, people = personStatsCache[key];
     if (!people) {
       view.innerHTML = rangePicker() + note(LOADING);
@@ -2175,7 +2244,7 @@ async function renderDashboard() {
     });
     // One donut per person under the bars: which projects they logged their hours against.
     const pc = projPersonCache[key] || {};
-    const nameOf = Object.fromEntries((juneData || []).map(w => [w.gid, w.name]));
+    const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
     donutGrid(view, rows.map(r => {
       const m = {};
       Object.entries(pc).forEach(([gid, pm]) => {
@@ -2194,7 +2263,7 @@ async function renderDashboard() {
   function showLoggedBreakdown(person) {
     destroyCharts();
     const key = dateStart + ':' + dateEnd, pc = projPersonCache[key] || {};
-    const nameOf = Object.fromEntries((juneData || []).map(w => [w.gid, w.name]));
+    const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
     const rows_ = [];
     Object.entries(pc).forEach(([gid, pm]) => {
       const v = pm[person];
@@ -2230,7 +2299,7 @@ async function renderDashboard() {
     if (dashTab === 'settings') u = null;
     else if (dashTab === 'team') u = teamData && teamData.updated;
     else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
-    else u = juneData && juneData[0] && juneData[0].updated;
+    else u = loggedData && loggedData[0] && loggedData[0].updated;
     el.textContent = u ? ('Updated ' + u) : '';
   }
 
@@ -2271,17 +2340,17 @@ async function renderDashboard() {
       }
     } else if (dashTab === 'capacity') {
       const picker = rangePicker();
-      if (!juneData) { view.innerHTML = picker + loading; wireRangeSel(); }
+      if (!loggedData) { view.innerHTML = picker + loading; wireRangeSel(); }
       else {
         // MSA projects with a monthly capacity lead the list and are highlighted: combined
         // budget buckets first, then any standalone capped project (group members roll into
         // their bucket). Everything else that logged hours follows as plain statistics cards.
         const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
-        const groups = (groupsConfig || []).map(g => buildGroupSummary(g, juneData))
+        const groups = (groupsConfig || []).map(g => buildGroupSummary(g, loggedData))
                          .filter(g => g.members.length);
-        const standalone = juneData.filter(w => w.cap != null && !memberGids.has(w.gid))
+        const standalone = loggedData.filter(w => w.cap != null && !memberGids.has(w.gid))
                              .sort((a, b) => b.hours - a.hours);
-        const others = juneData.filter(w => w.cap == null && !memberGids.has(w.gid))
+        const others = loggedData.filter(w => w.cap == null && !memberGids.has(w.gid))
                          .sort((a, b) => b.hours - a.hours);
         const hasCap = groups.length || standalone.length;
         // Headline stats cover the budgeted work only — the retainer picture in one line.
@@ -2313,7 +2382,7 @@ async function renderDashboard() {
             view.insertAdjacentHTML('beforeend', `<h2 class="section-h${hasCap ? '' : ' flush'}">Other projects</h2>`);
             const grid = document.createElement('div');
             grid.className = 'grid';
-            others.forEach(w => grid.appendChild(juneCard(w)));
+            others.forEach(w => grid.appendChild(loggedCard(w)));
             view.appendChild(grid);
           }
         }
@@ -2355,14 +2424,14 @@ async function renderDashboard() {
   wireSidebar(renderTab);
 
   // Loads the selected range's "Actual Hours" widgets (used on its own when the range changes).
-  async function loadJune(refresh) {
+  async function loadLogged(refresh) {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
     personStatsCache = {}; projPersonCache = {}; itemStatsCache = {}; dailyStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
     try {
-      const url = `/api/june?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
+      const url = `/api/logged?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await fetch(url).then(r => r.json());
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
-      juneData = j;
+      loggedData = j;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
     await mePromise;   // so Daily Log knows who "you" are before it picks its default assignee
     if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual'].includes(dashTab)) renderTab();
@@ -2379,14 +2448,13 @@ async function renderDashboard() {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     const q = refresh ? '?refresh=1' : '';
     try {
-      // First paint only needs the estimated side — the dashboard always opens on Team
-      // Capacity · Estimated. The logged-hours pull starts here in parallel but is deliberately
-      // NOT awaited: it is the slower half, and it re-renders the Actual tabs itself when it
-      // lands, so waiting on it would only delay the page the user is actually looking at.
-      loadJune(refresh);
+      // Estimated and logged hours are pulled together and both awaited: one wait at startup,
+      // after which every tab is already warm. Deferring the logged half would paint sooner
+      // but move the wait onto the first Actual tab you open, which is worse.
       const [e, grp] = await Promise.all([
         fetch('/api/projects' + q).then(r => r.json()),
         groupsConfig ? Promise.resolve(groupsConfig) : fetch('/api/groups').then(r => r.json()),
+        loadLogged(refresh),
       ]);
       estData = e; groupsConfig = grp;
       // Team load derives from the per-project detail that /api/projects just (re)built,
@@ -2551,7 +2619,7 @@ async function renderDetail(gid) {
   load(false);   // navigation = cached
 }
 
-async function renderJuneDetail(gid) {
+async function renderLoggedDetail(gid) {
   app.innerHTML = `
     <div class="layout">
       ${sidebarHtml()}
@@ -2622,7 +2690,7 @@ async function renderJuneDetail(gid) {
   async function load(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     try {
-      data = await (await fetch('/api/june/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
+      data = await (await fetch('/api/logged/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
       document.getElementById('page-title').textContent = data.name;
       document.getElementById('sub').textContent =
         `Hours logged ${rangeLabel(data.start, data.end)} per person · ${plural(data.nentries, 'time entry', 'time entries')} · ${h2(data.total_hours)} h total`;
@@ -2637,8 +2705,8 @@ async function renderJuneDetail(gid) {
 
 function route() {
   destroyCharts();
-  let m = location.hash.match(/^#\/june\/(\d+)/);
-  if (m) return renderJuneDetail(m[1]);
+  let m = location.hash.match(/^#\/logged\/(\d+)/);
+  if (m) return renderLoggedDetail(m[1]);
   m = location.hash.match(/^#\/p\/(\d+)/);
   if (m) return renderDetail(m[1]);
   renderDashboard();
@@ -2677,17 +2745,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/projects":
                 return self._json(200, get_summaries(refresh=refresh))
-            if path == "/api/june":
-                return self._json(200, get_june_summaries(refresh=refresh, start=start, end=end))
+            if path == "/api/logged":
+                return self._json(200, get_logged_summaries(refresh=refresh, start=start, end=end))
             if path == "/api/assignees":
                 return self._json(200, get_assignee_load(refresh=refresh))
             if path == "/api/groups":
                 return self._json(200, GROUPS)
             if path == "/api/me":
                 return self._json(200, get_me(refresh=refresh))
-            if path.startswith("/api/june/"):
+            if path.startswith("/api/logged/"):
                 gid = path.rsplit("/", 1)[-1]
-                return self._json(200, get_june_detail(gid, refresh=refresh, start=start, end=end))
+                return self._json(200, get_logged_detail(gid, refresh=refresh, start=start, end=end))
             if path.startswith("/api/project/"):
                 gid = path.rsplit("/", 1)[-1]
                 return self._json(200, get_detail(gid, refresh=refresh))

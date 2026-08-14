@@ -31,7 +31,7 @@
               margin:0; padding:24px; text-align:center; }
   /* A number that has gone the wrong way (over budget). Listed against the card/summary
      selectors too, so it wins over the blue/green accent those numbers normally take. */
-  .neg, .card .stat .n.neg, .card.june .stat .n.neg { color:var(--red); }
+  .neg, .card .stat .n.neg, .card.logged .stat .n.neg { color:var(--red); }
   .dash-updated { font-size:11px; color:var(--faint); white-space:nowrap; }
   .cap-bar { margin-top:14px; }
   .cap-bar .track { height:8px; background:var(--panel2); border-radius:5px; overflow:hidden; }
@@ -108,9 +108,9 @@
   .summary-stat .l { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.05em; }
   .summary-bar.est .summary-stat .n { color:var(--blue-d); }
   .summary-stat .n.neg { color:var(--red); }
-  .card.june:hover { border-color:var(--green); }
-  .card.june .stat .n, .card.june .go { color:var(--green-d); }
-  .card.june .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
+  .card.logged:hover { border-color:var(--green); }
+  .card.logged .stat .n, .card.logged .go { color:var(--green-d); }
+  .card.logged .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
   /* MSA/capacity cards: lighter panel + brighter border so they stand out at the top of the list */
   .card.cap { background:var(--panel2); border-color:#5c6b86; }
   .grp-card { grid-column: 1 / -1; }   /* combined buckets (e.g. CMD) span the whole row */
@@ -192,7 +192,6 @@
   .lvl1 { padding-left:22px; }
   .sub-name.lvl2 { padding-left:34px; }
   .sub-name.lvl2::before { left:18px; }
-  .done { text-decoration:line-through; color:var(--faint); }
   .hours { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
   /* settings: per-person graph colors */
   .color-list { display:flex; flex-direction:column; gap:2px; }
@@ -284,20 +283,32 @@ function actualMinutes(t){ return t.actual_time_minutes || 0; }
 function sectionName(t, gid){ let fb = ''; for (const m of (t.memberships || [])){ const sec = (m.section || {}).name; if (!sec) continue; if ((m.project || {}).gid === gid) return sec; fb = fb || sec; } return fb; }
 function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).trim().toLowerCase()); }
 
-function fetchTasks(gid){
-  // num_subtasks lets buildTask skip the subtask request for a leaf task — most tasks are
-  // leaves, so that one extra field removes most of the calls this load used to make.
-  const f = 'name,assignee.name,completed,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
-  return asanaGet(`/projects/${gid}/tasks?opt_fields=${f}&limit=100`);
-}
-function fetchSubtasks(g){
-  const f = 'name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value';
-  return asanaGet(`/tasks/${g}/subtasks?opt_fields=${f}&limit=100`);
+// One field set for both halves of the app (mirrors TASK_FIELDS / SUBTASK_FIELDS): num_subtasks
+// lets fetchTree skip the subtask call for a leaf task, and completed_at is what the
+// logged-hours layer needs, so it no longer re-fetches these same lists.
+const TASK_FIELDS = 'name,assignee.name,completed,completed_at,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,actual_time_minutes,custom_fields.name,custom_fields.number_value';
+function fetchTasks(gid){ return asanaGet(`/projects/${gid}/tasks?opt_fields=${TASK_FIELDS}&limit=100`); }
+function fetchSubtasks(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=${SUBTASK_FIELDS}&limit=100`); }
+
+// Every task and subtask of one project, fetched once and shared by the estimated and
+// logged-hours layers (mirrors fetch_tree). The in-flight promise is cached, not just the
+// result, so the two concurrent startup requests share one fetch instead of racing.
+const _trees = {};
+function fetchTree(gid, refresh){
+  if (!refresh && _trees[gid]) return _trees[gid];
+  return (_trees[gid] = (async () => {
+    const tasks = await fetchTasks(gid);
+    const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
+    const lists = await mapAll(parents, fetchSubtasks);
+    const subs = {};
+    parents.forEach((g, i) => { subs[g] = lists[i]; });
+    return { tasks, subs };
+  })());
 }
 
-async function buildTask(t, gid){
+function buildTask(t, gid, children){
   const subs = [];
-  const children = (t.num_subtasks || 0) > 0 ? await fetchSubtasks(t.gid) : [];
   for (const s of children){
     if (s.completed) continue;
     subs.push({ name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
@@ -307,9 +318,10 @@ async function buildTask(t, gid){
     hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: sectionName(t, gid), subtasks: subs };
 }
 
-async function projectDetail(gid){
-  const tasks = (await fetchTasks(gid)).filter(t => !t.completed && !isExcluded(t, gid));
-  const detailed = await mapAll(tasks, t => buildTask(t, gid));
+async function projectDetail(gid, refresh){
+  const tree = await fetchTree(gid, refresh);
+  const tasks = tree.tasks.filter(t => !t.completed && !isExcluded(t, gid));
+  const detailed = tasks.map(t => buildTask(t, gid, tree.subs[t.gid] || []));
   const totals = {}, actuals = {}, counts = {};
   for (const d of detailed){
     totals[d.assignee] = (totals[d.assignee] || 0) + d.hours;
@@ -327,7 +339,7 @@ async function projectDetail(gid){
     counts: ordered.map(n => counts[n]), ntasks: detailed.length, tasks: detailed, updated: nowStr() };
 }
 
-const CACHE = { summaries: null, detail: {}, june_summaries: {}, june_detail: {}, me: null };
+const CACHE = { summaries: null, detail: {}, logged_summaries: {}, logged_detail: {}, me: null };
 // Mirrors get_me: the display name behind the PAT, so the UI can default a filter to "you".
 // asanaGet always hands back an array, and /users/me is a single object, so take the first.
 async function getMe(refresh){
@@ -339,7 +351,7 @@ function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntas
 
 async function getDetail(gid, refresh){
   if (!refresh && CACHE.detail[gid]) return CACHE.detail[gid];
-  const data = await projectDetail(gid);
+  const data = await projectDetail(gid, refresh);
   CACHE.detail[gid] = data;
   if (CACHE.summaries) CACHE.summaries = CACHE.summaries.map(s => s.gid === gid ? summaryFromDetail(data) : s);
   return data;
@@ -381,13 +393,19 @@ async function getAssigneeLoad(refresh){
     breakdown: Object.fromEntries(ordered.map(n => [n, breakdown[n] || []])), updated: nowStr() };
 }
 
-// ---- Logged-hours layer for a date range (mirrors june_detail / get_june_summaries) ----
+// ---- Logged-hours layer for a date range (mirrors logged_detail / get_logged_summaries) ----
 function fetchTimeEntries(g){ return asanaGet(`/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`); }
-function fetchSubtasksTime(g){ return asanaGet(`/tasks/${g}/subtasks?opt_fields=name,actual_time_minutes,completed,completed_at&limit=100`); }
+// Entries don't depend on the date range, so cache the promise per task (mirrors
+// entries_for_task): picking a different range re-filters these instead of re-querying.
+const _entries = {};
+function entriesForTask(g, refresh){
+  if (!refresh && _entries[g]) return _entries[g];
+  return (_entries[g] = fetchTimeEntries(g));
+}
 
-async function entriesForItem(name, gid, start, end){
+async function entriesForItem(name, gid, start, end, refresh){
   const res = [];
-  for (const e of await fetchTimeEntries(gid)){
+  for (const e of await entriesForTask(gid, refresh)){
     const entered = e.entered_on || '';
     if (entered && start <= entered && entered <= end)
       res.push({ entry_gid: e.gid, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
@@ -395,8 +413,11 @@ async function entriesForItem(name, gid, start, end){
   }
   return res;
 }
-async function juneDetail(gid, start, end){
-  const tasks = await asanaGet(`/projects/${gid}/tasks?opt_fields=name,actual_time_minutes,num_subtasks,completed,completed_at&limit=100`);
+async function loggedDetail(gid, start, end, refresh){
+  // Shares the estimated side's project tree, so the only calls left here are the per-item
+  // time-entry lookups.
+  const tree = await fetchTree(gid, refresh);
+  const tasks = tree.tasks;
   // Tasks/subtasks completed within the date range (by completed_at), deduped by gid.
   const completedDates = {};
   const noteCompleted = it => {
@@ -405,12 +426,11 @@ async function juneDetail(gid, start, end){
   };
   const cand = {};
   for (const t of tasks){ noteCompleted(t); if ((t.actual_time_minutes || 0) > 0) cand[t.gid] = t.name || '(untitled)'; }
-  const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
-  for (const subs of await mapAll(parents, fetchSubtasksTime))
+  for (const subs of Object.values(tree.subs))
     for (const s of subs){ noteCompleted(s); if ((s.actual_time_minutes || 0) > 0) cand[s.gid] = s.name || '(untitled)'; }
   const candidates = Object.entries(cand);   // [gid, name]
   const seen = new Set(), entries = [];
-  for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end)))
+  for (const lst of await mapAll(candidates, ([g, name]) => entriesForItem(name, g, start, end, refresh)))
     for (const e of lst){ if (e.entry_gid && seen.has(e.entry_gid)) continue; if (e.entry_gid) seen.add(e.entry_gid); entries.push(e); }
   const totals = {}, counts = {};
   for (const e of entries){
@@ -426,21 +446,21 @@ async function juneDetail(gid, start, end){
     nentries: entries.length,
     entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60) })), updated: nowStr() };
 }
-function juneSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+function loggedSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
 
-async function getJuneDetail(gid, refresh, start, end){
+async function getLoggedDetail(gid, refresh, start, end){
   const key = start + ':' + end;
-  if (!refresh && CACHE.june_detail[key] && CACHE.june_detail[key][gid]) return CACHE.june_detail[key][gid];
-  const data = await juneDetail(gid, start, end);
-  (CACHE.june_detail[key] = CACHE.june_detail[key] || {})[gid] = data;
-  if (CACHE.june_summaries[key]) CACHE.june_summaries[key] = CACHE.june_summaries[key].map(s => s.gid === gid ? juneSummaryFromDetail(data) : s);
+  if (!refresh && CACHE.logged_detail[key] && CACHE.logged_detail[key][gid]) return CACHE.logged_detail[key][gid];
+  const data = await loggedDetail(gid, start, end, refresh);
+  (CACHE.logged_detail[key] = CACHE.logged_detail[key] || {})[gid] = data;
+  if (CACHE.logged_summaries[key]) CACHE.logged_summaries[key] = CACHE.logged_summaries[key].map(s => s.gid === gid ? loggedSummaryFromDetail(data) : s);
   return data;
 }
-async function getJuneSummaries(refresh, start, end){
+async function getLoggedSummaries(refresh, start, end){
   const key = start + ':' + end;
-  if (!refresh && CACHE.june_summaries[key]) return CACHE.june_summaries[key];
-  const details = await mapAll(PROJECTS, p => getJuneDetail(p.gid, refresh, start, end));
-  return (CACHE.june_summaries[key] = details.map(juneSummaryFromDetail));
+  if (!refresh && CACHE.logged_summaries[key]) return CACHE.logged_summaries[key];
+  const details = await mapAll(PROJECTS, p => getLoggedDetail(p.gid, refresh, start, end));
+  return (CACHE.logged_summaries[key] = details.map(loggedSummaryFromDetail));
 }
 
 // ---- Route /api/* (same shapes the existing UI expects) ----
@@ -450,11 +470,11 @@ async function handleApi(p){
   let start = q.get('start') || DEF_START, end = q.get('end') || DEF_END;
   if (start > end){ const t = start; start = end; end = t; }
   if (path === '/api/projects') return getSummaries(refresh);
-  if (path === '/api/june') return getJuneSummaries(refresh, start, end);
+  if (path === '/api/logged') return getLoggedSummaries(refresh, start, end);
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
   if (path === '/api/groups') return GROUPS;
   if (path === '/api/me') return getMe(refresh);
-  if (path.startsWith('/api/june/')) return getJuneDetail(path.split('/').pop(), refresh, start, end);
+  if (path.startsWith('/api/logged/')) return getLoggedDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
   throw new Error('Unknown API ' + path);
 }
@@ -641,11 +661,10 @@ const PERSON_PALETTE = [
   '#393b79', // deep indigo
   '#a55194', // plum
 ];
-// Fixed colors for specific people; everyone else auto-assigns a still-unused palette hue.
-// Seeded into _personColors so an override is reserved up front and never clashes with an
-// auto-assigned person, even if that person is colored first.
-const PERSON_COLOR_OVERRIDES = { 'Miranda Osborn': '#9467bd', 'Unassigned': '#7f7f7f' };   // Miranda purple (was orange); Unassigned always grey
-const _personColors = Object.assign({}, PERSON_COLOR_OVERRIDES);
+// Unassigned is always grey — it isn't a person, so it shouldn't take a person's hue. Seeded
+// into _personColors so the grey is reserved up front and auto-assignment can't hand it out.
+// Per-person preferences live in the Graph Colors tab, not here.
+const _personColors = { 'Unassigned': '#7f7f7f' };
 let _personColorN = 0;
 // User-picked colors (Settings tab), persisted per-browser. These win over the built-in
 // defaults/auto-assignment so a chosen color applies everywhere the same person is drawn.
@@ -984,16 +1003,16 @@ function estCard(w) {
   return c;
 }
 
-function juneCard(w) {
+function loggedCard(w) {
   const c = document.createElement('div');
-  c.className = 'card june';
+  c.className = 'card logged';
   c.innerHTML = `<h3>${esc(w.name)}</h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(w.hours)}</div><div class="l">Hours Logged</div></div>
       <div class="stat"><div class="n">${w.nentries}</div><div class="l">Time Entries</div></div>
       <div class="stat"><div class="n">${w.completed}</div><div class="l">Completed Tasks</div></div>
     </div>`;
-  c.onclick = () => { location.hash = '#/june/' + w.gid; };
+  c.onclick = () => { location.hash = '#/logged/' + w.gid; };
   return c;
 }
 
@@ -1002,7 +1021,7 @@ function capCard(w) {
   const used = Number(w.hours || 0), cap = Number(w.cap || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
-  c.className = 'card june';
+  c.className = 'card logged';
   c.innerHTML = `<h3>${esc(w.name)}</h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(w.cap)}</div><div class="l">Capacity h/mo</div></div>
@@ -1010,7 +1029,7 @@ function capCard(w) {
       <div class="stat"><div class="n${remaining < 0 ? ' neg' : ''}">${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
     ${capBar(used, cap)}`;
-  c.onclick = () => { location.hash = '#/june/' + w.gid; };
+  c.onclick = () => { location.hash = '#/logged/' + w.gid; };
   return c;
 }
 
@@ -1031,7 +1050,7 @@ function groupCard(g) {
   const used = Number(g.hours || 0), cap = Number(g.cap || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
-  c.className = 'card june grp-card';
+  c.className = 'card logged grp-card';
   const rows = g.members.map(m =>
     `<div class="grp-row" data-gid="${m.gid}" title="Open ${esc(m.name)}">
        <span class="grp-name">${esc(m.name)}</span>
@@ -1047,7 +1066,7 @@ function groupCard(g) {
     <div class="grp-members">${rows}</div>`;
   // Each member row opens that project's own Hours-Logged detail.
   c.querySelectorAll('.grp-row[data-gid]').forEach(r =>
-    r.onclick = (e) => { e.stopPropagation(); location.hash = '#/june/' + r.dataset.gid; });
+    r.onclick = (e) => { e.stopPropagation(); location.hash = '#/logged/' + r.dataset.gid; });
   return c;
 }
 
@@ -1070,7 +1089,7 @@ async function renderDashboard() {
     </div>`;
   const view = document.getElementById('tabview');
   const btn = document.getElementById('dash-refresh');
-  let estData = null, juneData = null, teamData = null;   // cached so switching tabs is instant
+  let estData = null, loggedData = null, teamData = null;   // cached so switching tabs is instant
   let groupsConfig = null;   // budget-group definitions (loaded once); combined per current range
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
   let projPersonCache = {};    // per-project person split { gid: { person: hours } }, keyed by 'start:end'
@@ -1087,7 +1106,7 @@ async function renderDashboard() {
     const apply = () => {
       if (s.value) dateStart = s.value;
       if (e.value) dateEnd = e.value;
-      juneData = null; renderTab(); loadJune(false);
+      loggedData = null; renderTab(); loadLogged(false);
     };
     go.onclick = apply;
     [s, e].forEach(inp => inp.onkeydown = ev => { if (ev.key === 'Enter') apply(); });
@@ -1296,7 +1315,7 @@ async function renderDashboard() {
   function renderActualProj() {
     // Stacked bar chart of logged hours per project for the selected date range, split by person.
     const picker = rangePicker();
-    if (!juneData) { view.innerHTML = picker + note(LOADING); wireRangeSel(); return; }
+    if (!loggedData) { view.innerHTML = picker + note(LOADING); wireRangeSel(); return; }
     // Roll grouped projects (e.g. CMD) into one combined bucket with the group's cap; clicking
     // that bucket drills in and splits it into its member projects. Every other project stays
     // on its own bar. Then drop anything with no hours.
@@ -1305,7 +1324,7 @@ async function renderDashboard() {
     let rows, backBar = '';
     if (drill) {
       const gset = new Set(drill.gids);
-      rows = juneData.filter(w => gset.has(w.gid) && w.hours > 0)
+      rows = loggedData.filter(w => gset.has(w.gid) && w.hours > 0)
         .map(w => Object.assign({ isGroup: false }, w))
         .sort((a, b) => b.hours - a.hours);
       if (!rows.length) { actualDrillGroup = null; return renderActualProj(); }
@@ -1313,11 +1332,11 @@ async function renderDashboard() {
                 `<h2>${esc(drill.name)} · split by project</h2></div>`;
     } else {
       const groupItems = (groupsConfig || []).map(g => {
-        const s = buildGroupSummary(g, juneData);
+        const s = buildGroupSummary(g, loggedData);
         return { name: g.name, gid: null, isGroup: true, gids: g.gids, cap: g.cap, members: s.members,
           hours: s.hours, nentries: s.nentries };
       });
-      const projItems = juneData.filter(w => !memberGids.has(w.gid)).map(w => Object.assign({ isGroup: false }, w));
+      const projItems = loggedData.filter(w => !memberGids.has(w.gid)).map(w => Object.assign({ isGroup: false }, w));
       rows = [...groupItems, ...projItems].filter(w => w.hours > 0).sort((a, b) => b.hours - a.hours);
     }
     if (!rows.length) {
@@ -1372,7 +1391,7 @@ async function renderDashboard() {
         // Combined buckets split into their projects; single projects open their detail.
         onClick: (evt, els) => { if (!els.length) return; const r = chartRows[els[0].index];
           if (r.isGroup) { actualDrillGroup = r.name; renderActualProj(); }
-          else if (r.gid) location.hash = '#/june/' + r.gid; },
+          else if (r.gid) location.hash = '#/logged/' + r.gid; },
         onHover: (evt, els) => { const r = els.length ? chartRows[els[0].index] : null;
           evt.native.target.style.cursor = (r && (r.isGroup || r.gid)) ? 'pointer' : 'default'; },
         scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
@@ -1419,7 +1438,7 @@ async function renderDashboard() {
     };
 
     // By project — mirrors the chart's rows (combined buckets / drilled-in members).
-    const projRows = (rows_ || juneData.filter(w => w.hours > 0)).slice().sort((a, b) => b.hours - a.hours);
+    const projRows = (rows_ || loggedData.filter(w => w.hours > 0)).slice().sort((a, b) => b.hours - a.hours);
     const pjTot = projRows.reduce((a, w) => a + w.hours, 0);
     const projTable =
       `<h2 class="section-h">By project</h2>
@@ -1471,11 +1490,11 @@ async function renderDashboard() {
   async function loadPersonStats(key) {
     if (personLoading[key] || personStatsCache[key]) return;   // already loading / loaded
     personLoading[key] = true;
-    const gids = juneData.filter(w => w.hours > 0).map(w => w.gid);
+    const gids = loggedData.filter(w => w.hours > 0).map(w => w.gid);
     let details;
     try {
       details = await Promise.all(gids.map(g =>
-        fetch(`/api/june/${g}?start=${dateStart}&end=${dateEnd}`).then(r => r.json())));
+        fetch(`/api/logged/${g}?start=${dateStart}&end=${dateEnd}`).then(r => r.json())));
     } catch (e) {
       const el = document.getElementById('person-loading');
       if (el) el.innerHTML = fmtErr(e);
@@ -1536,8 +1555,8 @@ async function renderDashboard() {
   // hours and a grand total. Reuses the per-item rollup
   // that loadPersonStats builds from each project's time entries.
   function renderActualItems() {
-    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
-    if (!juneData.some(w => w.hours > 0)) {
+    if (!loggedData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
+    if (!loggedData.some(w => w.hours > 0)) {
       view.innerHTML = rangePicker() + note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
       wireRangeSel(); return;
     }
@@ -1599,8 +1618,8 @@ async function renderDashboard() {
   // time to in the selected range — one table per day (task, project, hours) with that day's
   // total. Reuses the per-person/per-day rollup loadPersonStats builds from the time entries.
   function renderActualDaily() {
-    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
-    if (!juneData.some(w => w.hours > 0)) {
+    if (!loggedData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
+    if (!loggedData.some(w => w.hours > 0)) {
       view.innerHTML = rangePicker() + note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
       wireRangeSel(); return;
     }
@@ -1854,7 +1873,7 @@ async function renderDashboard() {
   // rollup as the By-person summary (personStatsCache), so it matches the rest of Actual Hours
   // (e.g. Grant's logged time on a project), not Asana's task tracked-time totals.
   function renderTeamActual() {
-    if (!juneData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
+    if (!loggedData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
     const key = dateStart + ':' + dateEnd, people = personStatsCache[key];
     if (!people) {
       view.innerHTML = rangePicker() + note(LOADING);
@@ -1921,7 +1940,7 @@ async function renderDashboard() {
     });
     // One donut per person under the bars: which projects they logged their hours against.
     const pc = projPersonCache[key] || {};
-    const nameOf = Object.fromEntries((juneData || []).map(w => [w.gid, w.name]));
+    const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
     donutGrid(view, rows.map(r => {
       const m = {};
       Object.entries(pc).forEach(([gid, pm]) => {
@@ -1940,7 +1959,7 @@ async function renderDashboard() {
   function showLoggedBreakdown(person) {
     destroyCharts();
     const key = dateStart + ':' + dateEnd, pc = projPersonCache[key] || {};
-    const nameOf = Object.fromEntries((juneData || []).map(w => [w.gid, w.name]));
+    const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
     const rows_ = [];
     Object.entries(pc).forEach(([gid, pm]) => {
       const v = pm[person];
@@ -1976,7 +1995,7 @@ async function renderDashboard() {
     if (dashTab === 'settings') u = null;
     else if (dashTab === 'team') u = teamData && teamData.updated;
     else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
-    else u = juneData && juneData[0] && juneData[0].updated;
+    else u = loggedData && loggedData[0] && loggedData[0].updated;
     el.textContent = u ? ('Updated ' + u) : '';
   }
 
@@ -2017,17 +2036,17 @@ async function renderDashboard() {
       }
     } else if (dashTab === 'capacity') {
       const picker = rangePicker();
-      if (!juneData) { view.innerHTML = picker + loading; wireRangeSel(); }
+      if (!loggedData) { view.innerHTML = picker + loading; wireRangeSel(); }
       else {
         // MSA projects with a monthly capacity lead the list and are highlighted: combined
         // budget buckets first, then any standalone capped project (group members roll into
         // their bucket). Everything else that logged hours follows as plain statistics cards.
         const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
-        const groups = (groupsConfig || []).map(g => buildGroupSummary(g, juneData))
+        const groups = (groupsConfig || []).map(g => buildGroupSummary(g, loggedData))
                          .filter(g => g.members.length);
-        const standalone = juneData.filter(w => w.cap != null && !memberGids.has(w.gid))
+        const standalone = loggedData.filter(w => w.cap != null && !memberGids.has(w.gid))
                              .sort((a, b) => b.hours - a.hours);
-        const others = juneData.filter(w => w.cap == null && !memberGids.has(w.gid))
+        const others = loggedData.filter(w => w.cap == null && !memberGids.has(w.gid))
                          .sort((a, b) => b.hours - a.hours);
         const hasCap = groups.length || standalone.length;
         // Headline stats cover the budgeted work only — the retainer picture in one line.
@@ -2059,7 +2078,7 @@ async function renderDashboard() {
             view.insertAdjacentHTML('beforeend', `<h2 class="section-h${hasCap ? '' : ' flush'}">Other projects</h2>`);
             const grid = document.createElement('div');
             grid.className = 'grid';
-            others.forEach(w => grid.appendChild(juneCard(w)));
+            others.forEach(w => grid.appendChild(loggedCard(w)));
             view.appendChild(grid);
           }
         }
@@ -2101,14 +2120,14 @@ async function renderDashboard() {
   wireSidebar(renderTab);
 
   // Loads the selected range's "Actual Hours" widgets (used on its own when the range changes).
-  async function loadJune(refresh) {
+  async function loadLogged(refresh) {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
     personStatsCache = {}; projPersonCache = {}; itemStatsCache = {}; dailyStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
     try {
-      const url = `/api/june?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
+      const url = `/api/logged?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await fetch(url).then(r => r.json());
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
-      juneData = j;
+      loggedData = j;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
     await mePromise;   // so Daily Log knows who "you" are before it picks its default assignee
     if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual'].includes(dashTab)) renderTab();
@@ -2125,14 +2144,13 @@ async function renderDashboard() {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     const q = refresh ? '?refresh=1' : '';
     try {
-      // First paint only needs the estimated side — the dashboard always opens on Team
-      // Capacity · Estimated. The logged-hours pull starts here in parallel but is deliberately
-      // NOT awaited: it is the slower half, and it re-renders the Actual tabs itself when it
-      // lands, so waiting on it would only delay the page the user is actually looking at.
-      loadJune(refresh);
+      // Estimated and logged hours are pulled together and both awaited: one wait at startup,
+      // after which every tab is already warm. Deferring the logged half would paint sooner
+      // but move the wait onto the first Actual tab you open, which is worse.
       const [e, grp] = await Promise.all([
         fetch('/api/projects' + q).then(r => r.json()),
         groupsConfig ? Promise.resolve(groupsConfig) : fetch('/api/groups').then(r => r.json()),
+        loadLogged(refresh),
       ]);
       estData = e; groupsConfig = grp;
       // Team load derives from the per-project detail that /api/projects just (re)built,
@@ -2297,7 +2315,7 @@ async function renderDetail(gid) {
   load(false);   // navigation = cached
 }
 
-async function renderJuneDetail(gid) {
+async function renderLoggedDetail(gid) {
   app.innerHTML = `
     <div class="layout">
       ${sidebarHtml()}
@@ -2368,7 +2386,7 @@ async function renderJuneDetail(gid) {
   async function load(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     try {
-      data = await (await fetch('/api/june/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
+      data = await (await fetch('/api/logged/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
       document.getElementById('page-title').textContent = data.name;
       document.getElementById('sub').textContent =
         `Hours logged ${rangeLabel(data.start, data.end)} per person · ${plural(data.nentries, 'time entry', 'time entries')} · ${h2(data.total_hours)} h total`;
@@ -2383,8 +2401,8 @@ async function renderJuneDetail(gid) {
 
 function route() {
   destroyCharts();
-  let m = location.hash.match(/^#\/june\/(\d+)/);
-  if (m) return renderJuneDetail(m[1]);
+  let m = location.hash.match(/^#\/logged\/(\d+)/);
+  if (m) return renderLoggedDetail(m[1]);
   m = location.hash.match(/^#\/p\/(\d+)/);
   if (m) return renderDetail(m[1]);
   renderDashboard();
