@@ -86,7 +86,9 @@ function sectionName(t, gid){ let fb = ''; for (const m of (t.memberships || [])
 function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).trim().toLowerCase()); }
 
 function fetchTasks(gid){
-  const f = 'name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+  // num_subtasks lets buildTask skip the subtask request for a leaf task — most tasks are
+  // leaves, so that one extra field removes most of the calls this load used to make.
+  const f = 'name,assignee.name,completed,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
   return asanaGet(`/projects/${gid}/tasks?opt_fields=${f}&limit=100`);
 }
 function fetchSubtasks(g){
@@ -96,7 +98,8 @@ function fetchSubtasks(g){
 
 async function buildTask(t, gid){
   const subs = [];
-  for (const s of await fetchSubtasks(t.gid)){
+  const children = (t.num_subtasks || 0) > 0 ? await fetchSubtasks(t.gid) : [];
+  for (const s of children){
     if (s.completed) continue;
     subs.push({ name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
       hours: round2(taskMinutes(s) / 60), actual: round2(actualMinutes(s) / 60) });
@@ -125,7 +128,14 @@ async function projectDetail(gid){
     counts: ordered.map(n => counts[n]), ntasks: detailed.length, tasks: detailed, updated: nowStr() };
 }
 
-const CACHE = { summaries: null, detail: {}, june_summaries: {}, june_detail: {} };
+const CACHE = { summaries: null, detail: {}, june_summaries: {}, june_detail: {}, me: null };
+// Mirrors get_me: the display name behind the PAT, so the UI can default a filter to "you".
+// asanaGet always hands back an array, and /users/me is a single object, so take the first.
+async function getMe(refresh){
+  if (!refresh && CACHE.me) return CACHE.me;
+  const rows = await asanaGet('/users/me?opt_fields=name');
+  return (CACHE.me = { name: ((rows[0] || {}).name) || '' });
+}
 function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
 
 async function getDetail(gid, refresh){
@@ -244,6 +254,7 @@ async function handleApi(p){
   if (path === '/api/june') return getJuneSummaries(refresh, start, end);
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
   if (path === '/api/groups') return GROUPS;
+  if (path === '/api/me') return getMe(refresh);
   if (path.startsWith('/api/june/')) return getJuneDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
   throw new Error('Unknown API ' + path);

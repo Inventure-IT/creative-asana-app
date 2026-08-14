@@ -285,7 +285,9 @@ function sectionName(t, gid){ let fb = ''; for (const m of (t.memberships || [])
 function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).trim().toLowerCase()); }
 
 function fetchTasks(gid){
-  const f = 'name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+  // num_subtasks lets buildTask skip the subtask request for a leaf task — most tasks are
+  // leaves, so that one extra field removes most of the calls this load used to make.
+  const f = 'name,assignee.name,completed,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
   return asanaGet(`/projects/${gid}/tasks?opt_fields=${f}&limit=100`);
 }
 function fetchSubtasks(g){
@@ -295,7 +297,8 @@ function fetchSubtasks(g){
 
 async function buildTask(t, gid){
   const subs = [];
-  for (const s of await fetchSubtasks(t.gid)){
+  const children = (t.num_subtasks || 0) > 0 ? await fetchSubtasks(t.gid) : [];
+  for (const s of children){
     if (s.completed) continue;
     subs.push({ name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
       hours: round2(taskMinutes(s) / 60), actual: round2(actualMinutes(s) / 60) });
@@ -324,7 +327,14 @@ async function projectDetail(gid){
     counts: ordered.map(n => counts[n]), ntasks: detailed.length, tasks: detailed, updated: nowStr() };
 }
 
-const CACHE = { summaries: null, detail: {}, june_summaries: {}, june_detail: {} };
+const CACHE = { summaries: null, detail: {}, june_summaries: {}, june_detail: {}, me: null };
+// Mirrors get_me: the display name behind the PAT, so the UI can default a filter to "you".
+// asanaGet always hands back an array, and /users/me is a single object, so take the first.
+async function getMe(refresh){
+  if (!refresh && CACHE.me) return CACHE.me;
+  const rows = await asanaGet('/users/me?opt_fields=name');
+  return (CACHE.me = { name: ((rows[0] || {}).name) || '' });
+}
 function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
 
 async function getDetail(gid, refresh){
@@ -443,6 +453,7 @@ async function handleApi(p){
   if (path === '/api/june') return getJuneSummaries(refresh, start, end);
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
   if (path === '/api/groups') return GROUPS;
+  if (path === '/api/me') return getMe(refresh);
   if (path.startsWith('/api/june/')) return getJuneDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
   throw new Error('Unknown API ' + path);
@@ -538,19 +549,25 @@ Chart.defaults.borderColor = 'rgba(255,255,255,.08)';
 
 // Draws a dashed horizontal target line (e.g. the 128 h per-assignee cap) on a bar chart.
 // Enable per-chart via options.plugins.capLine = { value: <hours> }.
+// `pace` adds a second, amber line below the target: where a person should already be today,
+// given how far through the work month the range is. Labels sit above their own line.
 const capLinePlugin = {
   id: 'capLine',
   afterDatasetsDraw(c) {
     const cfg = c.options.plugins.capLine;
-    if (!cfg || cfg.value == null) return;
-    const y = c.scales.y.getPixelForValue(cfg.value);
+    if (!cfg) return;
     const { left, right } = c.chartArea, ctx = c.ctx;
-    ctx.save();
-    ctx.beginPath(); ctx.setLineDash([6, 4]); ctx.lineWidth = 2; ctx.strokeStyle = C.blueD;
-    ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
-    ctx.setLineDash([]); ctx.fillStyle = C.blueD; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'right';
-    ctx.fillText(h2(cfg.value) + ' h target', right - 6, y - 6);
-    ctx.restore();
+    const rule = (value, color, label) => {
+      const y = c.scales.y.getPixelForValue(value);
+      ctx.save();
+      ctx.beginPath(); ctx.setLineDash([6, 4]); ctx.lineWidth = 2; ctx.strokeStyle = color;
+      ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = color; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'right';
+      ctx.fillText(label, right - 6, y - 6);
+      ctx.restore();
+    };
+    if (cfg.value != null) rule(cfg.value, C.blueD, h2(cfg.value) + ' h target');
+    if (cfg.pace != null) rule(cfg.pace, C.amber, cfg.paceLabel || (h2(cfg.pace) + ' h by today'));
   }
 };
 Chart.register(capLinePlugin);
@@ -847,6 +864,12 @@ let itemFilterPerson = null;
 // Daily Log: filter to a single assignee; null = show everyone. Kept separate from the Task
 // List filter so switching between the two tabs doesn't clobber either selection.
 let dailyFilterPerson = null;
+// Display name behind the PAT (/api/me), so a filter can default to "you". Stays null if the
+// lookup fails, which just means the filters open on everyone.
+let currentUser = null;
+// Whether Daily Log has already applied its "you" default. Set once the tab first has data,
+// and by the dropdown, so a deliberate choice is never overwritten later in the session.
+let dailyFilterInit = false;
 // Daily Log: newest day first by default (a PM reads today's work first); toggled by the
 // Order control.
 let dailyNewestFirst = true;
@@ -859,6 +882,27 @@ function monthRange(now){ const d = now || new Date(), p = n => String(n).padSta
 let [dateStart, dateEnd] = monthRange();
 function fmtDate(d){ const [y,m,day]=d.split('-').map(Number); return new Date(y, m-1, day).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
 function rangeLabel(s, e){ return fmtDate(s) + ' – ' + fmtDate(e); }
+// How far through the *working* part of the selected range today sits. Mon–Fri only, so a
+// month's 30 calendar days become ~22 billable ones; no holiday calendar, so a week with a
+// holiday in it still counts five days. Today counts as elapsed once it starts, which is the
+// reading a PM wants at a glance ("we're 12 of 22 days in").
+//   { total, elapsed, left, pct } — pct is 0 before the range opens, 100 once it has closed,
+//   and doubles as the share of the monthly target that should already be logged.
+function workdayProgress(start, end, today){
+  const parse = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const isWork = d => d.getDay() !== 0 && d.getDay() !== 6;
+  const s = parse(start), e = parse(end);
+  const now = today || new Date();
+  const t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let total = 0, elapsed = 0;
+  for (const d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
+    if (!isWork(d)) continue;
+    total++;
+    if (d <= t) elapsed++;
+  }
+  return { total, elapsed, left: total - elapsed,
+           pct: total ? elapsed / total * 100 : 0 };
+}
 // The single filter row every Actual-Hours tab opens with: the date range, plus whatever
 // extra controls that tab needs appended after a separator — one toolbar, never two stacked.
 function rangePicker(extra){
@@ -882,7 +926,7 @@ const TABS = {
   estimated: { label:'Project Cards', title:'Project Cards · Estimated',
     sub:'One card per project: estimated hours still on the board and how many tasks they sit in.' },
   teamactual: { label:'Team Capacity', title:'Team Capacity · Logged',
-    sub:'Hours actually logged per person in the selected range, against the monthly target.' },
+    sub:'Hours actually logged per person in the selected range, against the monthly target. The amber line is where each person should be today, based on how far through the work month (Mon–Fri) we are.' },
   capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity · Logged',
     sub:'Hours logged against each retainer budget for the selected range, with what is left.' },
   actualproj: { label:'Bar Chart', title:'Projects · Logged',
@@ -1570,6 +1614,12 @@ async function renderDashboard() {
     // Assignee filter: same behaviour as the Task List tab — a remembered person who logged
     // nothing in this range falls back to showing everyone.
     const people = [...new Set(allRows.map(r => r.person))].sort((a, b) => a.localeCompare(b));
+    // First time this tab has data: open on whoever is signed in, so you land on your own log.
+    // If the PAT owner logged nothing in this range (or /api/me failed), stay on all assignees.
+    if (!dailyFilterInit) {
+      if (currentUser && people.includes(currentUser)) dailyFilterPerson = currentUser;
+      dailyFilterInit = true;
+    }
     if (dailyFilterPerson && !people.includes(dailyFilterPerson)) dailyFilterPerson = null;
     const rows = dailyFilterPerson ? allRows.filter(r => r.person === dailyFilterPerson) : allRows;
     // Range, assignee and day order all live in the one toolbar this tab shows.
@@ -1626,7 +1676,7 @@ async function renderDashboard() {
     view.innerHTML = summary + picker + (noneMsg || sections);
     wireRangeSel();
     const sel = document.getElementById('daily-assignee');
-    if (sel) sel.onchange = () => { dailyFilterPerson = sel.value || null; renderActualDaily(); };
+    if (sel) sel.onchange = () => { dailyFilterPerson = sel.value || null; dailyFilterInit = true; renderActualDaily(); };
     const ord = document.getElementById('daily-order');
     if (ord) ord.onchange = () => { dailyNewestFirst = ord.value === 'new'; renderActualDaily(); };
   }
@@ -1817,11 +1867,24 @@ async function renderDashboard() {
     // Headline stats: what the team actually booked against what it could have.
     const totLogged = rows.reduce((a, r) => a + r.total, 0);
     const teamCap = cap * rows.length;
+    // How far through the work month (Mon–Fri) we are, and therefore how many hours each
+    // person should already have logged if they are keeping pace with the monthly target.
+    const wp = workdayProgress(dateStart, dateEnd);
+    const paceTarget = r2(cap * wp.pct / 100);
+    // "Team pace" is what the team has logged against what it should have by today — 100% is
+    // on schedule, and anything short of it is flagged.
+    const teamPaceTarget = paceTarget * rows.length;
+    const teamPace = teamPaceTarget ? totLogged / teamPaceTarget * 100 : 0;
     const summary = summaryBar([
       { n: h2(totLogged) + ' h', l: 'Hours logged' },
       { n: rows.length, l: 'People' },
       { n: h2(rows.length ? totLogged / rows.length : 0) + ' h', l: 'Avg per person' },
       { n: (teamCap ? (totLogged / teamCap * 100).toFixed(0) : '0') + '%', l: 'Of team capacity' },
+      { n: wp.pct.toFixed(0) + '%', l: 'Of work month elapsed' },
+      { n: `${wp.elapsed} of ${wp.total}`, l: 'Work days used' },
+      { n: wp.left, l: 'Work days left' },
+      { n: h2(paceTarget) + ' h', l: 'Target by today' },
+      { n: teamPaceTarget ? teamPace.toFixed(0) + '%' : '—', l: 'Team pace', neg: teamPaceTarget > 0 && teamPace < 100 },
     ]);
     view.innerHTML = summary + rangePicker() + '<div class="chart-box"><canvas id="chart"></canvas></div>';
     wireRangeSel();
@@ -1844,9 +1907,17 @@ async function renderDashboard() {
                        ticks: { callback: (v, i) => [labels[i], h2(totals[i]) + ' h'] } },
                   y: { beginAtZero: true, suggestedMax: Math.max(cap * 1.1, ...totals, 1),
                        title: { display: true, text: 'Hours logged' }, ticks: { callback: v => h2(v) } } },
-        plugins: { legend: { display: false }, capLine: { value: cap },
+        // The pace line only means something mid-range: before it opens there is nothing to
+        // expect yet, and once it has closed the pace target is just the target.
+        plugins: { legend: { display: false },
+          capLine: { value: cap,
+            pace: (wp.pct > 0 && wp.pct < 100) ? paceTarget : null,
+            paceLabel: `${h2(paceTarget)} h by today · ${wp.pct.toFixed(0)}% of work month` },
           tooltip: { callbacks: {
-            label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)` } } } }
+            label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)`,
+            afterLabel: ctx => paceTarget
+              ? `Target by today ${h2(paceTarget)} h · ${(ctx.parsed.y / paceTarget * 100).toFixed(0)}% of pace`
+              : '' } } } }
     });
     // One donut per person under the bars: which projects they logged their hours against.
     const pc = projPersonCache[key] || {};
@@ -2039,17 +2110,29 @@ async function renderDashboard() {
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
       juneData = j;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
+    await mePromise;   // so Daily Log knows who "you" are before it picks its default assignee
     if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual'].includes(dashTab)) renderTab();
   }
+
+  // Who owns the token, resolved once at startup and awaited before any render that could
+  // apply a "you" default. A failure here is not worth an error banner — the filters simply
+  // open on everyone — so it resolves to null instead of rejecting.
+  const mePromise = fetch('/api/me').then(r => r.json())
+    .then(j => { currentUser = (j && j.name) || null; })
+    .catch(() => { currentUser = null; });
 
   async function loadAll(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     const q = refresh ? '?refresh=1' : '';
     try {
+      // First paint only needs the estimated side — the dashboard always opens on Team
+      // Capacity · Estimated. The logged-hours pull starts here in parallel but is deliberately
+      // NOT awaited: it is the slower half, and it re-renders the Actual tabs itself when it
+      // lands, so waiting on it would only delay the page the user is actually looking at.
+      loadJune(refresh);
       const [e, grp] = await Promise.all([
         fetch('/api/projects' + q).then(r => r.json()),
         groupsConfig ? Promise.resolve(groupsConfig) : fetch('/api/groups').then(r => r.json()),
-        loadJune(refresh),
       ]);
       estData = e; groupsConfig = grp;
       // Team load derives from the per-project detail that /api/projects just (re)built,
@@ -2086,25 +2169,49 @@ async function renderDetail(gid) {
   const btn = document.getElementById('refresh');
   let detailData = null;
 
+  // This page is a drill-in from Projects · Estimated, so it reads that tab's filters rather
+  // than starting fresh: the status checkboxes and "Exclude Unassigned". Both are module-level
+  // and hash routing never reloads the page, so they survive the navigation.
+  const estStatusOn = s => !estStatusFilter || estStatusFilter.has(s);
+  const estKept = t => estStatusOn(t.section || NO_STATUS);
+  const estFilterNote = () =>
+    (estStatusFilter ? ` · status: ${[...estStatusFilter].join(', ')}` : '') +
+    (estHideUnassigned ? ' · Unassigned excluded' : '');
+
   function showChart() {
     const d = detailData;
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:d.name}]);
+    // Re-aggregate per assignee from the task rows rather than using the payload's precomputed
+    // totals, so the status filter can be applied on the way — a filtered bar here then equals
+    // that person's slice of the bar clicked on Projects · Estimated. A subtask takes its
+    // parent's status column, exactly as the dashboard chart treats it.
+    const agg = {};
+    const add = (name, est, act) => {
+      const a = agg[name] || (agg[name] = { est: 0, act: 0, count: 0 });
+      a.est += est || 0; a.act += act || 0; a.count += 1;
+    };
+    d.tasks.filter(estKept).forEach(t => {
+      add(t.assignee, t.hours, t.actual);
+      t.subtasks.forEach(s => add(s.assignee, s.hours, s.actual));
+    });
     // Bars are REMAINING hours (estimated − time already tracked), the same measure as the
     // Projects · Estimated chart this page is clicked from, sorted most-remaining-first.
     // Over-run people would push the axis below zero, so bars floor at 0 and the true numbers
     // stay in the tooltip and the task table.
-    // Honors the Projects · Estimated tab's "Exclude Unassigned" checkbox, so drilling into a
-    // project shows the same set of people the bar you clicked was stacked from.
-    const people = d.labels.map((name, i) => ({ name, est: d.hours[i],
-      act: (d.actual_hours || [])[i] || 0, count: d.counts[i] }))
-      .filter(p => !(estHideUnassigned && p.name === 'Unassigned'))
-      .map(p => ({ ...p, rem: r2(p.est - p.act) }))
+    const people = Object.entries(agg)
+      .filter(([name]) => !(estHideUnassigned && name === 'Unassigned'))
+      .map(([name, a]) => ({ name, est: r2(a.est), act: r2(a.act), count: a.count, rem: r2(a.est - a.act) }))
       .sort((a, b) => b.rem - a.rem);
     const labels = people.map(p => p.name), rem = people.map(p => p.rem);
     const barHours = rem.map(h => Math.max(0, h));
+    destroyCharts();
+    if (!people.length) {
+      document.getElementById('view').innerHTML =
+        noteBox('No tasks match the filters carried over from the Bar Chart' + estFilterNote() + '.');
+      return;
+    }
     document.getElementById('view').innerHTML =
       '<div class="chart-box"><canvas id="chart"></canvas></div>';
-    destroyCharts();
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
       data:{ labels, datasets:[{ label:'Remaining hours', data:barHours,
@@ -2124,7 +2231,8 @@ async function renderDetail(gid) {
   function showTasks(assignee) {
     destroyCharts();
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:detailData.name, fn:showChart}, {label:assignee}]);
-    const all = detailData.tasks;
+    // Same status filter the chart is showing, so this table adds up to the clicked bar.
+    const all = detailData.tasks.filter(estKept);
     // Est / actual / remaining per row, so the column of remaining hours adds up to the bar.
     let rows = '', totEst = 0, totAct = 0, items = 0;
     const remCell = (est, act) => `<td class="hours">${h2(r2(est - act))} h</td>`;
@@ -2164,7 +2272,7 @@ async function renderDetail(gid) {
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(assignee)}</h2>
        </div>
-       <p class="drill-total">${plural(items, 'item')} · ${h2(r2(totEst - totAct))} h remaining · ${h2(totEst)} est − ${h2(totAct)} actual (excludes Completed)</p>
+       <p class="drill-total">${plural(items, 'item')} · ${h2(r2(totEst - totAct))} h remaining · ${h2(totEst)} est − ${h2(totAct)} actual (excludes Completed)${esc(estFilterNote())}</p>
        <table class="tasks">
          <thead><tr><th>Task / Subtask</th><th>Type / Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
@@ -2179,7 +2287,7 @@ async function renderDetail(gid) {
       document.getElementById('page-title').textContent = detailData.name;
       document.getElementById('sub').textContent =
         `Remaining estimated hours per assignee (estimated − time tracked) · ${plural(detailData.ntasks, 'task')} (excludes Completed)` +
-        (estHideUnassigned ? ' · Unassigned excluded' : '');
+        estFilterNote();
       document.getElementById('dash-updated').textContent = detailData.updated ? ('Updated ' + detailData.updated) : '';
       showChart();
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }

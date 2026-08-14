@@ -12,11 +12,13 @@ Add more widgets by appending to PROJECTS below.
 Token lookup: ASANA_PAT env var, falling back to the Windows User env var (registry).
 """
 
+import gzip
+import http.client
 import json
 import os
 import sys
 import threading
-import urllib.request
+import time
 import urllib.error
 import urllib.parse
 import webbrowser
@@ -79,7 +81,7 @@ PROJECT_CAPS = {p["gid"]: p.get("cap") for p in PROJECTS}   # monthly hour capac
 # In-memory cache so navigating between pages never re-hits the Asana API.
 # Data is fetched once and reused until the user explicitly clicks Refresh.
 # The "hours logged" caches are keyed by month: {month: ...}.
-CACHE = {"summaries": None, "detail": {}, "june_summaries": {}, "june_detail": {}}
+CACHE = {"summaries": None, "detail": {}, "june_summaries": {}, "june_detail": {}, "me": None}
 CACHE_LOCK = threading.Lock()
 
 
@@ -108,35 +110,113 @@ TOKEN = get_token()
 LEAF_POOL = ThreadPoolExecutor(max_workers=16)
 PROJECT_POOL = ThreadPoolExecutor(max_workers=8)
 
+# ---- HTTP layer: every Asana call goes through here ----
+#
+# Startup makes hundreds of small GETs to one host, so the per-call TLS handshake — not the
+# response body — used to dominate the wall clock. One connection per worker thread, kept
+# alive and reused, removes that round trip; the pools above are long-lived, so this is in
+# effect a connection pool sized to them. gzip cuts the task-list payloads several-fold.
+_LOCAL = threading.local()
+_ASANA_HOST = urllib.parse.urlsplit(API).netloc
+
+
+def _drop_conn():
+    c = getattr(_LOCAL, "conn", None)
+    if c is not None:
+        try:
+            c.close()
+        except OSError:
+            pass
+    _LOCAL.conn = None
+
+
+def api_get(path_or_url, tries=4):
+    """GET one Asana URL (path or absolute) and return its decoded JSON body.
+
+    Retries a rate limit (429), a 5xx, and a connection the server closed between calls —
+    an idle keep-alive connection can go away at any time, which is not an error worth
+    surfacing. Anything else raises urllib.error.HTTPError, so the request handler's existing
+    502 path still reports it unchanged.
+    """
+    url = path_or_url if path_or_url.startswith("http") else API + path_or_url
+    parts = urllib.parse.urlsplit(url)
+    target = parts.path + (("?" + parts.query) if parts.query else "")
+    headers = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json",
+               "Accept-Encoding": "gzip"}
+    for attempt in range(tries):
+        last = attempt == tries - 1
+        try:
+            conn = getattr(_LOCAL, "conn", None)
+            if conn is None:
+                conn = _LOCAL.conn = http.client.HTTPSConnection(_ASANA_HOST, timeout=60)
+            conn.request("GET", target, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read()          # drain in full, or the connection can't be reused
+        except (http.client.HTTPException, OSError):
+            _drop_conn()               # stale or broken: reconnect and try again
+            if last:
+                raise
+            time.sleep(0.3 * (attempt + 1))
+            continue
+        if resp.status == 429 or resp.status >= 500:
+            if (resp.getheader("Connection") or "").lower() == "close":
+                _drop_conn()
+            if last:
+                raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, None)
+            time.sleep(float(resp.getheader("Retry-After") or (attempt + 1)))
+            continue
+        if resp.status >= 400:
+            raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, None)
+        if (resp.getheader("Content-Encoding") or "").lower() == "gzip":
+            raw = gzip.decompress(raw)
+        return json.loads(raw)
+
+
+def api_pages(path):
+    """GET a paginated Asana collection, following next_page. Returns the concatenated data."""
+    out, url = [], path
+    while url:
+        page = api_get(url)
+        out.extend(page.get("data", []))
+        nxt = page.get("next_page")
+        url = nxt["uri"] if nxt and nxt.get("uri") else None
+    return out
+
+
+# `num_subtasks` is what lets build_task skip the subtask call for a leaf task — most tasks
+# have no subtasks, and that one field removes most of the requests startup used to make.
+TASK_FIELDS = ("name,assignee.name,completed,actual_time_minutes,num_subtasks,"
+               "custom_fields.name,custom_fields.number_value,"
+               "memberships.section.name,memberships.project.gid")
+SUBTASK_FIELDS = ("name,assignee.name,completed,actual_time_minutes,"
+                  "custom_fields.name,custom_fields.number_value")
+
 
 def fetch_tasks(gid):
     """Return all tasks for a project (name + assignee + completed + estimated/actual time + section)."""
-    fields = "name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid"
-    url = f"{API}/projects/{gid}/tasks?opt_fields={fields}&limit=100"
-    tasks = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        tasks.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-    return tasks
+    return api_pages(f"/projects/{gid}/tasks?opt_fields={TASK_FIELDS}&limit=100")
 
 
 def fetch_subtasks(task_gid):
     """Return subtasks for a task (name + assignee + estimated/actual time + completed)."""
-    fields = "name,assignee.name,completed,actual_time_minutes,custom_fields.name,custom_fields.number_value"
-    url = f"{API}/tasks/{task_gid}/subtasks?opt_fields={fields}&limit=100"
-    subs = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        subs.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-    return subs
+    return api_pages(f"/tasks/{task_gid}/subtasks?opt_fields={SUBTASK_FIELDS}&limit=100")
+
+
+def get_me(refresh=False):
+    """The Asana display name that owns the PAT, so the UI can default a filter to "you".
+
+    One tiny call, cached for the life of the process — the token can't change under us.
+    """
+    if not refresh:
+        with CACHE_LOCK:
+            cached = CACHE["me"]
+        if cached is not None:
+            return cached
+    data = api_get("/users/me?opt_fields=name").get("data") or {}
+    me = {"name": data.get("name") or ""}
+    with CACHE_LOCK:
+        CACHE["me"] = me
+    return me
 
 
 def task_minutes(t):
@@ -170,10 +250,15 @@ def is_excluded(t, gid):
 
 
 def build_task(t, gid):
-    """Shape one task plus its (incomplete) subtasks for the drill-down list."""
+    """Shape one task plus its (incomplete) subtasks for the drill-down list.
+
+    A task Asana reports as having no subtasks is not queried for them — that skip is where
+    most of the startup time went, since the roster is mostly leaf tasks.
+    """
     parent_min = task_minutes(t)
     subs, sub_min = [], 0
-    for s in fetch_subtasks(t["gid"]):
+    children = fetch_subtasks(t["gid"]) if (t.get("num_subtasks") or 0) > 0 else []
+    for s in children:
         if s.get("completed"):
             continue  # completed subtasks are not shown or counted
         m = task_minutes(s)
@@ -339,30 +424,12 @@ def get_assignee_load(refresh=False):
 
 def fetch_time_entries(task_gid):
     fields = "duration_minutes,entered_on,created_by.name"
-    url = f"{API}/tasks/{task_gid}/time_tracking_entries?opt_fields={fields}&limit=100"
-    out = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        out.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-    return out
+    return api_pages(f"/tasks/{task_gid}/time_tracking_entries?opt_fields={fields}&limit=100")
 
 
 def fetch_subtasks_time(task_gid):
     fields = "name,actual_time_minutes,completed,completed_at"
-    url = f"{API}/tasks/{task_gid}/subtasks?opt_fields={fields}&limit=100"
-    out = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        out.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
-    return out
+    return api_pages(f"/tasks/{task_gid}/subtasks?opt_fields={fields}&limit=100")
 
 
 def june_entries_for_item(item):
@@ -386,15 +453,7 @@ def june_entries_for_item(item):
 def june_detail(gid, start=DEFAULT_START, end=DEFAULT_END):
     """Per-person hours logged in [start, end] for one project (tasks + subtasks)."""
     tfields = "name,actual_time_minutes,num_subtasks,completed,completed_at"
-    url = f"{API}/projects/{gid}/tasks?opt_fields={tfields}&limit=100"
-    tasks = []
-    while url:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}"})
-        with urllib.request.urlopen(req) as resp:
-            page = json.load(resp)
-        tasks.extend(page.get("data", []))
-        nxt = page.get("next_page")
-        url = nxt["uri"] if nxt and nxt.get("uri") else None
+    tasks = api_pages(f"/projects/{gid}/tasks?opt_fields={tfields}&limit=100")
 
     # Tasks/subtasks completed within the date range (by completed_at), deduped by gid.
     completed_dates = {}
@@ -744,19 +803,25 @@ Chart.defaults.borderColor = 'rgba(255,255,255,.08)';
 
 // Draws a dashed horizontal target line (e.g. the 128 h per-assignee cap) on a bar chart.
 // Enable per-chart via options.plugins.capLine = { value: <hours> }.
+// `pace` adds a second, amber line below the target: where a person should already be today,
+// given how far through the work month the range is. Labels sit above their own line.
 const capLinePlugin = {
   id: 'capLine',
   afterDatasetsDraw(c) {
     const cfg = c.options.plugins.capLine;
-    if (!cfg || cfg.value == null) return;
-    const y = c.scales.y.getPixelForValue(cfg.value);
+    if (!cfg) return;
     const { left, right } = c.chartArea, ctx = c.ctx;
-    ctx.save();
-    ctx.beginPath(); ctx.setLineDash([6, 4]); ctx.lineWidth = 2; ctx.strokeStyle = C.blueD;
-    ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
-    ctx.setLineDash([]); ctx.fillStyle = C.blueD; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'right';
-    ctx.fillText(h2(cfg.value) + ' h target', right - 6, y - 6);
-    ctx.restore();
+    const rule = (value, color, label) => {
+      const y = c.scales.y.getPixelForValue(value);
+      ctx.save();
+      ctx.beginPath(); ctx.setLineDash([6, 4]); ctx.lineWidth = 2; ctx.strokeStyle = color;
+      ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = color; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'right';
+      ctx.fillText(label, right - 6, y - 6);
+      ctx.restore();
+    };
+    if (cfg.value != null) rule(cfg.value, C.blueD, h2(cfg.value) + ' h target');
+    if (cfg.pace != null) rule(cfg.pace, C.amber, cfg.paceLabel || (h2(cfg.pace) + ' h by today'));
   }
 };
 Chart.register(capLinePlugin);
@@ -1053,6 +1118,12 @@ let itemFilterPerson = null;
 // Daily Log: filter to a single assignee; null = show everyone. Kept separate from the Task
 // List filter so switching between the two tabs doesn't clobber either selection.
 let dailyFilterPerson = null;
+// Display name behind the PAT (/api/me), so a filter can default to "you". Stays null if the
+// lookup fails, which just means the filters open on everyone.
+let currentUser = null;
+// Whether Daily Log has already applied its "you" default. Set once the tab first has data,
+// and by the dropdown, so a deliberate choice is never overwritten later in the session.
+let dailyFilterInit = false;
 // Daily Log: newest day first by default (a PM reads today's work first); toggled by the
 // Order control.
 let dailyNewestFirst = true;
@@ -1065,6 +1136,27 @@ function monthRange(now){ const d = now || new Date(), p = n => String(n).padSta
 let [dateStart, dateEnd] = monthRange();
 function fmtDate(d){ const [y,m,day]=d.split('-').map(Number); return new Date(y, m-1, day).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
 function rangeLabel(s, e){ return fmtDate(s) + ' – ' + fmtDate(e); }
+// How far through the *working* part of the selected range today sits. Mon–Fri only, so a
+// month's 30 calendar days become ~22 billable ones; no holiday calendar, so a week with a
+// holiday in it still counts five days. Today counts as elapsed once it starts, which is the
+// reading a PM wants at a glance ("we're 12 of 22 days in").
+//   { total, elapsed, left, pct } — pct is 0 before the range opens, 100 once it has closed,
+//   and doubles as the share of the monthly target that should already be logged.
+function workdayProgress(start, end, today){
+  const parse = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const isWork = d => d.getDay() !== 0 && d.getDay() !== 6;
+  const s = parse(start), e = parse(end);
+  const now = today || new Date();
+  const t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let total = 0, elapsed = 0;
+  for (const d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
+    if (!isWork(d)) continue;
+    total++;
+    if (d <= t) elapsed++;
+  }
+  return { total, elapsed, left: total - elapsed,
+           pct: total ? elapsed / total * 100 : 0 };
+}
 // The single filter row every Actual-Hours tab opens with: the date range, plus whatever
 // extra controls that tab needs appended after a separator — one toolbar, never two stacked.
 function rangePicker(extra){
@@ -1088,7 +1180,7 @@ const TABS = {
   estimated: { label:'Project Cards', title:'Project Cards · Estimated',
     sub:'One card per project: estimated hours still on the board and how many tasks they sit in.' },
   teamactual: { label:'Team Capacity', title:'Team Capacity · Logged',
-    sub:'Hours actually logged per person in the selected range, against the monthly target.' },
+    sub:'Hours actually logged per person in the selected range, against the monthly target. The amber line is where each person should be today, based on how far through the work month (Mon–Fri) we are.' },
   capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity · Logged',
     sub:'Hours logged against each retainer budget for the selected range, with what is left.' },
   actualproj: { label:'Bar Chart', title:'Projects · Logged',
@@ -1776,6 +1868,12 @@ async function renderDashboard() {
     // Assignee filter: same behaviour as the Task List tab — a remembered person who logged
     // nothing in this range falls back to showing everyone.
     const people = [...new Set(allRows.map(r => r.person))].sort((a, b) => a.localeCompare(b));
+    // First time this tab has data: open on whoever is signed in, so you land on your own log.
+    // If the PAT owner logged nothing in this range (or /api/me failed), stay on all assignees.
+    if (!dailyFilterInit) {
+      if (currentUser && people.includes(currentUser)) dailyFilterPerson = currentUser;
+      dailyFilterInit = true;
+    }
     if (dailyFilterPerson && !people.includes(dailyFilterPerson)) dailyFilterPerson = null;
     const rows = dailyFilterPerson ? allRows.filter(r => r.person === dailyFilterPerson) : allRows;
     // Range, assignee and day order all live in the one toolbar this tab shows.
@@ -1832,7 +1930,7 @@ async function renderDashboard() {
     view.innerHTML = summary + picker + (noneMsg || sections);
     wireRangeSel();
     const sel = document.getElementById('daily-assignee');
-    if (sel) sel.onchange = () => { dailyFilterPerson = sel.value || null; renderActualDaily(); };
+    if (sel) sel.onchange = () => { dailyFilterPerson = sel.value || null; dailyFilterInit = true; renderActualDaily(); };
     const ord = document.getElementById('daily-order');
     if (ord) ord.onchange = () => { dailyNewestFirst = ord.value === 'new'; renderActualDaily(); };
   }
@@ -2023,11 +2121,24 @@ async function renderDashboard() {
     // Headline stats: what the team actually booked against what it could have.
     const totLogged = rows.reduce((a, r) => a + r.total, 0);
     const teamCap = cap * rows.length;
+    // How far through the work month (Mon–Fri) we are, and therefore how many hours each
+    // person should already have logged if they are keeping pace with the monthly target.
+    const wp = workdayProgress(dateStart, dateEnd);
+    const paceTarget = r2(cap * wp.pct / 100);
+    // "Team pace" is what the team has logged against what it should have by today — 100% is
+    // on schedule, and anything short of it is flagged.
+    const teamPaceTarget = paceTarget * rows.length;
+    const teamPace = teamPaceTarget ? totLogged / teamPaceTarget * 100 : 0;
     const summary = summaryBar([
       { n: h2(totLogged) + ' h', l: 'Hours logged' },
       { n: rows.length, l: 'People' },
       { n: h2(rows.length ? totLogged / rows.length : 0) + ' h', l: 'Avg per person' },
       { n: (teamCap ? (totLogged / teamCap * 100).toFixed(0) : '0') + '%', l: 'Of team capacity' },
+      { n: wp.pct.toFixed(0) + '%', l: 'Of work month elapsed' },
+      { n: `${wp.elapsed} of ${wp.total}`, l: 'Work days used' },
+      { n: wp.left, l: 'Work days left' },
+      { n: h2(paceTarget) + ' h', l: 'Target by today' },
+      { n: teamPaceTarget ? teamPace.toFixed(0) + '%' : '—', l: 'Team pace', neg: teamPaceTarget > 0 && teamPace < 100 },
     ]);
     view.innerHTML = summary + rangePicker() + '<div class="chart-box"><canvas id="chart"></canvas></div>';
     wireRangeSel();
@@ -2050,9 +2161,17 @@ async function renderDashboard() {
                        ticks: { callback: (v, i) => [labels[i], h2(totals[i]) + ' h'] } },
                   y: { beginAtZero: true, suggestedMax: Math.max(cap * 1.1, ...totals, 1),
                        title: { display: true, text: 'Hours logged' }, ticks: { callback: v => h2(v) } } },
-        plugins: { legend: { display: false }, capLine: { value: cap },
+        // The pace line only means something mid-range: before it opens there is nothing to
+        // expect yet, and once it has closed the pace target is just the target.
+        plugins: { legend: { display: false },
+          capLine: { value: cap,
+            pace: (wp.pct > 0 && wp.pct < 100) ? paceTarget : null,
+            paceLabel: `${h2(paceTarget)} h by today · ${wp.pct.toFixed(0)}% of work month` },
           tooltip: { callbacks: {
-            label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)` } } } }
+            label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)`,
+            afterLabel: ctx => paceTarget
+              ? `Target by today ${h2(paceTarget)} h · ${(ctx.parsed.y / paceTarget * 100).toFixed(0)}% of pace`
+              : '' } } } }
     });
     // One donut per person under the bars: which projects they logged their hours against.
     const pc = projPersonCache[key] || {};
@@ -2245,17 +2364,29 @@ async function renderDashboard() {
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
       juneData = j;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
+    await mePromise;   // so Daily Log knows who "you" are before it picks its default assignee
     if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual'].includes(dashTab)) renderTab();
   }
+
+  // Who owns the token, resolved once at startup and awaited before any render that could
+  // apply a "you" default. A failure here is not worth an error banner — the filters simply
+  // open on everyone — so it resolves to null instead of rejecting.
+  const mePromise = fetch('/api/me').then(r => r.json())
+    .then(j => { currentUser = (j && j.name) || null; })
+    .catch(() => { currentUser = null; });
 
   async function loadAll(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     const q = refresh ? '?refresh=1' : '';
     try {
+      // First paint only needs the estimated side — the dashboard always opens on Team
+      // Capacity · Estimated. The logged-hours pull starts here in parallel but is deliberately
+      // NOT awaited: it is the slower half, and it re-renders the Actual tabs itself when it
+      // lands, so waiting on it would only delay the page the user is actually looking at.
+      loadJune(refresh);
       const [e, grp] = await Promise.all([
         fetch('/api/projects' + q).then(r => r.json()),
         groupsConfig ? Promise.resolve(groupsConfig) : fetch('/api/groups').then(r => r.json()),
-        loadJune(refresh),
       ]);
       estData = e; groupsConfig = grp;
       // Team load derives from the per-project detail that /api/projects just (re)built,
@@ -2292,25 +2423,49 @@ async function renderDetail(gid) {
   const btn = document.getElementById('refresh');
   let detailData = null;
 
+  // This page is a drill-in from Projects · Estimated, so it reads that tab's filters rather
+  // than starting fresh: the status checkboxes and "Exclude Unassigned". Both are module-level
+  // and hash routing never reloads the page, so they survive the navigation.
+  const estStatusOn = s => !estStatusFilter || estStatusFilter.has(s);
+  const estKept = t => estStatusOn(t.section || NO_STATUS);
+  const estFilterNote = () =>
+    (estStatusFilter ? ` · status: ${[...estStatusFilter].join(', ')}` : '') +
+    (estHideUnassigned ? ' · Unassigned excluded' : '');
+
   function showChart() {
     const d = detailData;
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:d.name}]);
+    // Re-aggregate per assignee from the task rows rather than using the payload's precomputed
+    // totals, so the status filter can be applied on the way — a filtered bar here then equals
+    // that person's slice of the bar clicked on Projects · Estimated. A subtask takes its
+    // parent's status column, exactly as the dashboard chart treats it.
+    const agg = {};
+    const add = (name, est, act) => {
+      const a = agg[name] || (agg[name] = { est: 0, act: 0, count: 0 });
+      a.est += est || 0; a.act += act || 0; a.count += 1;
+    };
+    d.tasks.filter(estKept).forEach(t => {
+      add(t.assignee, t.hours, t.actual);
+      t.subtasks.forEach(s => add(s.assignee, s.hours, s.actual));
+    });
     // Bars are REMAINING hours (estimated − time already tracked), the same measure as the
     // Projects · Estimated chart this page is clicked from, sorted most-remaining-first.
     // Over-run people would push the axis below zero, so bars floor at 0 and the true numbers
     // stay in the tooltip and the task table.
-    // Honors the Projects · Estimated tab's "Exclude Unassigned" checkbox, so drilling into a
-    // project shows the same set of people the bar you clicked was stacked from.
-    const people = d.labels.map((name, i) => ({ name, est: d.hours[i],
-      act: (d.actual_hours || [])[i] || 0, count: d.counts[i] }))
-      .filter(p => !(estHideUnassigned && p.name === 'Unassigned'))
-      .map(p => ({ ...p, rem: r2(p.est - p.act) }))
+    const people = Object.entries(agg)
+      .filter(([name]) => !(estHideUnassigned && name === 'Unassigned'))
+      .map(([name, a]) => ({ name, est: r2(a.est), act: r2(a.act), count: a.count, rem: r2(a.est - a.act) }))
       .sort((a, b) => b.rem - a.rem);
     const labels = people.map(p => p.name), rem = people.map(p => p.rem);
     const barHours = rem.map(h => Math.max(0, h));
+    destroyCharts();
+    if (!people.length) {
+      document.getElementById('view').innerHTML =
+        noteBox('No tasks match the filters carried over from the Bar Chart' + estFilterNote() + '.');
+      return;
+    }
     document.getElementById('view').innerHTML =
       '<div class="chart-box"><canvas id="chart"></canvas></div>';
-    destroyCharts();
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
       data:{ labels, datasets:[{ label:'Remaining hours', data:barHours,
@@ -2330,7 +2485,8 @@ async function renderDetail(gid) {
   function showTasks(assignee) {
     destroyCharts();
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:detailData.name, fn:showChart}, {label:assignee}]);
-    const all = detailData.tasks;
+    // Same status filter the chart is showing, so this table adds up to the clicked bar.
+    const all = detailData.tasks.filter(estKept);
     // Est / actual / remaining per row, so the column of remaining hours adds up to the bar.
     let rows = '', totEst = 0, totAct = 0, items = 0;
     const remCell = (est, act) => `<td class="hours">${h2(r2(est - act))} h</td>`;
@@ -2370,7 +2526,7 @@ async function renderDetail(gid) {
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(assignee)}</h2>
        </div>
-       <p class="drill-total">${plural(items, 'item')} · ${h2(r2(totEst - totAct))} h remaining · ${h2(totEst)} est − ${h2(totAct)} actual (excludes Completed)</p>
+       <p class="drill-total">${plural(items, 'item')} · ${h2(r2(totEst - totAct))} h remaining · ${h2(totEst)} est − ${h2(totAct)} actual (excludes Completed)${esc(estFilterNote())}</p>
        <table class="tasks">
          <thead><tr><th>Task / Subtask</th><th>Type / Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
@@ -2385,7 +2541,7 @@ async function renderDetail(gid) {
       document.getElementById('page-title').textContent = detailData.name;
       document.getElementById('sub').textContent =
         `Remaining estimated hours per assignee (estimated − time tracked) · ${plural(detailData.ntasks, 'task')} (excludes Completed)` +
-        (estHideUnassigned ? ' · Unassigned excluded' : '');
+        estFilterNote();
       document.getElementById('dash-updated').textContent = detailData.updated ? ('Updated ' + detailData.updated) : '';
       showChart();
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
@@ -2527,6 +2683,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, get_assignee_load(refresh=refresh))
             if path == "/api/groups":
                 return self._json(200, GROUPS)
+            if path == "/api/me":
+                return self._json(200, get_me(refresh=refresh))
             if path.startswith("/api/june/"):
                 gid = path.rsplit("/", 1)[-1]
                 return self._json(200, get_june_detail(gid, refresh=refresh, start=start, end=end))
