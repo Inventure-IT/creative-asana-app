@@ -257,28 +257,24 @@ function fetchTree(gid, refresh){
   })());
 }
 
-// Mirrors build_task. A completed subtask (checked off or in an excluded column) gets no row
-// of its own, but if it carried no estimate it was work covered by the parent's estimate — so
-// its logged time rolls into the parent's actual and burns the parent down, same as an
-// unestimated live subtask does via subBurn(). A separately estimated subtask is its own
-// budget: once it's done, both its halves drop out entirely.
+// Mirrors build_task. A completed subtask (checked off or in an excluded column) that carried
+// no estimate of its own was work covered by the parent's estimate, so it stays on the list —
+// flagged `done` so it renders greyed out — and its logged hours burn the parent down, exactly
+// like an unestimated live subtask does via subBurn(). A separately estimated subtask is its
+// own closed budget: once it's done, both of its halves drop out and it isn't listed.
 function buildTask(t, gid, children){
   const subs = [];
-  let parentAct = actualMinutes(t);
   for (const s of children){
     const m = taskMinutes(s);
-    if (s.completed || isExcluded(s, gid)){
-      if (!m) parentAct += actualMinutes(s);
-      continue;
-    }
+    const done = !!s.completed || isExcluded(s, gid);
+    if (done && m) continue;
     subs.push({ name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
       hours: round2(m / 60), actual: round2(actualMinutes(s) / 60),
       // the subtask's OWN status column; '' when it isn't a member of the project
-      section: sectionName(s, gid) });
+      section: sectionName(s, gid), done });
   }
   return { gid: t.gid, name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
-    // actual = parent's own tracked time plus finished unestimated subtask work it covered
-    hours: round2(taskMinutes(t) / 60), actual: round2(parentAct / 60), section: sectionName(t, gid), subtasks: subs };
+    hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: sectionName(t, gid), subtasks: subs };
 }
 
 async function projectDetail(gid, refresh){
@@ -326,7 +322,8 @@ async function getSummaries(refresh){
 }
 // Time logged on `name`'s subtasks of `t` that carry no estimate of their own. An unestimated
 // subtask is work covered by the parent's estimate, so its logged hours burn the parent task
-// down instead of showing as a negative remainder on the subtask's own row. Mirrors sub_burn().
+// down instead of showing as a negative remainder on the subtask's own row — completed ones
+// included, since finished work is what should come off the parent's remaining. Mirrors sub_burn().
 function subBurn(t, name){
   return sum(t.subtasks.filter(s => s.assignee === name && !s.hours).map(s => s.actual));
 }
@@ -336,13 +333,14 @@ function assigneeProjectTasks(d, name){
   for (const t of d.tasks){
     if (t.assignee === name)
       rows.push({ name: t.name, type: 'task', status: t.section, estimated: t.hours, actual: t.actual,
-        remaining: round2(t.hours - t.actual - subBurn(t, name)), context: '' });
+        remaining: round2(t.hours - t.actual - subBurn(t, name)), context: '', done: false });
     for (const s of t.subtasks){
       if (s.assignee === name)
         rows.push({ name: s.name, type: 'subtask', status: s.section, estimated: s.hours, actual: s.actual,
           // zero when it has no estimate of its own AND the parent row above is this person's
           remaining: (!s.hours && t.assignee === name) ? 0 : round2(s.hours - s.actual),
-          context: t.assignee === name ? '' : `under "${t.name}" · ${t.assignee}` });
+          context: t.assignee === name ? '' : `under "${t.name}" · ${t.assignee}`,
+          done: s.done });   // finished work, kept on the list but greyed out
     }
   }
   return rows;

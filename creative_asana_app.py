@@ -1178,8 +1178,13 @@ PAGE = r"""<!DOCTYPE html>
   table.daylog tbody tr:first-child td { border-top:0; }
   .proj-toggle { display:inline-flex; align-items:center; gap:8px; cursor:pointer; }
   .proj-toggle input { cursor:pointer; margin:0; flex:0 0 auto; }
+  /* A finished subtask still on the list because its hours burn its parent down: struck
+     through and dimmed, so it reads as "already done" and not as outstanding work. */
+  table.tasks tr.done td { color:var(--faint); }
+  table.tasks tr.done .sub-name { text-decoration:line-through; text-decoration-color:var(--border); }
   .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; background:var(--panel2); color:var(--text); }
   .badge.none { color:var(--faint); }   /* the "No status" placeholder badge */
+  .badge.done { color:var(--green); }   /* the "Completed" marker on a finished subtask */
   .sub-name { padding-left:22px; position:relative; }
   .sub-name::before { content:'↳'; position:absolute; left:6px; color:#5a616b; }
   /* Nesting steps for rows in the breakdown tables: .lvl1 is a task under its project
@@ -2628,9 +2633,12 @@ async function renderDashboard() {
         body += tasks.map(t => {
           const ctx = t.context ? ` <span class="muted">(${esc(t.context)})</span>` : '';
           const cls = t.type === 'subtask' ? 'sub-name lvl2' : 'lvl1';
-          return `<tr class="sub"><td class="${cls}">${esc(t.name)}${ctx}</td>` +
-            `<td>${t.status ? `<span class="badge">${esc(t.status)}</span>`
-                             : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
+          // A done row is finished work whose hours already came off the parent's remaining;
+          // it says so in the status cell instead of its (now moot) column.
+          return `<tr class="sub${t.done ? ' done' : ''}"><td class="${cls}">${esc(t.name)}${ctx}</td>` +
+            `<td>${t.done ? '<span class="badge done">Completed</span>'
+                          : t.status ? `<span class="badge">${esc(t.status)}</span>`
+                                     : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
             `<td class="hours">${h2(t.estimated)} h</td>` +
             `<td class="hours">${h2(t.actual)} h</td>` +
             `<td class="hours">${h2(t.remaining)} h</td></tr>`;
@@ -3098,9 +3106,10 @@ async function renderDetail(gid) {
       totEst += s.hours; totAct += s.actual || 0; items++;
       // A subtask's own status column when it has one (never the parent's); otherwise the
       // cell falls back to stating what the row is.
-      return `<tr class="sub"><td class="sub-name">${esc(s.name)}${context}</td>` +
-        `<td>${s.section ? `<span class="badge">${esc(s.section)}</span>`
-                         : '<span class="badge none">Subtask</span>'}</td>` +
+      return `<tr class="sub${s.done ? ' done' : ''}"><td class="sub-name">${esc(s.name)}${context}</td>` +
+        `<td>${s.done ? '<span class="badge done">Completed</span>'
+                      : s.section ? `<span class="badge">${esc(s.section)}</span>`
+                                  : '<span class="badge none">Subtask</span>'}</td>` +
         `<td class="hours">${s.hours ? h2(s.hours) + ' h' : '—'}</td>` +
         `<td class="hours">${s.actual ? h2(s.actual) + ' h' : '—'}</td>` +
         remCell(burned ? 0 : s.hours - (s.actual || 0)) + '</tr>';
@@ -3133,7 +3142,7 @@ async function renderDetail(gid) {
          <button class="btn back" id="tochart">← Back to chart</button>
          <h2>${esc(assignee)}</h2>
        </div>
-       <p class="drill-total">${plural(items, 'item')} · ${h2(r2(totEst - totAct))} h remaining · ${h2(totEst)} est − ${h2(totAct)} actual (excludes Completed)${esc(estFilterNote())}</p>
+       <p class="drill-total">${plural(items, 'item')} · ${h2(r2(totEst - totAct))} h remaining · ${h2(totEst)} est − ${h2(totAct)} actual (excludes Completed tasks)${esc(estFilterNote())}</p>
        <table class="tasks">
          <thead><tr><th>Task / Subtask</th><th>Type / Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
@@ -3147,7 +3156,7 @@ async function renderDetail(gid) {
       detailData = await (await fetch('/api/project/' + gid + (refresh ? '?refresh=1' : ''))).json();
       document.getElementById('page-title').textContent = detailData.name;
       document.getElementById('sub').textContent =
-        `Remaining estimated hours per assignee (estimated − time tracked) · ${plural(detailData.ntasks, 'task')} (excludes Completed)` +
+        `Remaining estimated hours per assignee (estimated − time tracked) · ${plural(detailData.ntasks, 'task')} (excludes Completed tasks)` +
         estFilterNote();
       document.getElementById('dash-updated').textContent = detailData.updated ? ('Updated ' + detailData.updated) : '';
       showChart();
