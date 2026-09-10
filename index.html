@@ -490,18 +490,28 @@ function fetchTree(gid, refresh){
   })());
 }
 
+// Mirrors build_task. A completed subtask (checked off or in an excluded column) gets no row
+// of its own, but if it carried no estimate it was work covered by the parent's estimate — so
+// its logged time rolls into the parent's actual and burns the parent down, same as an
+// unestimated live subtask does via subBurn(). A separately estimated subtask is its own
+// budget: once it's done, both its halves drop out entirely.
 function buildTask(t, gid, children){
   const subs = [];
+  let parentAct = actualMinutes(t);
   for (const s of children){
-    // completed subtasks (checked off or in an excluded column) don't count
-    if (s.completed || isExcluded(s, gid)) continue;
+    const m = taskMinutes(s);
+    if (s.completed || isExcluded(s, gid)){
+      if (!m) parentAct += actualMinutes(s);
+      continue;
+    }
     subs.push({ name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
-      hours: round2(taskMinutes(s) / 60), actual: round2(actualMinutes(s) / 60),
+      hours: round2(m / 60), actual: round2(actualMinutes(s) / 60),
       // the subtask's OWN status column; '' when it isn't a member of the project
       section: sectionName(s, gid) });
   }
   return { gid: t.gid, name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
-    hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: sectionName(t, gid), subtasks: subs };
+    // actual = parent's own tracked time plus finished unestimated subtask work it covered
+    hours: round2(taskMinutes(t) / 60), actual: round2(parentAct / 60), section: sectionName(t, gid), subtasks: subs };
 }
 
 async function projectDetail(gid, refresh){

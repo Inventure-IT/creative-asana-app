@@ -526,13 +526,22 @@ def build_task(t, gid, children):
     """Shape one task plus its (incomplete) subtasks for the drill-down list.
 
     `children` comes from the shared project tree, so this makes no API calls of its own.
+
+    A completed subtask (checked off or parked in an excluded column) gets no row of its
+    own, but if it carried no estimate it was work covered by the parent's estimate — so
+    its logged time rolls into the parent's actual and burns the parent down, same as an
+    unestimated live subtask does via sub_burn(). A separately estimated subtask is its
+    own budget: once it's done, both its halves drop out entirely.
     """
     parent_min = task_minutes(t)
+    parent_act = actual_minutes(t)
     subs, sub_min = [], 0
     for s in children:
-        if s.get("completed") or is_excluded(s, gid):
-            continue  # completed subtasks (checked off or in an excluded column) don't count
         m = task_minutes(s)
+        if s.get("completed") or is_excluded(s, gid):
+            if not m:
+                parent_act += actual_minutes(s)
+            continue
         sub_min += m
         subs.append({
             "name": s.get("name", "(untitled)"),
@@ -547,7 +556,8 @@ def build_task(t, gid, children):
         "name": t.get("name", "(untitled)"),
         "assignee": (t.get("assignee") or {}).get("name") or "Unassigned",
         "hours": round(parent_min / 60, 2),   # parent's own estimate (attributed to parent assignee)
-        "actual": round(actual_minutes(t) / 60, 2),   # parent's own tracked time
+        # parent's own tracked time, plus finished unestimated subtask work it covered
+        "actual": round(parent_act / 60, 2),
         "section": section_name(t, gid),
         "subtasks": subs,                     # each subtask attributed to its own assignee
     }
