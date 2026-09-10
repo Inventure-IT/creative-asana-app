@@ -527,22 +527,22 @@ def build_task(t, gid, children):
 
     `children` comes from the shared project tree, so this makes no API calls of its own.
 
-    A completed subtask (checked off or parked in an excluded column) gets no row of its
-    own, but if it carried no estimate it was work covered by the parent's estimate — so
-    its logged time rolls into the parent's actual and burns the parent down, same as an
-    unestimated live subtask does via sub_burn(). A separately estimated subtask is its
-    own budget: once it's done, both its halves drop out entirely.
+    A completed subtask (checked off or parked in an excluded column) that carried no
+    estimate of its own was work covered by the parent's estimate, so it stays on the
+    list — flagged `done` so it renders greyed out — and its logged hours burn the parent
+    down, exactly like an unestimated live subtask does via sub_burn(). A separately
+    estimated subtask is its own closed budget: once it's done, both of its halves drop
+    out entirely and it isn't listed.
     """
     parent_min = task_minutes(t)
-    parent_act = actual_minutes(t)
     subs, sub_min = [], 0
     for s in children:
         m = task_minutes(s)
-        if s.get("completed") or is_excluded(s, gid):
-            if not m:
-                parent_act += actual_minutes(s)
+        done = bool(s.get("completed")) or is_excluded(s, gid)
+        if done and m:
             continue
-        sub_min += m
+        if not done:
+            sub_min += m
         subs.append({
             "name": s.get("name", "(untitled)"),
             "assignee": (s.get("assignee") or {}).get("name") or "Unassigned",
@@ -550,14 +550,14 @@ def build_task(t, gid, children):
             "actual": round(actual_minutes(s) / 60, 2),
             # the subtask's OWN status column; '' when it isn't a member of the project
             "section": section_name(s, gid),
+            "done": done,
         })
     return {
         "gid": t["gid"],
         "name": t.get("name", "(untitled)"),
         "assignee": (t.get("assignee") or {}).get("name") or "Unassigned",
         "hours": round(parent_min / 60, 2),   # parent's own estimate (attributed to parent assignee)
-        # parent's own tracked time, plus finished unestimated subtask work it covered
-        "actual": round(parent_act / 60, 2),
+        "actual": round(actual_minutes(t) / 60, 2),   # parent's own tracked time
         "section": section_name(t, gid),
         "subtasks": subs,                     # each subtask attributed to its own assignee
     }
@@ -648,8 +648,10 @@ def sub_burn(t, name):
     """Time logged on `name`'s subtasks of `t` that carry no estimate of their own.
     An unestimated subtask is work covered by the parent's estimate, so its logged
     hours burn the parent task down instead of showing as a negative remainder on
-    the subtask's own row. Subtasks that were estimated separately stay their own
-    bucket. Either way the rows still sum to (estimated − actual) for the person."""
+    the subtask's own row — completed ones very much included, since finished work
+    is exactly what should come off the parent's remaining hours. Subtasks that were
+    estimated separately stay their own bucket. Either way the rows still sum to
+    (estimated − actual) for the person."""
     return sum(s["actual"] for s in t["subtasks"]
                if s["assignee"] == name and not s["hours"])
 
@@ -664,7 +666,7 @@ def assignee_project_tasks(d, name):
                 "name": t["name"], "type": "task", "status": t["section"],
                 "estimated": t["hours"], "actual": t["actual"],
                 "remaining": round(t["hours"] - t["actual"] - sub_burn(t, name), 2),
-                "context": "",
+                "context": "", "done": False,   # completed parents never reach here
             })
         for s in t["subtasks"]:
             if s["assignee"] == name:
@@ -675,6 +677,7 @@ def assignee_project_tasks(d, name):
                     # this person's, i.e. its hours were burned down against that estimate
                     "remaining": 0.0 if (not s["hours"] and t["assignee"] == name)
                                  else round(s["hours"] - s["actual"], 2),
+                    "done": s["done"],   # finished work, kept on the list but greyed out
                     # note the parent when this subtask lives under someone else's task
                     "context": "" if t["assignee"] == name else f'under "{t["name"]}" · {t["assignee"]}',
                 })
