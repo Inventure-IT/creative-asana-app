@@ -52,6 +52,7 @@ PROJECTS = [
     {"gid": "1216208009045309", "name": "Marsh and Main"},
     {"gid": "1217239377209835", "name": "Sales"},
     {"gid": "1217194342869306", "name": "St. Patrick's Day"},
+    {"gid": "1219066223453162", "name": "The Recreational Group: Thatch"},
 ]
 
 # Budget groups: several projects that share ONE combined monthly capacity.
