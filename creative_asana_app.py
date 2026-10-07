@@ -69,7 +69,7 @@ GROUPS = [
         "1214228966572526",   # CMD: Products
         "1216154609521581",   # NuNu
     ]},
-    {"name": "Cohen's Retreat + Camellia Fest", "cap": 40, "gids": [
+    {"name": "Cohen's + Camellia Fest", "cap": 40, "gids": [
         "1214228966572546",   # Cohen's Retreat MSA
         "1214228966572551",   # Savannah Camellia Fest 2027
     ]},
