@@ -63,7 +63,7 @@ PROJECTS = [
 # logged hours against `cap`). Members are referenced by project gid. A group's card is
 # a normal grid card unless `"wide": True`, which stretches it across the whole row.
 GROUPS = [
-    {"name": "CMD", "cap": 244, "wide": True, "gids": [
+    {"name": "CMD", "cap": 244, "gids": [
         "1214228966572536",   # CMD: Concierge Clinics
         "1214228966572531",   # CMD: Pathologic
         "1214228966572526",   # CMD: Products
