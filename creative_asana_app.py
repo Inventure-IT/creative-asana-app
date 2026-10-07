@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PROJECTS = [
     {"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70},
     {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38},
-    {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40},
+    {"gid": "1214228966572546", "name": "Cohen's Retreat MSA"},
     {"gid": "1216989200658405", "name": "My Pest Solutions SEO", "cap": 4},
     {"gid": "1214228966572508", "name": "Firebird MSA"},
     {"gid": "1214228966572503", "name": "Myrick Marine"},
@@ -67,6 +67,10 @@ GROUPS = [
         "1214228966572531",   # CMD: Pathologic
         "1214228966572526",   # CMD: Products
         "1216154609521581",   # NuNu
+    ]},
+    {"name": "Cohen's Retreat + Camellia Fest", "cap": 40, "gids": [
+        "1214228966572546",   # Cohen's Retreat MSA
+        "1214228966572551",   # Savannah Camellia Fest 2027
     ]},
 ]
 
