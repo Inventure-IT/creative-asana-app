@@ -125,6 +125,9 @@
   .card.logged .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
   /* MSA/capacity cards: lighter panel + brighter border so they stand out at the top of the list */
   .card.cap { background:var(--panel2); border-color:#5c6b86; }
+  /* Cap cards vary a lot in height (buckets list their members), so size each to its content
+     rather than stretching a short standalone card to match a bucket beside it. */
+  .grid.cap-grid { align-items:start; }
   /* A project (or bucket) that has spent its whole monthly budget: gold tint, so "no hours
      left" is visible from the grid without reading a single number. */
   .card.at-cap, .card.cap.at-cap { background:var(--amber-tint); border-color:var(--amber-line); }
@@ -2500,7 +2503,7 @@ async function renderDashboard() {
           if (hasCap) {
             view.insertAdjacentHTML('beforeend', '<h2 class="section-h flush">MSA projects · monthly capacity</h2>');
             const capGrid = document.createElement('div');
-            capGrid.className = 'grid';
+            capGrid.className = 'grid cap-grid';
             groups.forEach(g => { const c = groupCard(g); c.classList.add('cap'); capGrid.appendChild(c); });
             standalone.forEach(w => { const c = capCard(w); c.classList.add('cap'); capGrid.appendChild(c); });
             view.appendChild(capGrid);
