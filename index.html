@@ -125,9 +125,12 @@
   .card.logged .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
   /* MSA/capacity cards: lighter panel + brighter border so they stand out at the top of the list */
   .card.cap { background:var(--panel2); border-color:#5c6b86; }
-  /* Cap cards vary a lot in height (buckets list their members), so size each to its content
-     rather than stretching a short standalone card to match a bucket beside it. */
+  /* Standalone cap cards size to their content rather than stretching to match a bucket beside
+     them. Bucket cards do stretch, so neighbouring buckets line up, with the "Open bucket" link
+     pinned to the bottom of the card. */
   .grid.cap-grid { align-items:start; }
+  .grid.cap-grid .grp-card { align-self:stretch; display:flex; flex-direction:column; }
+  .grid.cap-grid .grp-card .go { margin-top:auto; padding-top:14px; }
   /* A project (or bucket) that has spent its whole monthly budget: gold tint, so "no hours
      left" is visible from the grid without reading a single number. */
   .card.at-cap, .card.cap.at-cap { background:var(--amber-tint); border-color:var(--amber-line); }
