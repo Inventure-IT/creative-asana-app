@@ -60,9 +60,10 @@ PROJECTS = [
 # Budget groups: several projects that share ONE combined monthly capacity.
 # Each member project still appears individually in every other tab; the group only
 # adds a single combined bucket to the Monthly Capacity tab (summing its members'
-# logged hours against `cap`). Members are referenced by project gid.
+# logged hours against `cap`). Members are referenced by project gid. A group's card is
+# a normal grid card unless `"wide": True`, which stretches it across the whole row.
 GROUPS = [
-    {"name": "CMD", "cap": 244, "gids": [
+    {"name": "CMD", "cap": 244, "wide": True, "gids": [
         "1214228966572536",   # CMD: Concierge Clinics
         "1214228966572531",   # CMD: Pathologic
         "1214228966572526",   # CMD: Products
@@ -1095,7 +1096,7 @@ PAGE = r"""<!DOCTYPE html>
   .card.at-cap, .card.cap.at-cap { background:var(--amber-tint); border-color:var(--amber-line); }
   .card.at-cap:hover { border-color:var(--amber); }
   .card.at-cap .grp-row:hover { background:#3a3427; }
-  .grp-card { grid-column: 1 / -1; }   /* combined buckets (e.g. CMD) span the whole row */
+  .grp-card.wide { grid-column: 1 / -1; }   /* `wide` buckets (e.g. CMD) span the whole row */
   /* combined budget-group card: per-project breakdown rows */
   .grp-tag { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.05em;
              color:var(--muted); background:var(--panel2); border-radius:8px; padding:2px 7px; vertical-align:middle; }
@@ -1831,7 +1832,7 @@ function capCard(w) {
 function buildGroupSummary(g, jd) {
   const members = g.gids.map(gid => jd.find(w => w.gid === gid)).filter(Boolean);
   return {
-    name: g.name, cap: g.cap, members,
+    name: g.name, cap: g.cap, wide: !!g.wide, members,
     hours: members.reduce((a, w) => a + (w.hours || 0), 0),
     nentries: members.reduce((a, w) => a + (w.nentries || 0), 0),
     updated: members.length ? members[0].updated : '',
@@ -1843,7 +1844,7 @@ function groupCard(g) {
   const used = Number(g.hours || 0), cap = Number(g.cap || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
-  c.className = 'card logged grp-card' + (atCapacity(used, cap) ? ' at-cap' : '');
+  c.className = 'card logged grp-card' + (g.wide ? ' wide' : '') + (atCapacity(used, cap) ? ' at-cap' : '');
   const rows = g.members.map(m =>
     `<div class="grp-row" data-gid="${m.gid}" title="Open ${esc(m.name)}">
        <span class="grp-name">${esc(m.name)}</span>

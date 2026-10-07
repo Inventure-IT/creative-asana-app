@@ -130,7 +130,7 @@
   .card.at-cap, .card.cap.at-cap { background:var(--amber-tint); border-color:var(--amber-line); }
   .card.at-cap:hover { border-color:var(--amber); }
   .card.at-cap .grp-row:hover { background:#3a3427; }
-  .grp-card { grid-column: 1 / -1; }   /* combined buckets (e.g. CMD) span the whole row */
+  .grp-card.wide { grid-column: 1 / -1; }   /* `wide` buckets (e.g. CMD) span the whole row */
   /* combined budget-group card: per-project breakdown rows */
   .grp-tag { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.05em;
              color:var(--muted); background:var(--panel2); border-radius:8px; padding:2px 7px; vertical-align:middle; }
@@ -281,7 +281,7 @@ const EST_PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market 
 // Archived project gids (see ARCHIVED_GIDS in creative_asana_app.py). The UI script reads
 // this, so the local app's boot script injects it too.
 const ARCHIVED_GIDS = ["1214228966572503", "1214228966572508", "1214228966572568", "1214228966572573", "1214228966572578", "1214755322546416", "1216640931651593"];
-const GROUPS = [{"name": "CMD", "cap": 244, "gids": ["1214228966572536", "1214228966572531", "1214228966572526", "1216154609521581"]}, {"name": "Cohen's Retreat + Camellia Fest", "cap": 40, "gids": ["1214228966572546", "1214228966572551"]}];
+const GROUPS = [{"name": "CMD", "cap": 244, "wide": true, "gids": ["1214228966572536", "1214228966572531", "1214228966572526", "1216154609521581"]}, {"name": "Cohen's Retreat + Camellia Fest", "cap": 40, "gids": ["1214228966572546", "1214228966572551"]}];
 const DEF_START = "2026-06-01", DEF_END = "2026-06-30";
 const PROJECT_ROSTER = PROJECTS.map(p => p.name);
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
@@ -1420,7 +1420,7 @@ function capCard(w) {
 function buildGroupSummary(g, jd) {
   const members = g.gids.map(gid => jd.find(w => w.gid === gid)).filter(Boolean);
   return {
-    name: g.name, cap: g.cap, members,
+    name: g.name, cap: g.cap, wide: !!g.wide, members,
     hours: members.reduce((a, w) => a + (w.hours || 0), 0),
     nentries: members.reduce((a, w) => a + (w.nentries || 0), 0),
     updated: members.length ? members[0].updated : '',
@@ -1432,7 +1432,7 @@ function groupCard(g) {
   const used = Number(g.hours || 0), cap = Number(g.cap || 0);
   const remaining = cap - used;
   const c = document.createElement('div');
-  c.className = 'card logged grp-card' + (atCapacity(used, cap) ? ' at-cap' : '');
+  c.className = 'card logged grp-card' + (g.wide ? ' wide' : '') + (atCapacity(used, cap) ? ' at-cap' : '');
   const rows = g.members.map(m =>
     `<div class="grp-row" data-gid="${m.gid}" title="Open ${esc(m.name)}">
        <span class="grp-name">${esc(m.name)}</span>
