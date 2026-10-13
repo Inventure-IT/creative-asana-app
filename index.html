@@ -2223,12 +2223,11 @@ async function renderDashboard() {
     const filterNote = teamStatusFilter
       ? ` · status: ${[...teamStatusFilter].join(', ')}` : '';
     // Each project is a bold header row, with that person's tasks/subtasks listed beneath it.
-    // Over-run rows show 0.00 remaining rather than a negative number.
     let rows = rows_.map(r => {
       let body = `<tr class="parent"><td>${esc(r.project)}</td><td></td>` +
         `<td class="hours">${h2(r.estimated)} h</td>` +
         `<td class="hours">${h2(r.actual)} h</td>` +
-        `<td class="hours">${h2(Math.max(0, r.remaining))} h</td></tr>`;
+        `<td class="hours">${h2(r.remaining)} h</td></tr>`;
       const tasks = r.tasks || [];
       if (!tasks.length) {
         body += `<tr class="sub"><td class="sub-name" colspan="5">No tasks.</td></tr>`;
@@ -2244,7 +2243,7 @@ async function renderDashboard() {
                                      : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
             `<td class="hours">${h2(t.estimated)} h</td>` +
             `<td class="hours">${h2(t.actual)} h</td>` +
-            `<td class="hours">${h2(Math.max(0, t.remaining))} h</td></tr>`;
+            `<td class="hours">${h2(t.remaining)} h</td></tr>`;
         }).join('');
       }
       return body;
