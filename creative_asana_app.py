@@ -32,7 +32,7 @@ PROJECTS = [
     {"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70},
     {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38},
     {"gid": "1214228966572546", "name": "Cohen's Retreat MSA"},
-    {"gid": "1216989200658405", "name": "My Pest Solutions SEO", "cap": 4},
+    {"gid": "1216989200658405", "name": "My Pest Solutions SEO"},
     {"gid": "1214228966572508", "name": "Firebird MSA"},
     {"gid": "1214228966572503", "name": "Myrick Marine"},
     {"gid": "1214229029715234", "name": "Savannah Bee Company"},
