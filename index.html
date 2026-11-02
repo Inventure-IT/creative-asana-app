@@ -1579,7 +1579,7 @@ function groupCard(g) {
        <span class="grp-name">${esc(m.name)}</span>
        <span class="grp-h">${h2(m.hours)} h</span>
      </div>`).join('') || '<div class="grp-row"><span class="grp-name muted">No member data in range.</span></div>';
-  c.innerHTML = `<h3>${esc(g.name)}${g.kind ? ` <span class="grp-tag">${esc(g.kind)}</span>` : ''} <span class="grp-tag">combined bucket</span></h3>
+  c.innerHTML = `<h3>${esc(g.name)} <span class="grp-tag">combined bucket</span></h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(g.cap)}</div><div class="l">Capacity h/mo</div></div>
       <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
