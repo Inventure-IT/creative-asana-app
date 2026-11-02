@@ -303,7 +303,7 @@ async function projectDetail(gid, refresh){
     counts: ordered.map(n => counts[n]), ntasks: detailed.length, tasks: detailed, updated: nowStr() };
 }
 
-const CACHE = { summaries: null, detail: {}, logged_summaries: {}, logged_detail: {}, me: null, carve_outs: {} };
+const CACHE = { summaries: null, detail: {}, logged_summaries: {}, logged_detail: {}, me: null, carve_outs: {}, notes: {} };
 // Mirrors get_me: the display name behind the PAT, so the UI can default a filter to "you".
 // asanaGet always hands back an array, and /users/me is a single object, so take the first.
 async function getMe(refresh){
@@ -449,9 +449,10 @@ async function loggedDetail(gid, start, end, refresh){
   // Only tasks whose tracked total moved are read from Asana; the rest come from cache.
   const byGid = await entriesForTasks(Object.fromEntries(
     Object.entries(cand).map(([g, [, m]]) => [g, m])), refresh);
-  // On an unbillable board, only a carve-out's tasks (and their subtasks) are billable.
+  // On an unbillable board, only a carve-out's tasks (and their subtasks) are billable —
+  // unless that carve-out is itself marked billable: false.
   const carved = new Set();
-  for (const c of CARVE_OUTS.filter(c => c.source === gid))
+  for (const c of CARVE_OUTS.filter(c => c.source === gid && c.billable !== false))
     for (const t of carveOutHits(c, tree)){
       carved.add(t.gid);
       for (const s of tree.subs[t.gid] || []) carved.add(s.gid);
@@ -528,7 +529,14 @@ async function carveOutSummary(c, start, end){
       if ((it.actual_time_minutes || 0) > 0) minutes[it.gid] = it.actual_time_minutes;
     }
   const byGid = await entriesForTasks(minutes, false);
-  const seen = new Set(), taskMin = {}, people = {};
+  // What each entry row names: the task, or "task › subtask" for time logged to a subtask.
+  const label = {};
+  for (const t of hits){
+    const tname = t.name || '(untitled)';
+    label[t.gid] = tname;
+    for (const s of tree.subs[t.gid] || []) label[s.gid] = `${tname} › ${s.name || '(untitled)'}`;
+  }
+  const seen = new Set(), taskMin = {}, people = {}, rowsOut = [];
   let logged = 0, nentries = 0;
   for (const [g, rows] of Object.entries(byGid))
     for (const e of rows || []){
@@ -540,17 +548,32 @@ async function carveOutSummary(c, start, end){
       logged += m; nentries++;
       taskMin[owner[g]] = (taskMin[owner[g]] || 0) + m;
       people[by] = (people[by] || 0) + m;
+      rowsOut.push({ gid: e.gid, date: entered, by, task: label[g] || '', hours: round2(m / 60) });
     }
+  rowsOut.sort((x, y) => y.date.localeCompare(x.date) || y.by.localeCompare(x.by));
   // One row per matching task that is still open or had time logged in the range.
   const tasks = hits.filter(t => live[t.gid] || taskMin[t.gid]).map(t => ({
     name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
     section: sectionName(t, gid), done: !live[t.gid],
     estimated: round2(taskEst[t.gid] || 0), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
-  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match,
+  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null,
     cap: round2(est), ntasks: Object.keys(live).length, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
+    entries: rowsOut,   // newest first; notes come separately, from /api/notes
     updated: nowStr() };
+}
+// Mirrors get_entry_notes: the per-task entry list has no description, only the single-entry
+// read does, so one call per entry — asked for only by a carve-out page, cached until Refresh.
+async function getEntryNotes(gids, refresh){
+  if (refresh) CACHE.notes = {};
+  const want = [...new Set(gids)].filter(g => /^\d+$/.test(g));
+  await mapAll(want.filter(g => !(g in CACHE.notes)), async g => {
+    try { const [d] = await asanaGet(`/time_tracking_entries/${g}?opt_fields=description`);
+          CACHE.notes[g] = (d && d.description) || ''; }
+    catch (e) { /* deleted or not visible: left out, the page says so */ }
+  });
+  return Object.fromEntries(want.map(g => [g, g in CACHE.notes ? CACHE.notes[g] : null]));
 }
 async function getCarveOuts(refresh, start, end){
   const key = start + ':' + end;
@@ -571,6 +594,7 @@ async function handleApi(p){
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
   if (path === '/api/groups') return GROUPS;
   if (path === '/api/carveouts') return getCarveOuts(refresh, start, end);
+  if (path === '/api/notes') return getEntryNotes((q.get('gids') || '').split(','), refresh);
   if (path === '/api/me') return getMe(refresh);
   if (path.startsWith('/api/logged/')) return getLoggedDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);

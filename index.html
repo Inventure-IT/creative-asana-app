@@ -213,6 +213,9 @@
                    color:var(--muted); border-bottom:2px solid var(--border); padding:8px 10px; }
   table.tasks th.hours { text-align:right; }
   table.tasks td { padding:9px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+  /* A time entry's own note keeps the line breaks the person typed. */
+  table.tasks td.entry-note { white-space:pre-wrap; color:var(--muted); }
+  table.tasks td.nowrap { white-space:nowrap; }
   table.tasks tr.parent td { font-weight:600; }
   table.tasks tr.sub td { font-weight:400; color:var(--muted); }
   /* Daily Log: the date cell spans its day's rows and carries that day's total. A rule
@@ -287,8 +290,8 @@ const EST_PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market 
 // Archived project gids (see ARCHIVED_GIDS in creative_asana_app.py). The UI script reads
 // this, so the local app's boot script injects it too.
 const ARCHIVED_GIDS = ["1214228966572503", "1214228966572508", "1214228966572568", "1214228966572573", "1214228966572578", "1214755322546416", "1216640931651593"];
-const GROUPS = [{"name": "CMD", "cap": 244, "gids": ["1214228966572536", "1214228966572531", "1214228966572526", "1216154609521581"]}, {"name": "Cohen's + Camellia Fest", "cap": 40, "gids": ["1214228966572546", "1214228966572551"]}];
-const CARVE_OUTS = [{"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday"}];
+const GROUPS = [{"name": "CMD", "cap": 244, "gids": ["1214228966572536", "1214228966572531", "1214228966572526", "1216154609521581"]}, {"name": "Cohen's + Camellia Fest", "cap": 40, "gids": ["1214228966572546", "1214228966572551"]}, {"name": "Support Tickets", "cap": 40, "kind": "Support", "gids": ["1214229029715234"], "carves": ["Support Tickets"]}];
+const CARVE_OUTS = [{"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday", "billable": false}, {"name": "Support Tickets", "source": "1214228966572563", "match": "Support Tickets", "kind": "Support"}];
 const UNBILLABLE_GIDS = new Set(["1214228966572563"]);
 const DEF_START = "2026-06-01", DEF_END = "2026-06-30";
 const PROJECT_ROSTER = PROJECTS.map(p => p.name);
@@ -545,7 +548,7 @@ async function projectDetail(gid, refresh){
     counts: ordered.map(n => counts[n]), ntasks: detailed.length, tasks: detailed, updated: nowStr() };
 }
 
-const CACHE = { summaries: null, detail: {}, logged_summaries: {}, logged_detail: {}, me: null, carve_outs: {} };
+const CACHE = { summaries: null, detail: {}, logged_summaries: {}, logged_detail: {}, me: null, carve_outs: {}, notes: {} };
 // Mirrors get_me: the display name behind the PAT, so the UI can default a filter to "you".
 // asanaGet always hands back an array, and /users/me is a single object, so take the first.
 async function getMe(refresh){
@@ -691,9 +694,10 @@ async function loggedDetail(gid, start, end, refresh){
   // Only tasks whose tracked total moved are read from Asana; the rest come from cache.
   const byGid = await entriesForTasks(Object.fromEntries(
     Object.entries(cand).map(([g, [, m]]) => [g, m])), refresh);
-  // On an unbillable board, only a carve-out's tasks (and their subtasks) are billable.
+  // On an unbillable board, only a carve-out's tasks (and their subtasks) are billable —
+  // unless that carve-out is itself marked billable: false.
   const carved = new Set();
-  for (const c of CARVE_OUTS.filter(c => c.source === gid))
+  for (const c of CARVE_OUTS.filter(c => c.source === gid && c.billable !== false))
     for (const t of carveOutHits(c, tree)){
       carved.add(t.gid);
       for (const s of tree.subs[t.gid] || []) carved.add(s.gid);
@@ -770,7 +774,14 @@ async function carveOutSummary(c, start, end){
       if ((it.actual_time_minutes || 0) > 0) minutes[it.gid] = it.actual_time_minutes;
     }
   const byGid = await entriesForTasks(minutes, false);
-  const seen = new Set(), taskMin = {}, people = {};
+  // What each entry row names: the task, or "task › subtask" for time logged to a subtask.
+  const label = {};
+  for (const t of hits){
+    const tname = t.name || '(untitled)';
+    label[t.gid] = tname;
+    for (const s of tree.subs[t.gid] || []) label[s.gid] = `${tname} › ${s.name || '(untitled)'}`;
+  }
+  const seen = new Set(), taskMin = {}, people = {}, rowsOut = [];
   let logged = 0, nentries = 0;
   for (const [g, rows] of Object.entries(byGid))
     for (const e of rows || []){
@@ -782,17 +793,32 @@ async function carveOutSummary(c, start, end){
       logged += m; nentries++;
       taskMin[owner[g]] = (taskMin[owner[g]] || 0) + m;
       people[by] = (people[by] || 0) + m;
+      rowsOut.push({ gid: e.gid, date: entered, by, task: label[g] || '', hours: round2(m / 60) });
     }
+  rowsOut.sort((x, y) => y.date.localeCompare(x.date) || y.by.localeCompare(x.by));
   // One row per matching task that is still open or had time logged in the range.
   const tasks = hits.filter(t => live[t.gid] || taskMin[t.gid]).map(t => ({
     name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
     section: sectionName(t, gid), done: !live[t.gid],
     estimated: round2(taskEst[t.gid] || 0), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
-  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match,
+  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null,
     cap: round2(est), ntasks: Object.keys(live).length, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
+    entries: rowsOut,   // newest first; notes come separately, from /api/notes
     updated: nowStr() };
+}
+// Mirrors get_entry_notes: the per-task entry list has no description, only the single-entry
+// read does, so one call per entry — asked for only by a carve-out page, cached until Refresh.
+async function getEntryNotes(gids, refresh){
+  if (refresh) CACHE.notes = {};
+  const want = [...new Set(gids)].filter(g => /^\d+$/.test(g));
+  await mapAll(want.filter(g => !(g in CACHE.notes)), async g => {
+    try { const [d] = await asanaGet(`/time_tracking_entries/${g}?opt_fields=description`);
+          CACHE.notes[g] = (d && d.description) || ''; }
+    catch (e) { /* deleted or not visible: left out, the page says so */ }
+  });
+  return Object.fromEntries(want.map(g => [g, g in CACHE.notes ? CACHE.notes[g] : null]));
 }
 async function getCarveOuts(refresh, start, end){
   const key = start + ':' + end;
@@ -813,6 +839,7 @@ async function handleApi(p){
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
   if (path === '/api/groups') return GROUPS;
   if (path === '/api/carveouts') return getCarveOuts(refresh, start, end);
+  if (path === '/api/notes') return getEntryNotes((q.get('gids') || '').split(','), refresh);
   if (path === '/api/me') return getMe(refresh);
   if (path.startsWith('/api/logged/')) return getLoggedDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
@@ -1013,6 +1040,23 @@ function noteBox(text){ return `<p class="note box">${esc(text)}</p>`; }
 const LOADING = 'Loading…';
 // "1 project" / "3 projects" — used anywhere a count is read out in prose.
 function plural(n, word, wordPlural){ return `${n} ${n === 1 ? word : (wordPlural || word + 's')}`; }
+// Save rows as a .csv the browser downloads. The BOM makes Excel read it as UTF-8; numbers
+// stay plain (no " h") so the spreadsheet can sum them.
+function downloadCsv(filename, header, rows){
+  const cell = v => { const s = v == null ? '' : String(v);
+                      return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const text = [header].concat(rows).map(r => r.map(cell).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' }));
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
+}
+// Toolbar control group for a tab's spreadsheet export button.
+function exportGroup(id){
+  return `<span class="tb-group"><span class="tb-label">Export</span>` +
+         `<button class="btn" id="${id}">Download CSV</button></span>`;
+}
 // Headline stat banner shown at the top of every tab. stats: [{n, l, neg?}].
 // kind 'est' paints the numbers blue (estimated hours), anything else green (logged hours).
 function summaryBar(stats, kind){
@@ -1506,11 +1550,18 @@ function carveCard(w) {
 }
 
 // Roll up a budget group's member projects (from the current Hours-Logged data)
-// into one combined bucket: summed hours, plus the per-member rows.
-function buildGroupSummary(g, jd) {
+// into one combined bucket: summed hours, plus the per-member rows. Pass the carve-out
+// summaries to also fold in the group's `carves` (MSA Project Capacity and the group page
+// only — elsewhere those hours stay with their source board, so they'd count twice).
+function buildGroupSummary(g, jd, carves) {
   const members = g.gids.map(gid => jd.find(w => w.gid === gid)).filter(Boolean);
+  (g.carves || []).forEach(n => {
+    const w = (carves || []).find(c => c.name === n);
+    if (w) members.push({ gid: null, carve: w.name, name: `${w.name} · ${w.source_name}`,
+                          hours: w.hours, nentries: w.nentries, updated: w.updated });
+  });
   return {
-    name: g.name, cap: g.cap, wide: !!g.wide, members,
+    name: g.name, cap: g.cap, kind: g.kind, wide: !!g.wide, members,
     hours: members.reduce((a, w) => a + (w.hours || 0), 0),
     nentries: members.reduce((a, w) => a + (w.nentries || 0), 0),
     updated: members.length ? members[0].updated : '',
@@ -1524,11 +1575,11 @@ function groupCard(g) {
   const c = document.createElement('div');
   c.className = 'card logged grp-card' + (g.wide ? ' wide' : '') + (atCapacity(used, cap) ? ' at-cap' : '');
   const rows = g.members.map(m =>
-    `<div class="grp-row" data-gid="${m.gid}" title="Open ${esc(m.name)}">
+    `<div class="grp-row" data-href="${m.carve ? '#/carve/' + encodeURIComponent(m.carve) : '#/logged/' + m.gid}" title="Open ${esc(m.name)}">
        <span class="grp-name">${esc(m.name)}</span>
        <span class="grp-h">${h2(m.hours)} h</span>
      </div>`).join('') || '<div class="grp-row"><span class="grp-name muted">No member data in range.</span></div>';
-  c.innerHTML = `<h3>${esc(g.name)} <span class="grp-tag">combined bucket</span></h3>
+  c.innerHTML = `<h3>${esc(g.name)}${g.kind ? ` <span class="grp-tag">${esc(g.kind)}</span>` : ''} <span class="grp-tag">combined bucket</span></h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(g.cap)}</div><div class="l">Capacity h/mo</div></div>
       <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
@@ -1537,10 +1588,10 @@ function groupCard(g) {
     ${capBar(used, cap)}
     <div class="grp-members">${rows}</div>
     <div class="go">Open bucket · hours by project →</div>`;
-  // Each member row opens that project's own Hours-Logged detail; the card itself opens the
-  // bucket's own page, where every member project sits in one chart.
-  c.querySelectorAll('.grp-row[data-gid]').forEach(r =>
-    r.onclick = (e) => { e.stopPropagation(); location.hash = '#/logged/' + r.dataset.gid; });
+  // Each member row opens that project's own Hours-Logged detail (or a carve-out's page); the
+  // card itself opens the bucket's own page, where every member sits in one chart.
+  c.querySelectorAll('.grp-row[data-href]').forEach(r =>
+    r.onclick = (e) => { e.stopPropagation(); location.hash = r.dataset.href; });
   c.onclick = () => { location.hash = '#/grp/' + encodeURIComponent(g.name); };
   return c;
 }
@@ -2238,6 +2289,7 @@ async function renderDashboard() {
           ? '<span class="tb-sep"></span>' +
             `<label class="chk"><input type="checkbox" id="team-show-unassigned" ${teamShowUnassigned ? 'checked' : ''}>Include Unassigned</label>`
           : '') +
+        '<span class="tb-sep"></span>' + exportGroup('team-export') +
       '</div>';
     // Headline stats: what the team still has on its plate versus what it can absorb.
     const totRem = d.hours.reduce((a, h) => a + h, 0);
@@ -2256,6 +2308,19 @@ async function renderDashboard() {
     });
     const cb = document.getElementById('team-show-unassigned');
     if (cb) cb.onchange = () => { teamShowUnassigned = cb.checked; renderTeam(); };
+    // Exactly what the chart and donuts show: a total row per assignee, then their projects.
+    document.getElementById('team-export').onclick = () => {
+      const out = [];
+      rolled.forEach(x => {
+        out.push([x.name, 'All projects', h2(x.roll.estimated), h2(x.roll.actual), h2(x.roll.remaining),
+                  h2(d.cap), (x.roll.remaining / d.cap * 100).toFixed(0), x.roll.count]);
+        x.roll.projects.slice().sort((a, b) => b.remaining - a.remaining).forEach(p =>
+          out.push([x.name, p.project, h2(p.estimated), h2(p.actual), h2(p.remaining), '', '', p.tasks.length]));
+      });
+      downloadCsv('team-capacity-estimated.csv',
+        ['Assignee', 'Project', 'Estimated hours', 'Actual hours', 'Remaining hours',
+         'Monthly capacity', '% of capacity', 'Items'], out);
+    };
     destroyCharts();
     const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : capColorEst(h));
     // Someone who has tracked more time than was estimated has negative remaining hours. That
@@ -2390,7 +2455,8 @@ async function renderDashboard() {
       { n: h2(paceTarget) + ' h', l: 'Target by today' },
       { n: teamPaceTarget ? teamPace.toFixed(0) + '%' : '—', l: 'Team pace', neg: teamPaceTarget > 0 && teamPace < 100 },
     ]);
-    view.innerHTML = summary + rangePicker() + '<div class="chart-box"><canvas id="chart"></canvas></div>';
+    view.innerHTML = summary + rangePicker(rows.length ? exportGroup('team-export') : '') +
+      '<div class="chart-box"><canvas id="chart"></canvas></div>';
     wireRangeSel();
     if (!rows.length) {
       const cb = view.querySelector('.chart-box');
@@ -2441,6 +2507,25 @@ async function renderDashboard() {
     // One donut per person under the bars: which projects they logged their hours against.
     const pc = projPersonCache[key] || {};
     const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
+    // Exactly what the chart and donuts show: a total row per person, then their projects.
+    document.getElementById('team-export').onclick = () => {
+      const out = [];
+      rows.forEach(r => {
+        out.push([r.name, 'All projects', h2(r.total), h2(r.total - r.unbill), h2(r.unbill),
+                  h2(cap), (r.total / cap * 100).toFixed(0), h2(paceTarget),
+                  paceTarget ? (r.total / paceTarget * 100).toFixed(0) : '']);
+        const m = {};
+        Object.entries(pc).forEach(([gid, pm]) => {
+          const v = pm[r.name];
+          if (v > 0) { const n = nameOf[gid] || gid; m[n] = (m[n] || 0) + v; }
+        });
+        Object.entries(m).sort((a, b) => b[1] - a[1]).forEach(([proj, h]) =>
+          out.push([r.name, proj, h2(h), '', '', '', '', '', '']));
+      });
+      downloadCsv(`team-capacity-logged_${dateStart}_to_${dateEnd}.csv`,
+        ['Logged by', 'Project', 'Hours logged', 'Billable hours', 'Unbillable hours',
+         'Monthly capacity', '% of capacity', 'Target by today', '% of pace'], out);
+    };
     donutGrid(view, rows.map(r => {
       const m = {};
       Object.entries(pc).forEach(([gid, pm]) => {
@@ -2582,7 +2667,8 @@ async function renderDashboard() {
         // budget buckets first, then any standalone capped project (group members roll into
         // their bucket). Everything else that logged hours follows as plain statistics cards.
         const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
-        const groups = (groupsConfig || []).map(g => buildGroupSummary(g, loggedData))
+        const allCarves = Array.isArray(carveData) ? carveData : [];
+        const groups = (groupsConfig || []).map(g => buildGroupSummary(g, loggedData, allCarves))
                          .filter(g => g.members.length);
         const standalone = loggedData.filter(w => w.cap != null && !memberGids.has(w.gid))
                              .sort((a, b) => b.hours - a.hours);
@@ -2592,7 +2678,9 @@ async function renderDashboard() {
                          .sort((a, b) => b.hours - a.hours);
         const archived = loggedData.filter(w => isArchived(w) && w.hours > 0)
                            .sort((a, b) => b.hours - a.hours);
-        const carves = Array.isArray(carveData) ? carveData : [];
+        // A carve-out rolled into a group counts there, not on a card of its own.
+        const groupedCarves = new Set((groupsConfig || []).flatMap(g => g.carves || []));
+        const carves = allCarves.filter(w => !groupedCarves.has(w.name));
         const hasCap = groups.length || standalone.length || carves.length;
         // Headline stats cover every card in the monthly-capacity grid (carve-outs included) —
         // the budget picture in one line.
@@ -2618,14 +2706,23 @@ async function renderDashboard() {
         if (!hasCap && !others.length && !archived.length) {
           view.insertAdjacentHTML('beforeend', note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`));
         } else {
-          if (hasCap) {
-            view.insertAdjacentHTML('beforeend', '<h2 class="section-h flush">MSA projects · monthly capacity</h2>');
+          // Support engagements (kind "Support") get their own capacity section under the MSA
+          // projects; both still count in the summary bar above.
+          const capSection = (title, isSupport, flush) => {
+            const pick = w => (w.kind === 'Support') === isSupport;
+            const cards = [...groups.filter(pick).map(groupCard), ...standalone.filter(pick).map(capCard),
+                           ...carves.filter(pick).map(carveCard)];
+            if (!cards.length) return false;
+            view.insertAdjacentHTML('beforeend', `<h2 class="section-h${flush ? ' flush' : ''}">${esc(title)}</h2>`);
             const capGrid = document.createElement('div');
             capGrid.className = 'grid cap-grid';
-            groups.forEach(g => { const c = groupCard(g); c.classList.add('cap'); capGrid.appendChild(c); });
-            standalone.forEach(w => { const c = capCard(w); c.classList.add('cap'); capGrid.appendChild(c); });
-            carves.forEach(w => { const c = carveCard(w); c.classList.add('cap'); capGrid.appendChild(c); });
+            cards.forEach(c => { c.classList.add('cap'); capGrid.appendChild(c); });
             view.appendChild(capGrid);
+            return true;
+          };
+          if (hasCap) {
+            const msa = capSection('MSA projects · monthly capacity', false, true);
+            capSection('Support · monthly capacity', true, !msa);
           }
           const section = (title, rows, flush) => {
             if (!rows.length) return;
@@ -3028,7 +3125,7 @@ async function renderGroupDetail(name) {
         backgroundColor:labels.map(projectColor), borderColor:labels.map(projectColor),
         borderWidth:1, _m:members }] },
       options:{ responsive:true, maintainAspectRatio:false,
-        onClick:(evt, els) => { if (els.length) location.hash = '#/logged/' + members[els[0].index].gid; },
+        onClick:(evt, els) => { if (els.length) location.hash = memberHref(members[els[0].index]); },
         onHover:(evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
         plugins:{ legend:{display:false},
           tooltip:{ callbacks:{
@@ -3042,7 +3139,7 @@ async function renderGroupDetail(name) {
                      ticks:{ callback:v => h2(v) } } } }
     });
     const rows = members.map(m =>
-      `<tr class="parent" data-gid="${m.gid}"><td>${esc(m.name)}</td>` +
+      `<tr class="parent" data-href="${memberHref(m)}"><td>${esc(m.name)}</td>` +
       `<td class="hours">${h2(m.hours)} h</td>` +
       `<td class="hours">${used ? (m.hours / used * 100).toFixed(0) : '0'}%</td>` +
       `<td class="hours">${cap ? (m.hours / cap * 100).toFixed(0) : '0'}%</td>` +
@@ -3055,9 +3152,10 @@ async function renderGroupDetail(name) {
            <th class="hours">Entries</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>`);
-    view.querySelectorAll('tr.parent[data-gid]').forEach(r =>
-      r.onclick = () => { location.hash = '#/logged/' + r.dataset.gid; });
+    view.querySelectorAll('tr.parent[data-href]').forEach(r =>
+      r.onclick = () => { location.hash = r.dataset.href; });
   }
+  const memberHref = m => m.carve ? '#/carve/' + encodeURIComponent(m.carve) : '#/logged/' + m.gid;
 
   async function load(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
@@ -3068,16 +3166,19 @@ async function renderGroupDetail(name) {
         fetch('/api/logged' + q).then(r => r.json()),
       ]);
       const cfg = (groups || []).find(g => g.name === name);
+      // Carve-outs read the trees /api/logged just loaded, so they come after it (no extra calls).
+      const carves = cfg && (cfg.carves || []).length
+        ? await fetch('/api/carveouts' + q).then(r => r.json()) : [];
       if (!cfg) {
         setCrumbs([{label:'Dashboard', fn:toDash}, {label:name}]);
         document.getElementById('page-title').textContent = name;
         document.getElementById('view').innerHTML = note('No budget group named ' + name + '.');
         return;
       }
-      const g = buildGroupSummary(cfg, logged);
+      const g = buildGroupSummary(cfg, logged, carves);
       document.getElementById('page-title').textContent = g.name;
       document.getElementById('sub').textContent =
-        `Combined monthly bucket · ${plural(g.members.length, 'project')} · ` +
+        `Combined monthly bucket · ${plural(g.members.length, 'member')} · ` +
         `hours logged ${rangeLabel(dateStart, dateEnd)}`;
       document.getElementById('dash-updated').textContent = g.updated ? ('Updated ' + g.updated) : '';
       show(g);
@@ -3153,7 +3254,35 @@ async function renderCarveDetail(name) {
              `<td class="hours">${used ? (p.hours / used * 100).toFixed(0) : '0'}%</td></tr>`).join('')}</tbody>
          </table>`);
     }
+    // Every time entry in the range, newest first, with the note the person typed when they
+    // logged it. Asana only hands notes out one entry at a time, so they fill in after the table.
+    const entries = w.entries || [];
+    if (!entries.length) return;
+    view.insertAdjacentHTML('beforeend',
+      `<h2 class="section-h">Time entries</h2>
+       <table class="tasks" id="carve-entries">
+         <thead><tr><th>Date</th><th>Logged by</th><th>Task</th><th class="hours">Hours</th><th>Note</th></tr></thead>
+         <tbody>${entries.map(e =>
+           `<tr class="parent"><td class="nowrap">${esc(e.date)}</td><td>${esc(e.by)}</td><td>${esc(e.task)}</td>` +
+           `<td class="hours">${h2(e.hours)} h</td>` +
+           `<td class="entry-note" data-gid="${esc(e.gid || '')}">${LOADING}</td></tr>`).join('')}</tbody>
+       </table>`);
+    loadNotes(entries.map(e => e.gid).filter(Boolean));
   }
+
+  async function loadNotes(gids) {
+    let notes = {};
+    try {
+      notes = await fetch('/api/notes?gids=' + gids.join(',') + (notesRefresh ? '&refresh=1' : ''))
+        .then(r => r.json());
+    } catch (e) { notes = {}; }
+    notesRefresh = false;
+    document.querySelectorAll('#carve-entries td.entry-note').forEach(td => {
+      const n = notes[td.dataset.gid];
+      td.innerHTML = n ? esc(n) : `<span class="badge none">${n === '' ? 'No note' : 'Unavailable'}</span>`;
+    });
+  }
+  let notesRefresh = false;
 
   async function load(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
@@ -3175,6 +3304,7 @@ async function renderCarveDetail(name) {
         `Tasks on ${w.source_name} containing “${w.match}” · estimated hours (excludes Completed tasks) ` +
         `against hours logged ${rangeLabel(dateStart, dateEnd)}`;
       document.getElementById('dash-updated').textContent = w.updated ? ('Updated ' + w.updated) : '';
+      notesRefresh = refresh;
       show(w);
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
     finally { btn.disabled = false; btn.textContent = 'Refresh'; }
