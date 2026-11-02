@@ -142,7 +142,8 @@ Chart data colors come from helpers, never literals:
 - Loading and empty states go through `note()` / `noteBox()` (the latter fills a `.chart-box`)
   with the shared `LOADING` string — never a bespoke `<p class="muted">Loading…`.
 - Breadcrumbs via `setCrumbs()`. Routes are hash-based: `#/p/<gid>` (estimated detail),
-  `#/logged/<gid>` (logged-hours detail); anything else is the dashboard.
+  `#/logged/<gid>` (logged-hours detail), `#/grp/<name>` (budget group), `#/carve/<name>`
+  (carve-out: only its matching tasks); anything else is the dashboard.
 
 ### Numbers & text
 

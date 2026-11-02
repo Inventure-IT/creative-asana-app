@@ -513,26 +513,44 @@ async function carveOutSummary(c, start, end){
   const tree = await fetchTree(gid, false);
   const hits = carveOutHits(c, tree);
   // Same rules as projectDetail: checked-off tasks and excluded columns carry no estimate.
-  const live = hits.filter(t => !t.completed && !isExcluded(t, gid))
-                   .map(t => buildTask(t, gid, tree.subs[t.gid] || []));
-  const est = sum(live.map(d => d.hours + sum(d.subtasks.map(s => s.hours))));
-  // Logged time counts whether or not the task has since been finished.
-  const items = [...hits, ...hits.flatMap(t => tree.subs[t.gid] || [])];
-  const minutes = {};
-  for (const it of items) if ((it.actual_time_minutes || 0) > 0) minutes[it.gid] = it.actual_time_minutes;
+  const live = {}, taskEst = {};
+  for (const t of hits.filter(t => !t.completed && !isExcluded(t, gid))){
+    const d = live[t.gid] = buildTask(t, gid, tree.subs[t.gid] || []);
+    taskEst[t.gid] = d.hours + sum(d.subtasks.map(s => s.hours));
+  }
+  const est = sum(Object.values(taskEst));
+  // Logged time counts whether or not the task has since been finished. A subtask's time is
+  // credited to its parent's row, so the task table adds up to the card.
+  const owner = {}, minutes = {};
+  for (const t of hits)
+    for (const it of [t, ...(tree.subs[t.gid] || [])]){
+      owner[it.gid] = t.gid;
+      if ((it.actual_time_minutes || 0) > 0) minutes[it.gid] = it.actual_time_minutes;
+    }
   const byGid = await entriesForTasks(minutes, false);
-  const seen = new Set();
+  const seen = new Set(), taskMin = {}, people = {};
   let logged = 0, nentries = 0;
-  for (const rows of Object.values(byGid))
+  for (const [g, rows] of Object.entries(byGid))
     for (const e of rows || []){
       const entered = e.entered_on || '';
       if (!entered || entered < start || entered > end) continue;
       if (e.gid && seen.has(e.gid)) continue;
       if (e.gid) seen.add(e.gid);
-      logged += e.duration_minutes || 0; nentries++;
+      const m = e.duration_minutes || 0, by = (e.created_by || {}).name || 'Unknown';
+      logged += m; nentries++;
+      taskMin[owner[g]] = (taskMin[owner[g]] || 0) + m;
+      people[by] = (people[by] || 0) + m;
     }
+  // One row per matching task that is still open or had time logged in the range.
+  const tasks = hits.filter(t => live[t.gid] || taskMin[t.gid]).map(t => ({
+    name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
+    section: sectionName(t, gid), done: !live[t.gid],
+    estimated: round2(taskEst[t.gid] || 0), logged: round2((taskMin[t.gid] || 0) / 60) }))
+    .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
   return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match,
-    cap: round2(est), ntasks: live.length, hours: round2(logged / 60), nentries, updated: nowStr() };
+    cap: round2(est), ntasks: Object.keys(live).length, hours: round2(logged / 60), nentries, tasks,
+    people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
+    updated: nowStr() };
 }
 async function getCarveOuts(refresh, start, end){
   const key = start + ':' + end;

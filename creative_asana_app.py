@@ -1011,16 +1011,23 @@ def carve_out_summary(c, start, end, refresh=False):
     tree = fetch_tree(gid, refresh=refresh)
     hits = carve_out_hits(c, tree)
     # Same rules as project_detail: checked-off tasks and excluded columns carry no estimate.
-    live = [build_task(t, gid, tree["subs"].get(t["gid"], []))
-            for t in hits if not t.get("completed") and not is_excluded(t, gid)]
-    est = sum(d["hours"] + sum(s["hours"] for s in d["subtasks"]) for d in live)
+    live = {t["gid"]: build_task(t, gid, tree["subs"].get(t["gid"], []))
+            for t in hits if not t.get("completed") and not is_excluded(t, gid)}
+    task_est = {g: d["hours"] + sum(s["hours"] for s in d["subtasks"]) for g, d in live.items()}
+    est = sum(task_est.values())
 
-    # Logged time counts whether or not the task has since been finished.
-    items = hits + [s for t in hits for s in tree["subs"].get(t["gid"], [])]
-    minutes = {i["gid"]: i.get("actual_time_minutes") or 0 for i in items}
+    # Logged time counts whether or not the task has since been finished. A subtask's time is
+    # credited to its parent's row, so the task table adds up to the card.
+    owner = {}
+    for t in hits:
+        owner[t["gid"]] = t["gid"]
+        for s in tree["subs"].get(t["gid"], []):
+            owner[s["gid"]] = t["gid"]
+    minutes = {i["gid"]: i.get("actual_time_minutes") or 0
+               for t in hits for i in [t] + tree["subs"].get(t["gid"], [])}
     by_gid = entries_for_tasks({g: m for g, m in minutes.items() if m > 0}, refresh=refresh)
-    seen, logged, nentries = set(), 0, 0
-    for rows in by_gid.values():
+    seen, logged, nentries, task_min, people = set(), 0, 0, {}, {}
+    for item_gid, rows in by_gid.items():
         for e in rows:
             entered = e.get("entered_on") or ""
             if not entered or not (start <= entered <= end):
@@ -1030,8 +1037,28 @@ def carve_out_summary(c, start, end, refresh=False):
                 continue
             if egid:
                 seen.add(egid)
-            logged += e.get("duration_minutes") or 0
+            m = e.get("duration_minutes") or 0
+            by = (e.get("created_by") or {}).get("name") or "Unknown"
+            logged += m
             nentries += 1
+            task_min[owner[item_gid]] = task_min.get(owner[item_gid], 0) + m
+            people[by] = people.get(by, 0) + m
+
+    # One row per matching task that is still open or had time logged in the range.
+    tasks = []
+    for t in hits:
+        g = t["gid"]
+        if g not in live and not task_min.get(g):
+            continue
+        tasks.append({
+            "name": t.get("name", "(untitled)"),
+            "assignee": (t.get("assignee") or {}).get("name") or "Unassigned",
+            "section": section_name(t, gid),
+            "done": g not in live,
+            "estimated": round(task_est.get(g, 0), 2),
+            "logged": round(task_min.get(g, 0) / 60, 2),
+        })
+    tasks.sort(key=lambda r: (r["done"], -r["estimated"], -r["logged"]))
     return {
         "name": c["name"],
         "source": gid,
@@ -1041,6 +1068,9 @@ def carve_out_summary(c, start, end, refresh=False):
         "ntasks": len(live),
         "hours": round(logged / 60, 2),
         "nentries": nentries,
+        "tasks": tasks,
+        "people": [{"name": n, "hours": round(m / 60, 2)}
+                   for n, m in sorted(people.items(), key=lambda kv: -kv[1])],
         "updated": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"),
     }
 
@@ -1930,13 +1960,13 @@ function capCard(w) {
 }
 
 // A CARVE_OUTS budget: capacity is the matching tasks' estimated hours, usage is what was
-// logged to them. It has no page of its own, so it opens the board its tasks live on.
+// logged to them. Opens its own page, which lists only the matching tasks.
 function carveCard(w) {
   const c = capCard(w);
   c.querySelector('h3').insertAdjacentHTML('beforeend',
     ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
   c.querySelector('.stat .l').textContent = 'Est. Hours';
-  c.onclick = () => { location.hash = '#/p/' + w.source; };
+  c.onclick = () => { location.hash = '#/carve/' + encodeURIComponent(w.name); };
   return c;
 }
 
@@ -3523,6 +3553,101 @@ async function renderGroupDetail(name) {
   load(false);
 }
 
+// A CARVE_OUTS budget (e.g. Update Tuesday) on its own page: only the source-board tasks it
+// matches, with their estimates (the capacity) and the hours logged to them in the range the
+// dashboard was left on. Same skeleton as the group page; no picker here either.
+async function renderCarveDetail(name) {
+  app.innerHTML = `
+    <div class="layout">
+      ${sidebarHtml()}
+      <main class="content">
+        <div id="crumbs" class="crumbs">${LOADING}</div>
+        <div class="head">
+          <h1 id="page-title"></h1>
+          <div class="head-right">
+            <span id="dash-updated" class="dash-updated"></span>
+            <button class="btn" id="refresh">Refresh</button>
+          </div>
+        </div>
+        <p class="sub" id="sub"></p>
+        <div id="view">${note(LOADING)}</div>
+      </main>
+    </div>`;
+  wireSidebar(null);
+  const toDash = () => { location.hash = ''; };
+  const btn = document.getElementById('refresh');
+
+  function show(w) {
+    const view = document.getElementById('view');
+    setCrumbs([{label:'Dashboard', fn:toDash}, {label:w.name}]);
+    const used = Number(w.hours || 0), cap = Number(w.cap || 0), left = r2(cap - used);
+    view.innerHTML = summaryBar([
+      { n: h2(cap) + ' h', l: 'Est. hours (capacity)' },
+      { n: h2(used) + ' h', l: 'Hours used' },
+      { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
+      { n: (cap ? (used / cap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
+      { n: w.ntasks, l: w.ntasks === 1 ? 'Open task' : 'Open tasks' },
+      { n: w.nentries, l: w.nentries === 1 ? 'Time entry' : 'Time entries' },
+    ]) + `<div class="cap-wide">${capBar(used, cap)}</div>`;
+    const tasks = w.tasks || [], people = w.people || [];
+    const taskRows = tasks.map(t =>
+      `<tr class="parent"><td>${esc(t.name)}</td>` +
+      `<td>${t.done ? '<span class="badge done">Completed</span>'
+                    : t.section ? `<span class="badge">${esc(t.section)}</span>`
+                                : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
+      `<td>${esc(t.assignee)}</td>` +
+      `<td class="hours">${t.estimated ? h2(t.estimated) + ' h' : '—'}</td>` +
+      `<td class="hours">${t.logged ? h2(t.logged) + ' h' : '—'}</td></tr>`).join('')
+      || '<tr><td colspan="5" class="muted">No matching tasks are open or had time logged in this range.</td></tr>';
+    view.insertAdjacentHTML('beforeend',
+      `<h2 class="section-h">Tasks</h2>
+       <table class="tasks">
+         <thead><tr><th>Task</th><th>Status</th><th>Assignee</th>
+           <th class="hours">Est.</th><th class="hours">Logged</th></tr></thead>
+         <tbody>${taskRows}
+           <tr class="parent"><td colspan="3">All tasks</td><td class="hours">${h2(cap)} h</td>
+             <td class="hours">${h2(used)} h</td></tr></tbody>
+       </table>`);
+    if (people.length) {
+      view.insertAdjacentHTML('beforeend',
+        `<h2 class="section-h">Hours logged by person</h2>
+         <table class="tasks">
+           <thead><tr><th>Logged by</th><th class="hours">Hours logged</th><th class="hours">Share</th></tr></thead>
+           <tbody>${people.map(p =>
+             `<tr class="parent"><td>${esc(p.name)}</td><td class="hours">${h2(p.hours)} h</td>` +
+             `<td class="hours">${used ? (p.hours / used * 100).toFixed(0) : '0'}%</td></tr>`).join('')}</tbody>
+         </table>`);
+    }
+  }
+
+  async function load(refresh) {
+    btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
+    try {
+      const q = `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : '');
+      // Carve-outs read the trees /api/logged loads, so make sure that has run first (cached
+      // on normal navigation, so this costs nothing when arriving from the dashboard).
+      await fetch('/api/logged' + q).then(r => r.json());
+      const all = await fetch('/api/carveouts' + q).then(r => r.json());
+      const w = (Array.isArray(all) ? all : []).find(x => x.name === name);
+      if (!w) {
+        setCrumbs([{label:'Dashboard', fn:toDash}, {label:name}]);
+        document.getElementById('page-title').textContent = name;
+        document.getElementById('view').innerHTML = note('No carve-out named ' + name + '.');
+        return;
+      }
+      document.getElementById('page-title').textContent = w.name;
+      document.getElementById('sub').textContent =
+        `Tasks on ${w.source_name} containing “${w.match}” · estimated hours (excludes Completed tasks) ` +
+        `against hours logged ${rangeLabel(dateStart, dateEnd)}`;
+      document.getElementById('dash-updated').textContent = w.updated ? ('Updated ' + w.updated) : '';
+      show(w);
+    } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
+    finally { btn.disabled = false; btn.textContent = 'Refresh'; }
+  }
+  btn.onclick = () => load(true);
+  load(false);
+}
+
 function route() {
   destroyCharts();
   let m = location.hash.match(/^#\/logged\/(\d+)/);
@@ -3531,6 +3656,8 @@ function route() {
   if (m) return renderDetail(m[1]);
   m = location.hash.match(/^#\/grp\/(.+)$/);
   if (m) return renderGroupDetail(decodeURIComponent(m[1]));
+  m = location.hash.match(/^#\/carve\/(.+)$/);
+  if (m) return renderCarveDetail(decodeURIComponent(m[1]));
   renderDashboard();
 }
 window.addEventListener('hashchange', route);
