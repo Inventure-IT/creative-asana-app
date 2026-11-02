@@ -43,8 +43,17 @@ build, so **adding a project or team member is a one-line change plus a rebuild.
 duplicate a project list or a team roster anywhere else.
 
 - A project's `cap` is its **monthly hour capacity**; omit it for projects with no budget.
+- A project's optional `kind` classifies the engagement (e.g. `"Support"`); it rides on the
+  logged-hours rows and shows as a tag on the project's MSA Project Capacity card.
 - `GROUPS` are several projects sharing one combined monthly cap (e.g. CMD). Members still
   appear individually in every other tab.
+- `CARVE_OUTS` cut a budget out of another board by task name (e.g. Update Tuesday from
+  Internal IIT Backlog): capacity = the matching open tasks' estimated hours, usage = hours
+  logged to them and their subtasks. They add a card to MSA Project Capacity (and count in its
+  summary bar) via `/api/carveouts`; the source project still reports the tasks everywhere else.
+- `UNBILLABLE_GIDS` marks projects whose logged time is unbillable; a carve-out's tasks on
+  such a board stay billable. Each logged entry carries `billable`, and Team Capacity · Logged
+  stacks billable (solid) under unbillable (faded) per person.
 - `ARCHIVED_GIDS` is the set of archived project gids. They still appear on the card/list
   tabs (Project Cards, MSA Project Capacity), but under an **Archived projects** section
   below the active work and outside the summary stats — the UI splits them off via the

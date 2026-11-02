@@ -21,6 +21,8 @@ PROJECTS = json.dumps(a.PROJECTS)
 EST_PROJECTS = json.dumps(a.EST_PROJECTS)
 ARCHIVED = json.dumps(sorted(a.ARCHIVED_GIDS))
 GROUPS = json.dumps(a.GROUPS)
+CARVE_OUTS = json.dumps(a.CARVE_OUTS)
+UNBILLABLE = json.dumps(sorted(a.UNBILLABLE_GIDS))
 EST_FIELD = json.dumps(a.EST_FIELD)
 EXCLUDE = json.dumps(sorted(a.EXCLUDE_SECTIONS))
 ASSIGNEE_CAP = a.ASSIGNEE_HOURS_CAP
@@ -44,10 +46,13 @@ const EST_PROJECTS = __ESTPROJECTS__;
 // this, so the local app's boot script injects it too.
 const ARCHIVED_GIDS = __ARCHIVED__;
 const GROUPS = __GROUPS__;
+const CARVE_OUTS = __CARVEOUTS__;
+const UNBILLABLE_GIDS = new Set(__UNBILLABLE__);
 const DEF_START = __DEFSTART__, DEF_END = __DEFEND__;
 const PROJECT_ROSTER = PROJECTS.map(p => p.name);
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
 const PROJECT_CAPS  = Object.fromEntries(PROJECTS.map(p => [p.gid, p.cap == null ? null : p.cap]));
+const PROJECT_KINDS = Object.fromEntries(PROJECTS.map(p => [p.gid, p.kind || null]));
 
 let TOKEN = null;
 const _realFetch = window.fetch.bind(window);
@@ -298,7 +303,7 @@ async function projectDetail(gid, refresh){
     counts: ordered.map(n => counts[n]), ntasks: detailed.length, tasks: detailed, updated: nowStr() };
 }
 
-const CACHE = { summaries: null, detail: {}, logged_summaries: {}, logged_detail: {}, me: null };
+const CACHE = { summaries: null, detail: {}, logged_summaries: {}, logged_detail: {}, me: null, carve_outs: {} };
 // Mirrors get_me: the display name behind the PAT, so the UI can default a filter to "you".
 // asanaGet always hands back an array, and /users/me is a single object, so take the first.
 async function getMe(refresh){
@@ -444,6 +449,14 @@ async function loggedDetail(gid, start, end, refresh){
   // Only tasks whose tracked total moved are read from Asana; the rest come from cache.
   const byGid = await entriesForTasks(Object.fromEntries(
     Object.entries(cand).map(([g, [, m]]) => [g, m])), refresh);
+  // On an unbillable board, only a carve-out's tasks (and their subtasks) are billable.
+  const carved = new Set();
+  for (const c of CARVE_OUTS.filter(c => c.source === gid))
+    for (const t of carveOutHits(c, tree)){
+      carved.add(t.gid);
+      for (const s of tree.subs[t.gid] || []) carved.add(s.gid);
+    }
+  const unbillable = UNBILLABLE_GIDS.has(gid);
   const seen = new Set(), entries = [];
   for (const [g, [name]] of Object.entries(cand))
     for (const e of byGid[g] || []){
@@ -452,7 +465,7 @@ async function loggedDetail(gid, start, end, refresh){
       if (e.gid && seen.has(e.gid)) continue;
       if (e.gid) seen.add(e.gid);
       entries.push({ task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
-        minutes: e.duration_minutes || 0 });
+        minutes: e.duration_minutes || 0, billable: !unbillable || carved.has(g) });
     }
   const totals = {}, counts = {};
   for (const e of entries){
@@ -466,9 +479,9 @@ async function loggedDetail(gid, start, end, refresh){
     total_hours: round2(sum(Object.values(totals)) / 60),
     completed: Object.keys(completedDates).length,
     nentries: entries.length,
-    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60) })), updated: nowStr() };
+    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable })), updated: nowStr() };
 }
-function loggedSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+function loggedSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], kind: PROJECT_KINDS[d.gid], updated: d.updated }; }
 
 async function getLoggedDetail(gid, refresh, start, end){
   const key = start + ':' + end;
@@ -486,6 +499,49 @@ async function getLoggedSummaries(refresh, start, end){
   return (CACHE.logged_summaries[key] = details.map(loggedSummaryFromDetail));
 }
 
+// Mirrors carve_out_summary: estimated hours of the matching open tasks (the capacity) and the
+// hours logged to every matching task, open or done (the usage). The UI only asks once
+// /api/logged has finished, so the tree and entries are already warm — refresh is not passed
+// down, because unlike the Python side fetchTree has no share window and would re-read the board.
+// Mirrors carve_out_hits: the source-project tasks whose name contains `match`, any case.
+function carveOutHits(c, tree){
+  const needle = c.match.toLowerCase();
+  return tree.tasks.filter(t => (t.name || '').toLowerCase().includes(needle));
+}
+async function carveOutSummary(c, start, end){
+  const gid = c.source;
+  const tree = await fetchTree(gid, false);
+  const hits = carveOutHits(c, tree);
+  // Same rules as projectDetail: checked-off tasks and excluded columns carry no estimate.
+  const live = hits.filter(t => !t.completed && !isExcluded(t, gid))
+                   .map(t => buildTask(t, gid, tree.subs[t.gid] || []));
+  const est = sum(live.map(d => d.hours + sum(d.subtasks.map(s => s.hours))));
+  // Logged time counts whether or not the task has since been finished.
+  const items = [...hits, ...hits.flatMap(t => tree.subs[t.gid] || [])];
+  const minutes = {};
+  for (const it of items) if ((it.actual_time_minutes || 0) > 0) minutes[it.gid] = it.actual_time_minutes;
+  const byGid = await entriesForTasks(minutes, false);
+  const seen = new Set();
+  let logged = 0, nentries = 0;
+  for (const rows of Object.values(byGid))
+    for (const e of rows || []){
+      const entered = e.entered_on || '';
+      if (!entered || entered < start || entered > end) continue;
+      if (e.gid && seen.has(e.gid)) continue;
+      if (e.gid) seen.add(e.gid);
+      logged += e.duration_minutes || 0; nentries++;
+    }
+  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match,
+    cap: round2(est), ntasks: live.length, hours: round2(logged / 60), nentries, updated: nowStr() };
+}
+async function getCarveOuts(refresh, start, end){
+  const key = start + ':' + end;
+  if (!refresh && CACHE.carve_outs[key]) return CACHE.carve_outs[key];
+  const out = await mapAll(CARVE_OUTS, c => carveOutSummary(c, start, end));
+  saveEntryCache();
+  return (CACHE.carve_outs[key] = out);
+}
+
 // ---- Route /api/* (same shapes the existing UI expects) ----
 async function handleApi(p){
   const u = new URL(p, location.origin), path = u.pathname, q = u.searchParams;
@@ -496,6 +552,7 @@ async function handleApi(p){
   if (path === '/api/logged') return getLoggedSummaries(refresh, start, end);
   if (path === '/api/assignees') return getAssigneeLoad(refresh);
   if (path === '/api/groups') return GROUPS;
+  if (path === '/api/carveouts') return getCarveOuts(refresh, start, end);
   if (path === '/api/me') return getMe(refresh);
   if (path.startsWith('/api/logged/')) return getLoggedDetail(path.split('/').pop(), refresh, start, end);
   if (path.startsWith('/api/project/')) return getDetail(path.split('/').pop(), refresh);
@@ -600,6 +657,8 @@ def build():
                .replace('__ESTPROJECTS__', EST_PROJECTS)
                .replace('__ARCHIVED__', ARCHIVED)
                .replace('__GROUPS__', GROUPS)
+               .replace('__CARVEOUTS__', CARVE_OUTS)
+               .replace('__UNBILLABLE__', UNBILLABLE)
                .replace('__DEFSTART__', DEF_START)
                .replace('__DEFEND__', DEF_END))
 

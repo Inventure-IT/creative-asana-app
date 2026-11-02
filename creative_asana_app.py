@@ -28,6 +28,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Each entry becomes a clickable widget on the dashboard.
 # "cap" (optional) is the project's monthly hour capacity, shown on the widgets.
+# "kind" (optional) classifies the engagement (e.g. "Support"); it tags the project's card on
+# MSA Project Capacity.
 PROJECTS = [
     {"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70},
     {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38},
@@ -35,7 +37,7 @@ PROJECTS = [
     {"gid": "1216989200658405", "name": "My Pest Solutions SEO"},
     {"gid": "1214228966572508", "name": "Firebird MSA"},
     {"gid": "1214228966572503", "name": "Myrick Marine"},
-    {"gid": "1214229029715234", "name": "Savannah Bee Company"},
+    {"gid": "1214229029715234", "name": "Savannah Bee Company", "cap": 40, "kind": "Support"},
     {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"},
     {"gid": "1214228966572531", "name": "CMD: Pathologic"},
     {"gid": "1214228966572526", "name": "CMD: Products"},
@@ -75,6 +77,22 @@ GROUPS = [
     ]},
 ]
 
+# Carve-outs: a budget cut out of another board by task name. Each one takes the `source`
+# project's tasks whose name contains `match` (case-insensitive) and adds a card to MSA Project
+# Capacity whose capacity is those tasks' estimated hours (skipping EXCLUDE_SECTIONS) and whose
+# usage is the time logged to them and their subtasks in the selected range. The source project
+# still reports the same tasks everywhere else — a carve-out only adds the card.
+CARVE_OUTS = [
+    {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday"},   # Internal IIT Backlog
+]
+
+# Projects whose logged time is unbillable (internal work); everything else is billable. A
+# CARVE_OUTS budget drawn from one of these is the exception — time logged to its matching
+# tasks and their subtasks stays billable. Team Capacity · Logged splits each bar on this.
+UNBILLABLE_GIDS = {
+    "1214228966572563",   # Internal IIT Backlog
+}
+
 # Archived projects: dormant or internal work that shouldn't shape the headline numbers.
 # They are still reported everywhere, just separately — the card/list tabs (Project Cards,
 # MSA Project Capacity) put them under their own "Archived projects" section, below the
@@ -106,11 +124,13 @@ PORT = 8765
 API = "https://app.asana.com/api/1.0"
 PROJECT_NAMES = {p["gid"]: p["name"] for p in PROJECTS}
 PROJECT_CAPS = {p["gid"]: p.get("cap") for p in PROJECTS}   # monthly hour capacity, or None
+PROJECT_KINDS = {p["gid"]: p.get("kind") for p in PROJECTS}  # classification, or None
 
 # In-memory cache so navigating between pages never re-hits the Asana API.
 # Data is fetched once and reused until the user explicitly clicks Refresh.
 # The "hours logged" caches are keyed by month: {month: ...}.
 CACHE = {"summaries": None, "detail": {}, "logged_summaries": {}, "logged_detail": {}, "me": None,
+         "carve_outs": {},   # {"start:end": [...]}
          # Raw Asana reads, shared by both halves of the app so nothing is fetched twice:
          #   tree    = {project gid: {tasks, subs, at}}   entries = {task gid: {rows, at}}
          "tree": {}, "entries": {}}
@@ -865,6 +885,14 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
             cand_by_gid[item["gid"]] = (item.get("name", "(untitled)"), minutes)
     # Only tasks whose tracked total moved are read from Asana; the rest come from cache.
     by_gid = entries_for_tasks({g: m for g, (_, m) in cand_by_gid.items()}, refresh=refresh)
+    # On an unbillable board, only a carve-out's tasks (and their subtasks) are billable.
+    carved = set()
+    for c in CARVE_OUTS:
+        if c["source"] == gid:
+            for t in carve_out_hits(c, tree):
+                carved.add(t["gid"])
+                carved.update(s["gid"] for s in tree["subs"].get(t["gid"], []))
+    unbillable = gid in UNBILLABLE_GIDS
 
     # Collect entries, deduping by entry gid as a final guard against any double-pull.
     seen, entries = set(), []
@@ -884,6 +912,7 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
                 "date": entered,
                 # Every logged entry counts the same, regardless of Asana's billable flag.
                 "minutes": e.get("duration_minutes") or 0,
+                "billable": not unbillable or tgid in carved,
             })
 
     # Per person: total minutes logged. All logged time counts toward project budgets.
@@ -906,7 +935,7 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
         "nentries": len(entries),
         "entries": [
             {"task": e["task"], "by": e["by"], "date": e["date"],
-             "hours": round(e["minutes"] / 60, 2)}
+             "hours": round(e["minutes"] / 60, 2), "billable": e["billable"]}
             for e in entries
         ],
         "updated": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"),
@@ -923,6 +952,7 @@ def logged_summary_from_detail(d):
         "completed": d["completed"],
         "nentries": d["nentries"],
         "cap": PROJECT_CAPS.get(d["gid"]),
+        "kind": PROJECT_KINDS.get(d["gid"]),
         "updated": d["updated"],
     }
 
@@ -961,6 +991,72 @@ def get_logged_summaries(refresh=False, start=DEFAULT_START, end=DEFAULT_END):
     with CACHE_LOCK:
         CACHE["logged_summaries"][key] = out
     save_entry_cache()      # end of a full load: persist whatever it just read
+    return out
+
+
+def carve_out_hits(c, tree):
+    """The source-project tasks a CARVE_OUTS entry claims: name contains `match`, any case."""
+    needle = c["match"].lower()
+    return [t for t in tree["tasks"] if needle in (t.get("name") or "").lower()]
+
+
+def carve_out_summary(c, start, end, refresh=False):
+    """One CARVE_OUTS budget for [start, end]: the estimated hours of its matching open tasks
+    (the capacity) and the hours logged to every matching task, open or done (the usage).
+
+    Reads the shared project tree and entry cache, so straight after /api/logged it makes no
+    Asana calls of its own.
+    """
+    gid = c["source"]
+    tree = fetch_tree(gid, refresh=refresh)
+    hits = carve_out_hits(c, tree)
+    # Same rules as project_detail: checked-off tasks and excluded columns carry no estimate.
+    live = [build_task(t, gid, tree["subs"].get(t["gid"], []))
+            for t in hits if not t.get("completed") and not is_excluded(t, gid)]
+    est = sum(d["hours"] + sum(s["hours"] for s in d["subtasks"]) for d in live)
+
+    # Logged time counts whether or not the task has since been finished.
+    items = hits + [s for t in hits for s in tree["subs"].get(t["gid"], [])]
+    minutes = {i["gid"]: i.get("actual_time_minutes") or 0 for i in items}
+    by_gid = entries_for_tasks({g: m for g, m in minutes.items() if m > 0}, refresh=refresh)
+    seen, logged, nentries = set(), 0, 0
+    for rows in by_gid.values():
+        for e in rows:
+            entered = e.get("entered_on") or ""
+            if not entered or not (start <= entered <= end):
+                continue
+            egid = e.get("gid")
+            if egid and egid in seen:
+                continue
+            if egid:
+                seen.add(egid)
+            logged += e.get("duration_minutes") or 0
+            nentries += 1
+    return {
+        "name": c["name"],
+        "source": gid,
+        "source_name": PROJECT_NAMES.get(gid, gid),
+        "match": c["match"],
+        "cap": round(est, 2),
+        "ntasks": len(live),
+        "hours": round(logged / 60, 2),
+        "nentries": nentries,
+        "updated": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"),
+    }
+
+
+def get_carve_outs(refresh=False, start=DEFAULT_START, end=DEFAULT_END):
+    """Cached CARVE_OUTS summaries for a date range. Cache key = 'start:end'."""
+    key = f"{start}:{end}"
+    if not refresh:
+        with CACHE_LOCK:
+            cached = CACHE["carve_outs"].get(key)
+        if cached is not None:
+            return cached
+    out = [carve_out_summary(c, start, end, refresh=refresh) for c in CARVE_OUTS]
+    with CACHE_LOCK:
+        CACHE["carve_outs"][key] = out
+    save_entry_cache()
     return out
 
 
@@ -1822,7 +1918,7 @@ function capCard(w) {
   const remaining = cap - used;
   const c = document.createElement('div');
   c.className = 'card logged' + (atCapacity(used, cap) ? ' at-cap' : '');
-  c.innerHTML = `<h3>${esc(w.name)}</h3>
+  c.innerHTML = `<h3>${esc(w.name)}${w.kind ? ` <span class="grp-tag">${esc(w.kind)}</span>` : ''}</h3>
     <div class="stats">
       <div class="stat"><div class="n">${h2(w.cap)}</div><div class="l">Capacity h/mo</div></div>
       <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
@@ -1830,6 +1926,17 @@ function capCard(w) {
     </div>
     ${capBar(used, cap)}`;
   c.onclick = () => { location.hash = '#/logged/' + w.gid; };
+  return c;
+}
+
+// A CARVE_OUTS budget: capacity is the matching tasks' estimated hours, usage is what was
+// logged to them. It has no page of its own, so it opens the board its tasks live on.
+function carveCard(w) {
+  const c = capCard(w);
+  c.querySelector('h3').insertAdjacentHTML('beforeend',
+    ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
+  c.querySelector('.stat .l').textContent = 'Est. Hours';
+  c.onclick = () => { location.hash = '#/p/' + w.source; };
   return c;
 }
 
@@ -1894,6 +2001,7 @@ async function renderDashboard() {
   const btn = document.getElementById('dash-refresh');
   let estData = null, loggedData = null, teamData = null;   // cached so switching tabs is instant
   let groupsConfig = null;   // budget-group definitions (loaded once); combined per current range
+  let carveData = null;      // CARVE_OUTS budgets for the current range (MSA Project Capacity)
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
   let projPersonCache = {};    // per-project person split { gid: { person: hours } }, keyed by 'start:end'
   let itemStatsCache = {};     // Actual Hours per-item (task) totals, keyed by 'start:end'
@@ -2306,7 +2414,7 @@ async function renderDashboard() {
     }
     delete personLoading[key];
     if (key !== dateStart + ':' + dateEnd) return;   // range changed while loading
-    const agg = {}, byGid = {}, items = {}, daily = {};
+    const agg = {}, unbill = {}, byGid = {}, items = {}, daily = {};
     gids.forEach((g, idx) => {
       const d = details[idx], pm = byGid[g] = {};
       (d.labels || []).forEach((name, i) => {
@@ -2318,6 +2426,7 @@ async function renderDashboard() {
       // project + task + person so identically named tasks / multiple loggers stay separate.
       (d.entries || []).forEach(e => {
         const person = e.by || 'Unknown';
+        if (e.billable === false) unbill[person] = (unbill[person] || 0) + e.hours;
         const ikey = (d.name || '') + ' | ' + e.task + ' | ' + person;
         const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', person: person, hours: 0, entries: 0 });
         it.hours += e.hours;
@@ -2333,7 +2442,8 @@ async function renderDashboard() {
     });
     projPersonCache[key] = byGid;
     personStatsCache[key] = Object.keys(agg)
-      .map(name => ({ name, hours: agg[name] }))
+      // `unbillable` is the share of `hours` logged to unbillable work (UNBILLABLE_GIDS).
+      .map(name => ({ name, hours: agg[name], unbillable: Math.min(unbill[name] || 0, agg[name]) }))
       .sort((a, b) => b.hours - a.hours);
     itemStatsCache[key] = Object.values(items)
       // Group by project (A→Z), then heaviest items first within each project.
@@ -2686,11 +2796,12 @@ async function renderDashboard() {
       wireRangeSel(); loadPersonStats(key); return;
     }
     const cap = (teamData && teamData.cap) || 128;
-    const rows = people.map(p => ({ name: p.name, total: p.hours }))
+    const rows = people.map(p => ({ name: p.name, total: p.hours, unbill: p.unbillable || 0 }))
       .filter(p => p.total > 0)
       .sort((a, b) => b.total - a.total);
     // Headline stats: what the team actually booked against what it could have.
     const totLogged = rows.reduce((a, r) => a + r.total, 0);
+    const totUnbill = rows.reduce((a, r) => a + r.unbill, 0);
     const teamCap = cap * rows.length;
     // How far through the work month (Mon–Fri, minus holidays) we are, and therefore how many hours each
     // person should already have logged if they are keeping pace with the monthly target.
@@ -2702,6 +2813,9 @@ async function renderDashboard() {
     const teamPace = teamPaceTarget ? totLogged / teamPaceTarget * 100 : 0;
     const summary = summaryBar([
       { n: h2(totLogged) + ' h', l: 'Hours logged' },
+      { n: h2(totLogged - totUnbill) + ' h', l: 'Billable' },
+      { n: h2(totUnbill) + ' h', l: 'Unbillable' },
+      { n: (totLogged ? ((totLogged - totUnbill) / totLogged * 100).toFixed(0) : '0') + '%', l: 'Billable share' },
       { n: rows.length, l: 'People' },
       { n: h2(rows.length ? totLogged / rows.length : 0) + ' h', l: 'Avg per person' },
       { n: (teamCap ? (totLogged / teamCap * 100).toFixed(0) : '0') + '%', l: 'Of team capacity' },
@@ -2720,31 +2834,44 @@ async function renderDashboard() {
     }
     destroyCharts();
     const labels = rows.map(r => r.name), totals = rows.map(r => r.total);
+    // Each bar is billable stacked under unbillable. The whole bar keeps its pace color (total
+    // hours vs. target); the unbillable segment is the same hue faded, so status stays readable.
     const colors = totals.map(h => capColorPace(h, paceTarget));
+    const faded = colors.map(c => c + '59');   // ~35% alpha
+    const unbills = rows.map(r => r2(r.unbill)), bills = rows.map(r => r2(r.total - r.unbill));
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
-      data: { labels, datasets: [{ label: 'Hours logged', data: totals,
-        backgroundColor: colors, borderColor: colors, borderWidth: 1 }] },
+      data: { labels, datasets: [
+        { label: 'Billable', data: bills, backgroundColor: colors, borderColor: colors, borderWidth: 1 },
+        { label: 'Unbillable', data: unbills, backgroundColor: faded, borderColor: colors, borderWidth: 1 },
+      ] },
       options: { responsive: true, maintainAspectRatio: false,
         onClick: (evt, els) => { if (els.length) showLoggedBreakdown(rows[els[0].index].name); },
         onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-        scales: { x: { title: { display: true, text: 'Logged by' },
+        scales: { x: { stacked: true, title: { display: true, text: 'Logged by' },
                        ticks: { callback: (v, i) => [labels[i], h2(totals[i]) + ' h'] } },
-                  y: { beginAtZero: true, suggestedMax: Math.max(cap * 1.1, ...totals, 1),
+                  y: { stacked: true, beginAtZero: true, suggestedMax: Math.max(cap * 1.1, ...totals, 1),
                        title: { display: true, text: 'Hours logged' }, ticks: { callback: v => h2(v) } } },
         // The pace line only means something mid-range: before it opens there is nothing to
         // expect yet, and once it has closed the pace target is just the target.
-        plugins: { legend: { display: false },
+        plugins: {
+          // Swatches are neutral: bar color means pace, so only solid vs. faded is legend-worthy.
+          legend: { labels: { generateLabels: ch => ch.data.datasets.map((ds, i) => ({
+            text: ds.label, datasetIndex: i, hidden: !ch.isDatasetVisible(i),
+            fillStyle: i ? C.muted + '59' : C.muted, strokeStyle: C.muted, lineWidth: 1,
+            fontColor: Chart.defaults.color })) } },
           capLine: { value: cap,
             pace: (wp.pct > 0 && wp.pct < 100) ? paceTarget : null,
             paceLabel: `${h2(paceTarget)} h by today · ${wp.pct.toFixed(0)}% of work month` },
-          tooltip: { callbacks: {
-            label: ctx => `Logged: ${h2(ctx.parsed.y)} h of ${h2(cap)} (${(ctx.parsed.y / cap * 100).toFixed(0)}%)`,
-            afterLabel: ctx => paceTarget
-              ? `Target by today ${h2(paceTarget)} h · ${(ctx.parsed.y / paceTarget * 100).toFixed(0)}% of pace` +
-                ` · ${ctx.parsed.y >= paceTarget - PACE_TOLERANCE ? 'on pace'
-                       : h2(paceTarget - ctx.parsed.y) + ' h behind'}`
-              : '' } } } }
+          tooltip: { mode: 'index', filter: item => item.parsed.y > 0, callbacks: {
+            label: ctx => `${ctx.dataset.label}: ${h2(ctx.parsed.y)} h`,
+            footer: items => {
+              const t = totals[items[0].dataIndex];
+              return [`Logged: ${h2(t)} h of ${h2(cap)} (${(t / cap * 100).toFixed(0)}%)`].concat(paceTarget
+                ? [`Target by today ${h2(paceTarget)} h · ${(t / paceTarget * 100).toFixed(0)}% of pace` +
+                   ` · ${t >= paceTarget - PACE_TOLERANCE ? 'on pace' : h2(paceTarget - t) + ' h behind'}`]
+                : []);
+            } } } } }
     });
     // One donut per person under the bars: which projects they logged their hours against.
     const pc = projPersonCache[key] || {};
@@ -2790,6 +2917,8 @@ async function renderDashboard() {
     const nTasks = rows_.reduce((a, r) => a + (tasksByProject[r.project] || []).length, 0);
     const cap = (teamData && teamData.cap) || 128;
     const pct = (tot / cap * 100).toFixed(0);
+    const ps = (personStatsCache[key] || []).find(p => p.name === person);
+    const unbill = ps ? ps.unbillable || 0 : 0;
     const cell = (h) => `<td class="hours">${h2(h)} h</td>`;
     // Each project is a bold header row, with the tasks that person logged to it beneath it.
     let body = rows_.map(r => {
@@ -2809,6 +2938,7 @@ async function renderDashboard() {
          <h2>${esc(person)}</h2>
        </div>
        <p class="drill-total">${h2(tot)} h logged of ${h2(cap)} (${pct}%) · ${
+         h2(tot - unbill)} h billable · ${h2(unbill)} h unbillable · ${
          plural(rows_.length, 'project')} · ${plural(nTasks, 'task')} · ${
          plural(nEntries, 'time entry', 'time entries')} in ${rangeLabel(dateStart, dateEnd)}</p>
        <table class="tasks">
@@ -2897,19 +3027,27 @@ async function renderDashboard() {
                          .sort((a, b) => b.hours - a.hours);
         const archived = loggedData.filter(w => isArchived(w) && w.hours > 0)
                            .sort((a, b) => b.hours - a.hours);
-        const hasCap = groups.length || standalone.length;
-        // Headline stats cover the budgeted work only — the retainer picture in one line.
-        const budgeted = [...groups, ...standalone];
+        const carves = Array.isArray(carveData) ? carveData : [];
+        const hasCap = groups.length || standalone.length || carves.length;
+        // Headline stats cover every card in the monthly-capacity grid (carve-outs included) —
+        // the budget picture in one line.
+        const budgeted = [...groups, ...standalone, ...carves];
         const totCap = budgeted.reduce((a, w) => a + (w.cap || 0), 0);
         const totUsed = budgeted.reduce((a, w) => a + (w.hours || 0), 0);
         const left = r2(totCap - totUsed);
-        const overCount = budgeted.filter(w => (w.hours || 0) > (w.cap || 0)).length;
+        // Same work-month clock as Team Capacity · Logged, so "Budget used" can be read
+        // against how much of the month has gone.
+        const wp = workdayProgress(dateStart, dateEnd);
         const summary = summaryBar([
           { n: h2(totCap) + ' h', l: 'Budgeted capacity' },
           { n: h2(totUsed) + ' h', l: 'Hours used' },
           { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
           { n: (totCap ? (totUsed / totCap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
-          { n: overCount, l: overCount === 1 ? 'Budget over' : 'Budgets over', neg: overCount > 0 },
+          { n: wp.pct.toFixed(0) + '%', l: 'Of work month elapsed' },
+          { n: `${wp.elapsed} of ${wp.total}`, l: 'Work days used' },
+          { n: wp.left, l: 'Work days left' },
+          // Pace needed to use the remaining budget by month end; nothing left = nothing needed.
+          { n: wp.left ? h2(Math.max(left, 0) / wp.left) + ' h' : '—', l: 'Team hours / day needed' },
         ]);
         view.innerHTML = (hasCap ? summary : '') + picker;
         if (!hasCap && !others.length && !archived.length) {
@@ -2921,6 +3059,7 @@ async function renderDashboard() {
             capGrid.className = 'grid cap-grid';
             groups.forEach(g => { const c = groupCard(g); c.classList.add('cap'); capGrid.appendChild(c); });
             standalone.forEach(w => { const c = capCard(w); c.classList.add('cap'); capGrid.appendChild(c); });
+            carves.forEach(w => { const c = carveCard(w); c.classList.add('cap'); capGrid.appendChild(c); });
             view.appendChild(capGrid);
           }
           const section = (title, rows, flush) => {
@@ -2980,7 +3119,11 @@ async function renderDashboard() {
       const url = `/api/logged?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await fetch(url).then(r => r.json());
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
-      loggedData = j;
+      // Carve-outs read the project trees and time entries /api/logged just loaded, so they
+      // are fetched after it rather than alongside — that way they cost no Asana calls.
+      const c = await fetch(url.replace('/api/logged', '/api/carveouts')).then(r => r.json());
+      if (s !== dateStart || e !== dateEnd) return;
+      loggedData = j; carveData = c;
     } catch (err) { view.innerHTML = fmtErr(err); return; }
     await mePromise;   // so Daily Log knows who "you" are before it picks its default assignee
     if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual'].includes(dashTab)) renderTab();
@@ -3433,6 +3576,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, get_assignee_load(refresh=refresh))
             if path == "/api/groups":
                 return self._json(200, GROUPS)
+            if path == "/api/carveouts":
+                return self._json(200, get_carve_outs(refresh=refresh, start=start, end=end))
             if path == "/api/me":
                 return self._json(200, get_me(refresh=refresh))
             if path.startswith("/api/logged/"):
