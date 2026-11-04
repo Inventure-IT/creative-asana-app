@@ -520,6 +520,9 @@ async function carveOutSummary(c, start, end){
     taskEst[t.gid] = d.hours + sum(d.subtasks.map(s => s.hours));
   }
   const est = sum(Object.values(taskEst));
+  // Time already tracked to those open tasks (parent + every listed subtask), for
+  // "remaining" carve-outs.
+  const tracked = sum(Object.values(live).map(d => d.actual + sum(d.subtasks.map(s => s.actual))));
   // Logged time counts whether or not the task has since been finished. A subtask's time is
   // credited to its parent's row, so the task table adds up to the card.
   const owner = {}, minutes = {};
@@ -558,7 +561,9 @@ async function carveOutSummary(c, start, end){
     estimated: round2(taskEst[t.gid] || 0), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
   return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null,
-    cap: round2(est), ntasks: Object.keys(live).length, hours: round2(logged / 60), nentries, tasks,
+    // A "remaining" carve-out's capacity is what was left at the start of the range: the
+    // board's remaining hours now plus what was logged in the range.
+    cap: c.remaining ? round2(est - tracked + logged / 60) : round2(est), ntasks: Object.keys(live).length, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes
     updated: nowStr() };

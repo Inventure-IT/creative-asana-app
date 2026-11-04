@@ -97,12 +97,15 @@ CARVE_OUTS = [
      "kind": "Support"},
     # An empty match claims the whole board: its budget is every open task's estimate. Such a
     # project leaves "Other projects" and shows only as this card.
+    # "remaining": True budgets the board's REMAINING hours instead of its full estimates:
+    # capacity = (open estimates - time already tracked to them) + hours logged in the range,
+    # so the card's "Remaining" is exactly the board's estimated hours still left to work.
     {"name": "The Recreational Group: Thatch", "source": "1219066223453162", "match": "",
-     "kind": "Hourly"},
+     "kind": "Hourly", "remaining": True},
     {"name": "Slimothy the Slug", "source": "1219254406444525", "match": "",
-     "kind": "Hourly"},
+     "kind": "Hourly", "remaining": True},
     {"name": "Transformed Testimony", "source": "1219099033687412", "match": "",
-     "kind": "Hourly"},
+     "kind": "Hourly", "remaining": True},
 ]
 
 # Projects whose logged time is unbillable (internal work); everything else is billable. A
@@ -139,7 +142,7 @@ DEFAULT_START = "2026-06-01"             # default date range (inclusive) for th
 DEFAULT_END = "2026-06-30"               #   entries with start <= entered_on <= end are counted
 ASSIGNEE_HOURS_CAP = 128                 # estimated hours each assignee is expected to fill (all projects)
 # Team Capacity chart shows only these people (sorted by remaining), with Unassigned pinned far right.
-TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roach", "Alice Chao"]
+TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roach"]
 PORT = 8765
 API = "https://app.asana.com/api/1.0"
 PROJECT_NAMES = {p["gid"]: p["name"] for p in PROJECTS}
@@ -1037,6 +1040,9 @@ def carve_out_summary(c, start, end, refresh=False):
             for t in hits if not t.get("completed") and not is_excluded(t, gid)}
     task_est = {g: d["hours"] + sum(s["hours"] for s in d["subtasks"]) for g, d in live.items()}
     est = sum(task_est.values())
+    # Time already tracked to those open tasks (parent + every listed subtask), for
+    # "remaining" carve-outs.
+    tracked = sum(d["actual"] + sum(s["actual"] for s in d["subtasks"]) for d in live.values())
 
     # Logged time counts whether or not the task has since been finished. A subtask's time is
     # credited to its parent's row, so the task table adds up to the card.
@@ -1097,7 +1103,9 @@ def carve_out_summary(c, start, end, refresh=False):
         "source_name": PROJECT_NAMES.get(gid, gid),
         "match": c["match"],
         "kind": c.get("kind"),
-        "cap": round(est, 2),
+        # A "remaining" carve-out's capacity is what was left at the start of the range: the
+        # board's remaining hours now plus what was logged in the range.
+        "cap": round(est - tracked + logged / 60, 2) if c.get("remaining") else round(est, 2),
         "ntasks": len(live),
         "hours": round(logged / 60, 2),
         "nentries": nentries,
@@ -1271,6 +1279,21 @@ PAGE = r"""<!DOCTYPE html>
   .summary-stat .l { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.05em; }
   .summary-bar.est .summary-stat .n { color:var(--blue-d); }
   .summary-stat .n.neg { color:var(--red); }
+  /* Team availability (MSA Project Capacity): a plain-words verdict, then a meter. Red when
+     the remaining capacity is more than the team can physically work this month. */
+  .avail-verdict { padding:10px 14px; margin:0 0 12px; border-radius:8px; border:1px solid var(--border);
+                   border-left:4px solid var(--green); background:var(--panel); line-height:1.5; }
+  .avail-verdict.over { border-color:var(--red); border-left-width:4px;
+                        background:color-mix(in srgb, var(--red) 14%, var(--panel)); }
+  .avail-verdict.over strong { color:var(--red); }
+  .avail-verdict.ok strong { color:var(--green-d); }
+  .avail-meter { position:relative; display:flex; height:14px; border-radius:7px; overflow:hidden;
+                 background:var(--panel2); }
+  .avail-meter .seg.ok { background:var(--green); }
+  .avail-meter .seg.over { background:var(--red); }
+  .avail-meter .mark { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:var(--text); }
+  .avail-legend { display:flex; justify-content:space-between; font-size:11px; color:var(--faint);
+                  margin:4px 0 14px; font-variant-numeric:tabular-nums; }
   .card.logged:hover { border-color:var(--green); }
   .card.logged .stat .n, .card.logged .go { color:var(--green-d); }
   .card.logged .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
@@ -3236,13 +3259,41 @@ async function renderDashboard() {
             const possible = r2(TEAM_MEMBERS.length * TEAM_DAILY_HOURS * wp.left);
             const remaining = Math.max(left, 0);
             const gap = r2(possible - remaining);
+            const short = gap < 0;
+            const people = TEAM_MEMBERS.length;
+            // Pace each person would need to clear the remaining capacity by month end.
+            const perDay = people && wp.left ? remaining / (people * wp.left) : null;
+            const pctNeeded = possible ? remaining / possible * 100 : (remaining > 0 ? Infinity : 0);
+            // The verdict leads, in words, so "can we physically do this?" is never a sum the
+            // reader has to do from the stats. Red banner = impossible at TEAM_DAILY_HOURS.
+            const verdict = short
+              ? `<div class="avail-verdict over"><strong>Not achievable this month.</strong>
+                   The remaining capacity is ${h2(remaining)} h but the team can work at most
+                   ${h2(possible)} h — <strong>${h2(-gap)} h can't be worked</strong>, even with all
+                   ${people} people at ${h2(TEAM_DAILY_HOURS)} h/day for the ${plural(wp.left, 'work day')} left.
+                   ${perDay != null ? `Clearing it would take ${h2(perDay)} h/day each.` : ''}</div>`
+              : `<div class="avail-verdict ok"><strong>Achievable.</strong>
+                   The team can work ${h2(possible)} h before month end, ${h2(gap)} h more than the
+                   ${h2(remaining)} h of remaining capacity${perDay != null ? ` (${h2(perDay)} h/day each)` : ''}.</div>`;
+            // Meter scaled to the larger of the two: green = hours the team can cover, red = the
+            // shortfall beyond what's physically possible, faint = spare team hours.
+            const scale = Math.max(possible, remaining) || 1;
+            const pct = v => (v / scale * 100).toFixed(2) + '%';
+            const meter = `<div class="avail-meter" role="img" aria-label="Remaining capacity ${h2(remaining)} h against ${h2(possible)} h possible">
+                <div class="seg ok" style="width:${pct(Math.min(possible, remaining))}"></div>
+                ${short ? `<div class="seg over" style="width:${pct(-gap)}"></div>` : ''}
+                <div class="mark" style="left:${pct(possible)}" title="Team hours possible"></div>
+              </div>
+              <div class="avail-legend"><span>0 h</span>
+                <span>${short ? `Team limit ${h2(possible)} h · need ${h2(remaining)} h` : `Need ${h2(remaining)} h · team limit ${h2(possible)} h`}</span></div>`;
             view.insertAdjacentHTML('beforeend',
-              '<h2 class="section-h flush">Team availability · rest of month</h2>' + summaryBar([
+              '<h2 class="section-h flush">Team availability · rest of month</h2>' + verdict + meter + summaryBar([
                 { n: h2(possible) + ' h', l: 'Team hours possible' },
-                { n: h2(remaining) + ' h', l: 'Remaining capacity' },
-                { n: h2(Math.abs(gap)) + ' h', l: gap < 0 ? 'Short of capacity' : 'Spare team hours', neg: gap < 0 },
-                { n: (possible ? (remaining / possible * 100).toFixed(0) : '0') + '%', l: 'Of possible hours needed' },
-                { n: `${TEAM_MEMBERS.length} × ${h2(TEAM_DAILY_HOURS)} h × ${wp.left}`, l: 'People × hours/day × days left' },
+                { n: h2(remaining) + ' h', l: 'Remaining capacity', neg: short },
+                { n: h2(Math.abs(gap)) + ' h', l: short ? 'Cannot be worked' : 'Spare team hours', neg: short },
+                { n: (isFinite(pctNeeded) ? pctNeeded.toFixed(0) : '—') + '%', l: 'Of possible hours needed', neg: short },
+                { n: perDay != null ? h2(perDay) + ' h' : '—', l: 'Hours/day each needed', neg: perDay != null && perDay > TEAM_DAILY_HOURS },
+                { n: `${people} × ${h2(TEAM_DAILY_HOURS)} h × ${wp.left}`, l: 'People × hours/day × days left' },
               ]));
             const msa = capSection('MSA projects · monthly capacity', null, false);
             const est = capSection('Estimate-based projects · capacity = open task estimates', 'Estimate', false);
@@ -3257,7 +3308,7 @@ async function renderDashboard() {
           const hourly = others.filter(w => w.kind === 'Hourly');
           if (hourlyCap.length || hourly.length) {
             view.insertAdjacentHTML('beforeend',
-              `<h2 class="section-h${hasCapShown ? '' : ' flush'}">Hourly</h2>`);
+              `<h2 class="section-h${hasCapShown ? '' : ' flush'}">Hourly projects</h2>`);
             const grid = document.createElement('div');
             grid.className = 'grid cap-grid';
             hourlyCap.forEach(c => { c.classList.add('cap'); grid.appendChild(c); });
