@@ -308,23 +308,14 @@
   #updated { font-size:12px; color:var(--muted); }
   .chart-box { position:relative; height:480px; margin-top:10px; }
   .chart-box.preview-box { height:300px; }   /* Graph Colors' sample chart */
+  .color-panel { margin-top:14px; }
+  /* Projects are many; two columns keep the list short on a wide screen. */
+  .color-list.color-cols { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); column-gap:28px; }
+  .color-list.color-cols .color-row:last-child { border-bottom:1px solid var(--border); }
   .muted { color:var(--muted); }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   /* Team Capacity: per-person project donuts under the bar chart */
   .donut-sub { margin:-4px 0 12px; }
-  .donut-legend { display:flex; flex-wrap:wrap; gap:8px 18px; margin:0 0 18px; }
-  .dl-item { display:inline-flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); }
-  .dl-item i { width:11px; height:11px; border-radius:3px; flex:0 0 auto; }
-  /* The legend swatch for a real project is a color input: click it for the browser's color
-     wheel and that project is recolored everywhere (saved per-browser). The two synthetic
-     grey slices stay plain <i> markers. */
-  .dl-item input.dl-swatch { -webkit-appearance:none; appearance:none; width:13px; height:13px;
-             padding:0; border:0; border-radius:3px; flex:0 0 auto; cursor:pointer;
-             background:none; outline:1px solid transparent; }
-  .dl-item input.dl-swatch:hover { outline:1px solid var(--text); outline-offset:2px; }
-  .dl-item input.dl-swatch::-webkit-color-swatch-wrapper { padding:0; }
-  .dl-item input.dl-swatch::-webkit-color-swatch { border:0; border-radius:3px; }
-  .dl-item input.dl-swatch::-moz-color-swatch { border:0; border-radius:3px; }
   /* Chart.js paints its tooltip inside the canvas, so on the 170 px donut cards it was clipped
      at the card edge. Those charts use this DOM tooltip instead: fixed-position, above every
      card and the sticky sidebar, and clamped into the viewport. */
@@ -1611,7 +1602,7 @@ const PROJECT_PALETTE = [
 const PROJECT_COLORS = {
   'Georgia Grown Market MSA': '#2ca02c',   // green
 };
-// User-picked project colors, set by clicking a swatch in a donut legend and saved per person
+// User-picked project colors, set on the Graph Colors tab and saved per person
 // exactly like the per-person colors (Firestore users/{uid}.graphColors.projects + localStorage). A choice here wins over the pinned
 // PROJECT_COLORS and over auto-assignment, so the project reads that color everywhere.
 const PROJECT_COLOR_STORE = 'projectColors.v1';
@@ -1627,7 +1618,11 @@ let projectColorConfig = loadProjectColorConfig();
 // color in every person's ring.
 const _projColors = {};
 let _projColorN = 0;
+// Every project name a ring has drawn this session (carve-outs such as Support Tickets aren't in
+// PROJECT_ROSTER), so the Graph Colors tab can list them.
+const _seenProjects = new Set();
 function projectColor(name){
+  _seenProjects.add(name);
   if (name in projectColorConfig) return projectColorConfig[name];   // user choice wins
   if (name in PROJECT_COLORS) return PROJECT_COLORS[name];
   if (name in _projColors) return _projColors[name];
@@ -1668,59 +1663,34 @@ function donutSlices(map){
   return top;
 }
 
-// Repaint every live donut from the current project colors, so a color picked in the legend
-// takes effect immediately without rebuilding the tab.
+// Repaint every live donut from the current project colors, so a color picked on the Graph
+// Colors tab takes effect at once. A full update(): update('none') redraws with Chart.js's
+// cached element colors, so the slices kept their old color.
 function recolorDonuts(){
   donutCharts.forEach(c => {
     c.data.datasets[0].backgroundColor = c.data.labels.map(sliceColor);
-    c.update('none');
+    c.update();
   });
 }
 
 // A grid of one donut per person, showing how that person's hours split across projects.
 // rows: [{ name, total, slices:[{label, hours}], caption? }] — total is what the ring adds up
 // to (the capacity target when a FREE_SLICE is present), caption overrides the line beneath.
-// Colors are shared across every ring, so a single legend above the grid covers them all.
-// Clicking a ring calls onPick(row).
+// Colors are shared across every ring and set per person on the Graph Colors tab (no legend
+// here — hover a slice for its project). Clicking a ring calls onPick(row).
 function donutGrid(container, rows, opts){
   const o = opts || {};
   rows = rows.filter(r => r.slices.length);
   if (!rows.length) return;
-  // Legend lists every project drawn below, heaviest overall first, with the synthetic
-  // "Other"/"Unallocated" slices pinned to the end.
-  const totals = {};
-  rows.forEach(r => r.slices.forEach(s => { totals[s.label] = (totals[s.label] || 0) + s.hours; }));
-  // A real project's swatch is a color input (click = color wheel, saved to localStorage);
-  // the synthetic "Other"/"Unallocated" slices keep their fixed grey marker.
-  const legendKeys = Object.keys(totals)
-    .sort((a, b) => sliceRank(a) - sliceRank(b) || totals[b] - totals[a]);
-  // The swatch carries an index, not the project name, so names with markup-significant
-  // characters can't break the attribute or the lookup.
-  const legend = legendKeys
-    .map((p, i) => `<span class="dl-item">${sliceRank(p)
-        ? `<i style="background:${sliceColor(p)}"></i>`
-        : `<input type="color" class="dl-swatch" value="${sliceColor(p)}" data-pi="${i}"
-                  title="Change the color of ${esc(p)}">`}${esc(p)}</span>`)
-    .join('');
   container.insertAdjacentHTML('beforeend',
     `<h2 class="section-h">${esc(o.title || 'By project, per person')}</h2>
      ${o.sub ? `<p class="hint donut-sub">${esc(o.sub)}</p>` : ''}
-     <div class="donut-legend">${legend}</div>
      <div class="donut-grid">${rows.map((r, i) =>
        `<div class="donut-card" data-di="${i}">
           <h4>${esc(r.name)}</h4>
           <div class="donut-box"><canvas id="donut-${i}"></canvas></div>
           <div class="donut-total">${esc(r.caption || `${h2(r.total)} h · ${plural(r.slices.length, 'project')}`)}</div>
         </div>`).join('')}</div>`);
-  // Picking a color repaints every ring in place (and the swatch itself) — no reload, and the
-  // choice sticks for the next session.
-  container.querySelectorAll('input.dl-swatch').forEach(inp => {
-    inp.oninput = () => {
-      projectColorConfig[legendKeys[+inp.dataset.pi]] = inp.value;
-      saveProjectColorConfig();
-      recolorDonuts();
-    };
-  });
   rows.forEach((r, i) => {
     const el = document.getElementById('donut-' + i);
     if (!el) return;
@@ -1918,7 +1888,7 @@ const TABS = {
   actualdaily: { label:'Daily Log', title:'Daily Log · Logged',
     sub:'Day by day, what each person logged their time to in the selected range.' },
   settings: { label:'Graph Colors', title:'Graph Colors',
-    sub:'Pick a color for each person — saved to your account (so it follows you to any browser) and applied to every per-person chart.' },
+    sub:'Pick a color for each person and each project — saved to your account, so it follows you to any browser. People color the stacked bars; projects color the Team Capacity rings.' },
   theme: { label:'Theme', title:'Theme',
     sub:'Pick how the dashboard looks to you — backgrounds, panels and accents. Saved to your account, so it follows you to every browser and nobody else\'s view changes.' },
   holidays: { label:'Holidays', title:'Holidays',
@@ -3548,8 +3518,8 @@ async function renderDashboard() {
       const slices = donutSlices(m);
       return { name: r.name, slices, total: slices.reduce((a, s) => a + s.hours, 0) };
     }), { title: 'Logged hours by project, per person',
-          sub: 'Each ring is one person. Click a card for their per-project totals and the tasks '
-             + 'behind them; click a legend swatch to recolor that project.',
+          sub: 'Each ring is one person — hover a slice for its project. Click a card for their '
+             + 'per-project totals and the tasks behind them. Project colors are set in Graph Colors.',
           onPick: r => showLoggedBreakdown(r.name) });
   }
 
@@ -4055,38 +4025,44 @@ async function renderDashboard() {
     }
   }
 
-  // Settings: per-person graph colors. Choices are saved per person (see personColor) and take
-  // effect on any per-person chart the next time it's drawn. A preview chart above the list
-  // (sample hours, every person stacked on a few projects) recolors live as a color is picked.
+  // Settings › Graph Colors: two sections, People (the per-person stacked bars) and Projects
+  // (the Team Capacity donut slices), each a live preview chart over a list of color pickers.
+  // Every choice is saved per person (savePersonColorConfig / saveProjectColorConfig →
+  // users/{uid}.graphColors) and recolors the preview as the picker moves.
   function renderSettings() {
     destroyCharts();
+    const colorRow = (kind, i, name, color, custom) => `<div class="color-row" data-kind="${kind}" data-i="${i}">
+        <input type="color" class="color-pick" value="${color}" aria-label="Color for ${esc(name)}">
+        <span class="color-name">${esc(name)}</span>
+        <button class="reset-one"${custom ? '' : ' disabled'}>Reset</button>
+      </div>`;
     // Everyone we might color: known team + Unassigned, plus anyone seen in a chart this
     // session, plus anyone who already has a saved color.
     const people = [...new Set([...TEAM_MEMBERS, 'Unassigned', ..._seenPeople, ...Object.keys(personColorConfig)])];
-    const rows = people.map(p => {
-      const custom = p in personColorConfig;
-      return `<div class="color-row" data-person="${esc(p)}">
-          <input type="color" class="color-pick" value="${personColor(p)}">
-          <span class="color-name">${esc(p)}</span>
-          <button class="reset-one"${custom ? '' : ' disabled'}>Reset</button>
-        </div>`;
-    }).join('');
-    view.innerHTML = `<h2 class="section-h flush">Preview <span class="section-aside">sample hours — not real data</span></h2>
+    // Every project a ring can show: the roster, the carve-outs (their own slices on Team
+    // Capacity), anything a ring drew this session, and anything already given a color.
+    const projects = [...new Set([...PROJECT_ROSTER, ...(Array.isArray(carveData) ? carveData.map(c => c.name) : []),
+                                  ..._seenProjects, ...Object.keys(projectColorConfig)])]
+      .filter(n => n && n !== OTHER_SLICE && n !== FREE_SLICE);
+    view.innerHTML = `<h2 class="section-h flush">People <span class="section-aside">the per-person stacked bars · preview uses sample hours</span></h2>
       <div class="chart-box preview-box"><canvas id="chart"></canvas></div>
-      <h2 class="section-h">Colors</h2>
-      <div class="panel">
-        <div class="color-list">${rows}</div>
-        <div class="color-actions"><button class="btn back" id="reset-all">Reset all to defaults</button></div>
-        <p class="hint">Applies to the per-person stacked bar charts and the Unassigned bar on Team Capacity.</p>
+      <div class="panel color-panel">
+        <div class="color-list">${people.map((p, i) => colorRow('person', i, p, personColor(p), p in personColorConfig)).join('')}</div>
+        <div class="color-actions"><button class="btn back" id="reset-people">Reset people to defaults</button></div>
+      </div>
+      <h2 class="section-h">Projects <span class="section-aside">the Team Capacity rings · preview uses sample hours</span></h2>
+      <div class="chart-box preview-box"><canvas id="proj-preview"></canvas></div>
+      <div class="panel color-panel">
+        <div class="color-list color-cols">${projects.map((p, i) => colorRow('project', i, p, projectColor(p), p in projectColorConfig)).join('')}</div>
+        <div class="color-actions"><button class="btn back" id="reset-projects">Reset projects to defaults</button></div>
       </div>`;
-    // Sample data: a few configured project names, each split across everyone with made-up but
-    // stable hours (same numbers every render, so only the colors move as you pick).
-    const projects = (PROJECT_ROSTER.length ? PROJECT_ROSTER : ['Project A', 'Project B', 'Project C']).slice(0, 5);
+    // Sample data: stable made-up hours (same every render), so only the colors move as you pick.
     const sample = (p, j) => r2(4 + ((p.length * 7 + j * 13 + p.charCodeAt(0)) % 23) * 0.75);
+    const barProjects = (PROJECT_ROSTER.length ? PROJECT_ROSTER : ['Project A', 'Project B', 'Project C']).slice(0, 5);
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
-      data: { labels: projects, datasets: people.map((p, i) => ({
-        label: p, data: projects.map((_, j) => sample(p, j + i)),
+      data: { labels: barProjects, datasets: people.map((p, i) => ({
+        label: p, data: barProjects.map((_, j) => sample(p, j + i)),
         backgroundColor: personColor(p), borderColor: personColor(p), borderWidth: 0 })) },
       options: { responsive: true, maintainAspectRatio: false, animation: false,
         plugins: { legend: { position: 'bottom' },
@@ -4094,19 +4070,38 @@ async function renderDashboard() {
         scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
                   y: { stacked: true, beginAtZero: true, title: { display: true, text: 'Hours logged' } } } },
     });
-    const recolor = (name, color) => {
-      const ds = chart && chart.data.datasets.find(d => d.label === name);
-      // A full update(), not update('none'): 'none' redraws with Chart.js's cached element
-      // colors, so the bars kept their old color. Animation is off, so this is still instant.
-      if (ds) { ds.backgroundColor = ds.borderColor = color; chart.update(); }
+    // One ring with every project as a slice, legend beside it, so each color reads against
+    // its neighbours the way it will on Team Capacity.
+    const ring = new Chart(document.getElementById('proj-preview'), {
+      type: 'doughnut',
+      data: { labels: projects, datasets: [{ data: projects.map((p, j) => sample(p, j)),
+        backgroundColor: projects.map(projectColor), borderColor: DONUT_BORDER, borderWidth: 2 }] },
+      options: { responsive: true, maintainAspectRatio: false, animation: false, cutout: '58%',
+        plugins: { legend: { position: 'right', labels: { boxWidth: 12, padding: 8 } },
+                   tooltip: { callbacks: { label: c => `${c.label}: ${h2(c.parsed)} h` } } } },
+    });
+    donutCharts.push(ring);   // torn down by destroyCharts like any other ring
+    // A full update(), not update('none'): 'none' redraws with Chart.js's cached element colors.
+    const repaint = kind => {
+      if (kind === 'person') chart.data.datasets.forEach(d => { d.backgroundColor = d.borderColor = personColor(d.label); });
+      else ring.data.datasets[0].backgroundColor = projects.map(projectColor);
+      (kind === 'person' ? chart : ring).update();
     };
     view.querySelectorAll('.color-row').forEach(row => {
-      const name = row.dataset.person;
+      const kind = row.dataset.kind, person = kind === 'person';
+      const name = (person ? people : projects)[+row.dataset.i];   // by index: names may hold any characters
+      const cfg = () => person ? personColorConfig : projectColorConfig;
+      const save = () => person ? savePersonColorConfig() : saveProjectColorConfig();
       const pick = row.querySelector('.color-pick'), reset = row.querySelector('.reset-one');
-      pick.oninput = () => { personColorConfig[name] = pick.value; savePersonColorConfig(); reset.disabled = false; recolor(name, pick.value); };
-      reset.onclick = () => { delete personColorConfig[name]; savePersonColorConfig(); pick.value = personDefaultColor(name); reset.disabled = true; recolor(name, pick.value); };
+      pick.oninput = () => { cfg()[name] = pick.value; save(); reset.disabled = false; repaint(kind); };
+      reset.onclick = () => {
+        delete cfg()[name]; save(); reset.disabled = true;
+        pick.value = person ? personDefaultColor(name) : projectColor(name);
+        repaint(kind);
+      };
     });
-    document.getElementById('reset-all').onclick = () => { personColorConfig = {}; savePersonColorConfig(); renderSettings(); };
+    document.getElementById('reset-people').onclick = () => { personColorConfig = {}; savePersonColorConfig(); renderSettings(); };
+    document.getElementById('reset-projects').onclick = () => { projectColorConfig = {}; saveProjectColorConfig(); renderSettings(); };
   }
 
   // Settings › Theme: one card per theme, each painted in that theme's own colors — a miniature

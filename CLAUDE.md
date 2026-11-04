@@ -167,7 +167,9 @@ Chart data colors come from helpers, never literals:
   (longer than the project roster, so no two projects ever share a color). Colors are claimed
   for the whole `PROJECT_ROSTER` up front, so a project looks the same on the Estimated and
   Logged donuts. Pin one by hand in `PROJECT_COLORS` (Georgia Grown is green) — those hues are
-  reserved and never auto-assigned.
+  reserved and never auto-assigned. People override them per person in Graph Colors › Projects
+  (the donuts have no legend of their own), which lists the roster, the carve-outs, and every
+  name `projectColor` has drawn (`_seenProjects`).
 - `PERSON_PALETTE` deliberately contains **no orange/amber/gold**, because `#f0c674` is
   reserved for the per-bar capacity marker. Keep it that way. `Unassigned` is always grey
   (seeded into `_personColors`); real people get their color from the Graph Colors tab.
