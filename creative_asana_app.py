@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Each entry becomes a clickable widget on the dashboard.
 # "cap" (optional) is the project's monthly hour capacity, shown on the widgets.
 # "kind" (optional) classifies the engagement (e.g. "Support"); it tags the project's card on
-# MSA Project Capacity.
+# MSA Project Capacity. "Hourly" projects (billed by the hour) get their own section there.
 PROJECTS = [
     {"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70},
     {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38},
@@ -54,9 +54,9 @@ PROJECTS = [
     {"gid": "1216208009045309", "name": "Marsh and Main"},
     {"gid": "1217239377209835", "name": "Sales"},
     {"gid": "1217194342869306", "name": "St. Patrick's Day"},
-    {"gid": "1219066223453162", "name": "The Recreational Group: Thatch"},
-    {"gid": "1219254406444525", "name": "Slimothy the Slug"},
-    {"gid": "1219099033687412", "name": "Transformed Testimony"},
+    {"gid": "1219066223453162", "name": "The Recreational Group: Thatch", "kind": "Hourly"},
+    {"gid": "1219254406444525", "name": "Slimothy the Slug", "kind": "Hourly"},
+    {"gid": "1219099033687412", "name": "Transformed Testimony", "kind": "Hourly"},
 ]
 
 # Budget groups: several projects that share ONE combined monthly capacity.
@@ -92,9 +92,17 @@ GROUPS = [
 # into that group's card instead of getting its own.
 CARVE_OUTS = [
     {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday",   # Internal IIT Backlog
-     "billable": False},
+     "billable": False, "kind": "Hourly"},
     {"name": "Support Tickets", "source": "1214228966572563", "match": "Support Tickets",   # Internal IIT Backlog
      "kind": "Support"},
+    # An empty match claims the whole board: its budget is every open task's estimate. Such a
+    # project leaves "Other projects" and shows only as this card.
+    {"name": "The Recreational Group: Thatch", "source": "1219066223453162", "match": "",
+     "kind": "Hourly"},
+    {"name": "Slimothy the Slug", "source": "1219254406444525", "match": "",
+     "kind": "Hourly"},
+    {"name": "Transformed Testimony", "source": "1219099033687412", "match": "",
+     "kind": "Hourly"},
 ]
 
 # Projects whose logged time is unbillable (internal work); everything else is billable. A
@@ -1495,6 +1503,8 @@ const capColorPace = (h, paceTarget) => h >= paceTarget - PACE_TOLERANCE ? C.gre
 // carrying more than CAP_GREEN_MIN remaining hours is booked up (green); anyone below it has
 // room and needs work assigned (red).
 const CAP_GREEN_MIN = 80;
+// Workable hours per person per day, for MSA Project Capacity's "Team hours possible".
+const TEAM_DAILY_HOURS = 6;
 const capColorEst = h => h > CAP_GREEN_MIN ? C.green : C.red;
 
 // Label for task rows that sit in no status column; used by the status filters and shown
@@ -2033,8 +2043,10 @@ function capCard(w) {
 // A CARVE_OUTS budget: capacity is the matching tasks' estimated hours, usage is what was
 // logged to them. Opens its own page, which lists only the matching tasks.
 function carveCard(w) {
-  const c = capCard(w);
-  c.querySelector('h3').insertAdjacentHTML('beforeend',
+  // Its section heading already says what kind it is, so no kind tag; a whole-board carve-out
+  // (empty match) is its own source, so no "from" tag either.
+  const c = capCard(Object.assign({}, w, { kind: null }));
+  if (w.match) c.querySelector('h3').insertAdjacentHTML('beforeend',
     ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
   c.querySelector('.stat .l').textContent = 'Est. Hours';
   c.onclick = () => { location.hash = '#/carve/' + encodeURIComponent(w.name); };
@@ -3166,7 +3178,10 @@ async function renderDashboard() {
                              .sort((a, b) => b.hours - a.hours);
         // Archived projects still show their logged hours, but in a section of their own at
         // the bottom rather than mixed in with the active work.
-        const others = loggedData.filter(w => w.cap == null && !memberGids.has(w.gid) && !isArchived(w))
+        // A carve-out with an empty match is the whole board, so that board shows only as its card.
+        const wholeBoard = new Set((carveData || []).filter(w => !w.match).map(w => w.source));
+        const others = loggedData.filter(w => w.cap == null && !memberGids.has(w.gid) && !isArchived(w)
+                                              && !wholeBoard.has(w.gid))
                          .sort((a, b) => b.hours - a.hours);
         const archived = loggedData.filter(w => isArchived(w) && w.hours > 0)
                            .sort((a, b) => b.hours - a.hours);
@@ -3198,10 +3213,11 @@ async function renderDashboard() {
         if (!hasCap && !others.length && !archived.length) {
           view.insertAdjacentHTML('beforeend', note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`));
         } else {
-          // Support engagements (kind "Support") get their own capacity section under the MSA
-          // projects; both still count in the summary bar above.
-          const capSection = (title, isSupport, flush) => {
-            const pick = w => (w.kind === 'Support') === isSupport;
+          // Budgets split into sections by kind: plain MSA projects, then "Estimate" (budget = the
+          // project's open task estimates), then "Support", then "Hourly". All of them count in the summary bar.
+          const SECTION_KINDS = ['Estimate', 'Support', 'Hourly'];
+          const capSection = (title, kind, flush) => {
+            const pick = w => kind ? w.kind === kind : !SECTION_KINDS.includes(w.kind);
             const cards = [...groups.filter(pick).map(groupCard), ...standalone.filter(pick).map(capCard),
                            ...carves.filter(pick).map(carveCard)];
             if (!cards.length) return false;
@@ -3212,9 +3228,41 @@ async function renderDashboard() {
             view.appendChild(capGrid);
             return true;
           };
+          let hasCapShown = false;
           if (hasCap) {
-            const msa = capSection('MSA projects · monthly capacity', false, true);
-            capSection('Support · monthly capacity', true, !msa);
+            // Can the team actually burn the remaining budget? Workable hours left this month
+            // (every team member at TEAM_DAILY_HOURS per remaining work day) against the
+            // remaining capacity across every budgeted card above.
+            const possible = r2(TEAM_MEMBERS.length * TEAM_DAILY_HOURS * wp.left);
+            const remaining = Math.max(left, 0);
+            const gap = r2(possible - remaining);
+            view.insertAdjacentHTML('beforeend',
+              '<h2 class="section-h flush">Team availability · rest of month</h2>' + summaryBar([
+                { n: h2(possible) + ' h', l: 'Team hours possible' },
+                { n: h2(remaining) + ' h', l: 'Remaining capacity' },
+                { n: h2(Math.abs(gap)) + ' h', l: gap < 0 ? 'Short of capacity' : 'Spare team hours', neg: gap < 0 },
+                { n: (possible ? (remaining / possible * 100).toFixed(0) : '0') + '%', l: 'Of possible hours needed' },
+                { n: `${TEAM_MEMBERS.length} × ${h2(TEAM_DAILY_HOURS)} h × ${wp.left}`, l: 'People × hours/day × days left' },
+              ]));
+            const msa = capSection('MSA projects · monthly capacity', null, false);
+            const est = capSection('Estimate-based projects · capacity = open task estimates', 'Estimate', false);
+            const sup = capSection('Support · monthly capacity', 'Support', false);
+            hasCapShown = msa || est || sup;
+          }
+          // Hourly engagements (billed by the hour): any budgeted card of kind "Hourly" (e.g. a
+          // whole-board carve-out) followed by the uncapped hourly projects' logged-hours cards.
+          const hourlyCap = [...groups.filter(w => w.kind === 'Hourly').map(groupCard),
+                             ...standalone.filter(w => w.kind === 'Hourly').map(capCard),
+                             ...carves.filter(w => w.kind === 'Hourly').map(carveCard)];
+          const hourly = others.filter(w => w.kind === 'Hourly');
+          if (hourlyCap.length || hourly.length) {
+            view.insertAdjacentHTML('beforeend',
+              `<h2 class="section-h${hasCapShown ? '' : ' flush'}">Hourly</h2>`);
+            const grid = document.createElement('div');
+            grid.className = 'grid cap-grid';
+            hourlyCap.forEach(c => { c.classList.add('cap'); grid.appendChild(c); });
+            hourly.forEach(w => grid.appendChild(loggedCard(w)));
+            view.appendChild(grid);
           }
           const section = (title, rows, flush) => {
             if (!rows.length) return;
@@ -3225,8 +3273,10 @@ async function renderDashboard() {
             rows.forEach(w => grid.appendChild(loggedCard(w)));
             view.appendChild(grid);
           };
-          section('Other projects', others, !hasCap);
-          section('Archived projects', archived, !hasCap && !others.length);
+          const rest = others.filter(w => w.kind !== 'Hourly');
+          const anyAbove = hasCapShown || hourlyCap.length || hourly.length;
+          section('Other projects', rest, !anyAbove);
+          section('Archived projects', archived, !anyAbove && !rest.length);
         }
         wireRangeSel();
       }
@@ -3793,7 +3843,8 @@ async function renderCarveDetail(name) {
       }
       document.getElementById('page-title').textContent = w.name;
       document.getElementById('sub').textContent =
-        `Tasks on ${w.source_name} containing “${w.match}” · estimated hours (excludes Completed tasks) ` +
+        (w.match ? `Tasks on ${w.source_name} containing “${w.match}”` : `All tasks on ${w.source_name}`) +
+        ` · estimated hours (excludes Completed tasks) ` +
         `against hours logged ${rangeLabel(dateStart, dateEnd)}`;
       document.getElementById('dash-updated').textContent = w.updated ? ('Updated ' + w.updated) : '';
       notesRefresh = refresh;
