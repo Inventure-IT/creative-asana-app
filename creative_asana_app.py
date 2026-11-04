@@ -97,15 +97,12 @@ CARVE_OUTS = [
      "kind": "Support"},
     # An empty match claims the whole board: its budget is every open task's estimate. Such a
     # project leaves "Other projects" and shows only as this card.
-    # "remaining": True budgets the board's REMAINING hours instead of its full estimates:
-    # capacity = (open estimates - time already tracked to them) + hours logged in the range,
-    # so the card's "Remaining" is exactly the board's estimated hours still left to work.
     {"name": "The Recreational Group: Thatch", "source": "1219066223453162", "match": "",
-     "kind": "Hourly", "remaining": True},
+     "kind": "Hourly"},
     {"name": "Slimothy the Slug", "source": "1219254406444525", "match": "",
-     "kind": "Hourly", "remaining": True},
+     "kind": "Hourly"},
     {"name": "Transformed Testimony", "source": "1219099033687412", "match": "",
-     "kind": "Hourly", "remaining": True},
+     "kind": "Hourly"},
 ]
 
 # Projects whose logged time is unbillable (internal work); everything else is billable. A
@@ -1040,9 +1037,6 @@ def carve_out_summary(c, start, end, refresh=False):
             for t in hits if not t.get("completed") and not is_excluded(t, gid)}
     task_est = {g: d["hours"] + sum(s["hours"] for s in d["subtasks"]) for g, d in live.items()}
     est = sum(task_est.values())
-    # Time already tracked to those open tasks (parent + every listed subtask), for
-    # "remaining" carve-outs.
-    tracked = sum(d["actual"] + sum(s["actual"] for s in d["subtasks"]) for d in live.values())
 
     # Logged time counts whether or not the task has since been finished. A subtask's time is
     # credited to its parent's row, so the task table adds up to the card.
@@ -1061,13 +1055,27 @@ def carve_out_summary(c, start, end, refresh=False):
         label[t["gid"]] = tname
         for s in tree["subs"].get(t["gid"], []):
             label[s["gid"]] = f"{tname} › {s.get('name') or '(untitled)'}"
-    seen, logged, nentries, task_min, people, rows_out = set(), 0, 0, {}, {}, []
+    # Work already done before the range has burned part of the estimate, so it comes off the
+    # capacity. Only time on items the estimate covers counts: an open task itself and its
+    # subtasks, except a finished subtask with its own estimate (a closed budget, see build_task).
+    covered = set()
+    for g in live:
+        covered.add(g)
+        for s in tree["subs"].get(g, []):
+            if not ((s.get("completed") or is_excluded(s, gid)) and task_minutes(s)):
+                covered.add(s["gid"])
+    seen, prior, logged, nentries, task_min, people, rows_out = set(), set(), 0, 0, {}, {}, []
+    prior_min = 0
     for item_gid, rows in by_gid.items():
         for e in rows:
             entered = e.get("entered_on") or ""
+            egid = e.get("gid")
+            if entered and entered < start and item_gid in covered and not (egid and egid in prior):
+                if egid:
+                    prior.add(egid)
+                prior_min += e.get("duration_minutes") or 0
             if not entered or not (start <= entered <= end):
                 continue
-            egid = e.get("gid")
             if egid and egid in seen:
                 continue
             if egid:
@@ -1103,9 +1111,11 @@ def carve_out_summary(c, start, end, refresh=False):
         "source_name": PROJECT_NAMES.get(gid, gid),
         "match": c["match"],
         "kind": c.get("kind"),
-        # A "remaining" carve-out's capacity is what was left at the start of the range: the
-        # board's remaining hours now plus what was logged in the range.
-        "cap": round(est - tracked + logged / 60, 2) if c.get("remaining") else round(est, 2),
+        # Capacity for the range = open estimates less the work already logged against them
+        # before it started (never below zero).
+        "cap": round(max(est - prior_min / 60, 0), 2),
+        "estimated": round(est, 2),
+        "prior": round(prior_min / 60, 2),
         "ntasks": len(live),
         "hours": round(logged / 60, 2),
         "nentries": nentries,
@@ -1359,6 +1369,7 @@ PAGE = r"""<!DOCTYPE html>
   #updated { font-size:12px; color:var(--muted); }
   .chart-box { position:relative; height:480px; margin-top:10px; }
   .muted { color:var(--muted); }
+  .card-note { font-size:11px; color:var(--muted); margin:-2px 0 8px; font-variant-numeric:tabular-nums; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   /* Team Capacity: per-person project donuts under the bar chart */
   .donut-sub { margin:-4px 0 12px; }
@@ -2088,6 +2099,10 @@ function carveCard(w) {
   if (w.match) c.querySelector('h3').insertAdjacentHTML('beforeend',
     ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
   c.querySelector('.stat .l').textContent = 'Est. Hours';
+  // Time logged before the range already burned part of the estimate; say so, so the
+  // capacity figure isn't mistaken for the raw estimate.
+  if (w.prior > 0) c.querySelector('.stats').insertAdjacentHTML('afterend',
+    `<div class="card-note">${h2(w.estimated)} h estimated − ${h2(w.prior)} h logged before ${fmtDate(dateStart)}</div>`);
   c.onclick = () => { location.hash = '#/carve/' + encodeURIComponent(w.name); };
   return c;
 }
