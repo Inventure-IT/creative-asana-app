@@ -49,7 +49,9 @@
   .cap-bar .blk.on { background:var(--green); }
   .cap-bar.at .blk.on { background:var(--amber); }
   .cap-bar.over .blk.on { background:var(--red); }
-  .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; }
+  .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; display:flex; gap:12px;
+                 justify-content:space-between; font-variant-numeric:tabular-nums; }
+  .cap-bar .lab-r { color:var(--faint); white-space:nowrap; }
   /* Filter toolbar. Every tab that filters anything uses exactly one of these, directly
      under the stat strip, and it always opens with a bold .tb-label. It sits in its own
      panel so the controls read as one strip instead of floating on the page. */
@@ -200,7 +202,6 @@
   #updated { font-size:12px; color:var(--muted); }
   .chart-box { position:relative; height:480px; margin-top:10px; }
   .muted { color:var(--muted); }
-  .card-note { font-size:11px; color:var(--muted); margin:-2px 0 8px; font-variant-numeric:tabular-nums; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   /* Team Capacity: per-person project donuts under the bar chart */
   .donut-sub { margin:-4px 0 12px; }
@@ -787,21 +788,18 @@ function carveOutHits(c, tree){
   return tree.tasks.filter(t => (t.name || '').toLowerCase().includes(needle));
 }
 async function carveOutSummary(c, start, end){
+  // Mirrors carve_out_summary: capacity = estimates of every matching task still open OR worked
+  // on in the range, less time logged to those same items before the range; usage = range hours.
   const gid = c.source;
   const tree = await fetchTree(gid, false);
   const hits = carveOutHits(c, tree);
-  // Same rules as projectDetail: checked-off tasks and excluded columns carry no estimate.
-  const live = {}, taskEst = {};
-  for (const t of hits.filter(t => !t.completed && !isExcluded(t, gid))){
-    const d = live[t.gid] = buildTask(t, gid, tree.subs[t.gid] || []);
-    taskEst[t.gid] = d.hours + sum(d.subtasks.map(s => s.hours));
-  }
-  const est = sum(Object.values(taskEst));
+  const done = x => !!x.completed || isExcluded(x, gid);
+  const subsOf = t => tree.subs[t.gid] || [];
   // Logged time counts whether or not the task has since been finished. A subtask's time is
   // credited to its parent's row, so the task table adds up to the card.
   const owner = {}, minutes = {};
   for (const t of hits)
-    for (const it of [t, ...(tree.subs[t.gid] || [])]){
+    for (const it of [t, ...subsOf(t)]){
       owner[it.gid] = t.gid;
       if ((it.actual_time_minutes || 0) > 0) minutes[it.gid] = it.actual_time_minutes;
     }
@@ -811,46 +809,56 @@ async function carveOutSummary(c, start, end){
   for (const t of hits){
     const tname = t.name || '(untitled)';
     label[t.gid] = tname;
-    for (const s of tree.subs[t.gid] || []) label[s.gid] = `${tname} › ${s.name || '(untitled)'}`;
+    for (const s of subsOf(t)) label[s.gid] = `${tname} › ${s.name || '(untitled)'}`;
   }
-  // Work already done before the range has burned part of the estimate, so it comes off the
-  // capacity. Only time on items the estimate covers counts: an open task itself and its
-  // subtasks, except a finished subtask with its own estimate (a closed budget, see buildTask).
-  const covered = new Set();
-  for (const g of Object.keys(live)){
-    covered.add(g);
-    for (const s of tree.subs[g] || [])
-      if (!((s.completed || isExcluded(s, gid)) && taskMinutes(s))) covered.add(s.gid);
-  }
-  const seen = new Set(), prior = new Set(), taskMin = {}, people = {}, rowsOut = [];
-  let logged = 0, nentries = 0, priorMin = 0;
+  const seen = new Set(), worked = new Set(), taskMin = {}, people = {}, rowsOut = [];
+  let logged = 0, nentries = 0;
   for (const [g, rows] of Object.entries(byGid))
     for (const e of rows || []){
       const entered = e.entered_on || '';
-      if (entered && entered < start && covered.has(g) && !(e.gid && prior.has(e.gid))){
-        if (e.gid) prior.add(e.gid);
-        priorMin += e.duration_minutes || 0;
-      }
       if (!entered || entered < start || entered > end) continue;
       if (e.gid && seen.has(e.gid)) continue;
       if (e.gid) seen.add(e.gid);
       const m = e.duration_minutes || 0, by = (e.created_by || {}).name || 'Unknown';
+      worked.add(g);
       logged += m; nentries++;
       taskMin[owner[g]] = (taskMin[owner[g]] || 0) + m;
       people[by] = (people[by] || 0) + m;
       rowsOut.push({ gid: e.gid, date: entered, by, task: label[g] || '', hours: round2(m / 60) });
     }
   rowsOut.sort((x, y) => y.date.localeCompare(x.date) || y.by.localeCompare(x.by));
-  // One row per matching task that is still open or had time logged in the range.
-  const tasks = hits.filter(t => live[t.gid] || taskMin[t.gid]).map(t => ({
+  // Which tasks bring their estimate into the range: open ones, plus any worked on in it. Within
+  // such a task, a subtask with its own estimate closed without range time stays out.
+  const taskEst = {}, covered = new Set();
+  let openN = 0;
+  for (const t of hits){
+    if (done(t) && ![t, ...subsOf(t)].some(i => worked.has(i.gid))) continue;
+    if (!done(t)) openN++;
+    const keep = [t, ...subsOf(t).filter(s => !(done(s) && taskMinutes(s) && !worked.has(s.gid)))];
+    keep.forEach(i => covered.add(i.gid));
+    taskEst[t.gid] = sum(keep.map(taskMinutes)) / 60;
+  }
+  const est = sum(Object.values(taskEst));
+  // Work logged to those items before the range already burned part of their estimate.
+  const priorSeen = new Set();
+  let priorMin = 0;
+  for (const [g, rows] of Object.entries(byGid)){
+    if (!covered.has(g)) continue;
+    for (const e of rows || []){
+      const entered = e.entered_on || '';
+      if (!entered || entered >= start || (e.gid && priorSeen.has(e.gid))) continue;
+      if (e.gid) priorSeen.add(e.gid);
+      priorMin += e.duration_minutes || 0;
+    }
+  }
+  // One row per task that brought its estimate in (open, or worked on in the range).
+  const tasks = hits.filter(t => t.gid in taskEst).map(t => ({
     name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
-    section: sectionName(t, gid), done: !live[t.gid],
-    estimated: round2(taskEst[t.gid] || 0), logged: round2((taskMin[t.gid] || 0) / 60) }))
+    section: sectionName(t, gid), done: done(t),
+    estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
   return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null,
-    // Capacity for the range = open estimates less the work already logged against them
-    // before it started (never below zero).
-    cap: round2(Math.max(est - priorMin / 60, 0)), estimated: round2(est), prior: round2(priorMin / 60), ntasks: Object.keys(live).length, hours: round2(logged / 60), nentries, tasks,
+    cap: round2(Math.max(est - priorMin / 60, 0)), estimated: round2(est), prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes
     updated: nowStr() };
@@ -1362,8 +1370,8 @@ function capBar(hours, cap){
   const tone = over ? ' over' : (pct >= 100 ? ' at' : '');
   return `<div class="cap-bar${tone}">
       <div class="track">${blocks}</div>
-      <div class="lab">${h2(hours)} / ${h2(cap)} h used · ${pct.toFixed(0)}%${
-        over ? ' — over capacity' : (pct >= 100 ? ' — at capacity' : '')}</div>
+      <div class="lab"><span>${h2(hours)} / ${h2(cap)} h used · ${pct.toFixed(0)}%${
+        over ? ' — over capacity' : (pct >= 100 ? ' — at capacity' : '')}</span></div>
     </div>`;
 }
 function setCrumbs(items) {
@@ -1595,11 +1603,13 @@ function carveCard(w) {
   const c = capCard(Object.assign({}, w, { kind: null }));
   if (w.match) c.querySelector('h3').insertAdjacentHTML('beforeend',
     ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
-  c.querySelector('.stat .l').textContent = 'Est. Hours';
-  // Time logged before the range already burned part of the estimate; say so, so the
-  // capacity figure isn't mistaken for the raw estimate.
-  if (w.prior > 0) c.querySelector('.stats').insertAdjacentHTML('afterend',
-    `<div class="card-note">${h2(w.estimated)} h estimated − ${h2(w.prior)} h logged before ${fmtDate(dateStart)}</div>`);
+  c.querySelector('.stat .l').textContent = 'Capacity';
+  // Capacity is the estimate less time already logged before the range. Show that sum in the
+  // bar's footer (right-aligned), so every card keeps the same shape.
+  const lab = c.querySelector('.cap-bar .lab');
+  if (lab) lab.insertAdjacentHTML('beforeend', w.prior > 0
+    ? `<span class="lab-r">${h2(w.estimated)} est − ${h2(w.prior)} before ${fmtDate(dateStart).replace(/, \d{4}$/, '')}</span>`
+    : `<span class="lab-r">${h2(w.estimated)} est</span>`);
   c.onclick = () => { location.hash = '#/carve/' + encodeURIComponent(w.name); };
   return c;
 }
@@ -3341,7 +3351,10 @@ async function renderCarveDetail(name) {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:w.name}]);
     const used = Number(w.hours || 0), cap = Number(w.cap || 0), left = r2(cap - used);
     view.innerHTML = summaryBar([
-      { n: h2(cap) + ' h', l: 'Est. hours (capacity)' },
+      // Capacity = the tasks' estimates less what was logged to them before the range.
+      { n: h2(w.estimated ?? cap) + ' h', l: 'Estimated hours' },
+      ...(w.prior > 0 ? [{ n: h2(w.prior) + ' h', l: 'Logged before ' + fmtDate(dateStart) }] : []),
+      { n: h2(cap) + ' h', l: 'Capacity' },
       { n: h2(used) + ' h', l: 'Hours used' },
       { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
       { n: (cap ? (used / cap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
@@ -3364,7 +3377,7 @@ async function renderCarveDetail(name) {
          <thead><tr><th>Task</th><th>Status</th><th>Assignee</th>
            <th class="hours">Est.</th><th class="hours">Logged</th></tr></thead>
          <tbody>${taskRows}
-           <tr class="parent"><td colspan="3">All tasks</td><td class="hours">${h2(cap)} h</td>
+           <tr class="parent"><td colspan="3">All tasks</td><td class="hours">${h2(w.estimated ?? cap)} h</td>
              <td class="hours">${h2(used)} h</td></tr></tbody>
        </table>`);
     if (people.length) {
@@ -3425,7 +3438,7 @@ async function renderCarveDetail(name) {
       document.getElementById('page-title').textContent = w.name;
       document.getElementById('sub').textContent =
         (w.match ? `Tasks on ${w.source_name} containing “${w.match}”` : `All tasks on ${w.source_name}`) +
-        ` · estimated hours (excludes Completed tasks) ` +
+        ` · estimates of tasks open or worked on in the range, less time logged before it, ` +
         `against hours logged ${rangeLabel(dateStart, dateEnd)}`;
       document.getElementById('dash-updated').textContent = w.updated ? ('Updated ' + w.updated) : '';
       notesRefresh = refresh;

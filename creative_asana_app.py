@@ -1023,8 +1023,11 @@ def carve_out_hits(c, tree):
 
 
 def carve_out_summary(c, start, end, refresh=False):
-    """One CARVE_OUTS budget for [start, end]: the estimated hours of its matching open tasks
-    (the capacity) and the hours logged to every matching task, open or done (the usage).
+    """One CARVE_OUTS budget for [start, end].
+
+    Capacity = the estimates of every matching task still open OR worked on in the range (a
+    task finished this month still brought its estimate into the month), less the time already
+    logged to those same items before the range started. Usage = the hours logged in the range.
 
     Reads the shared project tree and entry cache, so straight after /api/logged it makes no
     Asana calls of its own.
@@ -1032,56 +1035,41 @@ def carve_out_summary(c, start, end, refresh=False):
     gid = c["source"]
     tree = fetch_tree(gid, refresh=refresh)
     hits = carve_out_hits(c, tree)
-    # Same rules as project_detail: checked-off tasks and excluded columns carry no estimate.
-    live = {t["gid"]: build_task(t, gid, tree["subs"].get(t["gid"], []))
-            for t in hits if not t.get("completed") and not is_excluded(t, gid)}
-    task_est = {g: d["hours"] + sum(s["hours"] for s in d["subtasks"]) for g, d in live.items()}
-    est = sum(task_est.values())
+    done = lambda x: bool(x.get("completed")) or is_excluded(x, gid)
+    subs_of = lambda t: tree["subs"].get(t["gid"], [])
 
     # Logged time counts whether or not the task has since been finished. A subtask's time is
     # credited to its parent's row, so the task table adds up to the card.
     owner = {}
     for t in hits:
         owner[t["gid"]] = t["gid"]
-        for s in tree["subs"].get(t["gid"], []):
+        for s in subs_of(t):
             owner[s["gid"]] = t["gid"]
-    minutes = {i["gid"]: i.get("actual_time_minutes") or 0
-               for t in hits for i in [t] + tree["subs"].get(t["gid"], [])}
+    minutes = {i["gid"]: i.get("actual_time_minutes") or 0 for t in hits for i in [t] + subs_of(t)}
     by_gid = entries_for_tasks({g: m for g, m in minutes.items() if m > 0}, refresh=refresh)
     # What each entry row names: the task, or "task › subtask" for time logged to a subtask.
     label = {}
     for t in hits:
         tname = t.get("name") or "(untitled)"
         label[t["gid"]] = tname
-        for s in tree["subs"].get(t["gid"], []):
+        for s in subs_of(t):
             label[s["gid"]] = f"{tname} › {s.get('name') or '(untitled)'}"
-    # Work already done before the range has burned part of the estimate, so it comes off the
-    # capacity. Only time on items the estimate covers counts: an open task itself and its
-    # subtasks, except a finished subtask with its own estimate (a closed budget, see build_task).
-    covered = set()
-    for g in live:
-        covered.add(g)
-        for s in tree["subs"].get(g, []):
-            if not ((s.get("completed") or is_excluded(s, gid)) and task_minutes(s)):
-                covered.add(s["gid"])
-    seen, prior, logged, nentries, task_min, people, rows_out = set(), set(), 0, 0, {}, {}, []
-    prior_min = 0
+
+    seen, logged, nentries, task_min, people, rows_out = set(), 0, 0, {}, {}, []
+    worked = set()   # task/subtask gids with time logged in the range
     for item_gid, rows in by_gid.items():
         for e in rows:
             entered = e.get("entered_on") or ""
-            egid = e.get("gid")
-            if entered and entered < start and item_gid in covered and not (egid and egid in prior):
-                if egid:
-                    prior.add(egid)
-                prior_min += e.get("duration_minutes") or 0
             if not entered or not (start <= entered <= end):
                 continue
+            egid = e.get("gid")
             if egid and egid in seen:
                 continue
             if egid:
                 seen.add(egid)
             m = e.get("duration_minutes") or 0
             by = (e.get("created_by") or {}).get("name") or "Unknown"
+            worked.add(item_gid)
             logged += m
             nentries += 1
             task_min[owner[item_gid]] = task_min.get(owner[item_gid], 0) + m
@@ -1090,18 +1078,44 @@ def carve_out_summary(c, start, end, refresh=False):
                              "task": label.get(item_gid, ""), "hours": round(m / 60, 2)})
     rows_out.sort(key=lambda r: (r["date"], r["by"]), reverse=True)
 
-    # One row per matching task that is still open or had time logged in the range.
+    # Which tasks bring their estimate into the range: open ones, plus any worked on in it. Within
+    # such a task, a subtask with its own estimate that was closed without range time is a
+    # finished budget of its own (see build_task) and stays out.
+    task_est, covered, open_n = {}, set(), 0
+    for t in hits:
+        if done(t) and not any(i["gid"] in worked for i in [t] + subs_of(t)):
+            continue
+        open_n += not done(t)
+        keep = [t] + [s for s in subs_of(t)
+                      if not (done(s) and task_minutes(s) and s["gid"] not in worked)]
+        covered.update(i["gid"] for i in keep)
+        task_est[t["gid"]] = sum(task_minutes(i) for i in keep) / 60
+    est = sum(task_est.values())
+    # Work logged to those items before the range already burned part of their estimate.
+    prior_seen, prior_min = set(), 0
+    for item_gid, rows in by_gid.items():
+        if item_gid not in covered:
+            continue
+        for e in rows:
+            entered, egid = e.get("entered_on") or "", e.get("gid")
+            if not entered or entered >= start or (egid and egid in prior_seen):
+                continue
+            if egid:
+                prior_seen.add(egid)
+            prior_min += e.get("duration_minutes") or 0
+
+    # One row per task that brought its estimate in (open, or worked on in the range).
     tasks = []
     for t in hits:
         g = t["gid"]
-        if g not in live and not task_min.get(g):
+        if g not in task_est:
             continue
         tasks.append({
             "name": t.get("name", "(untitled)"),
             "assignee": (t.get("assignee") or {}).get("name") or "Unassigned",
             "section": section_name(t, gid),
-            "done": g not in live,
-            "estimated": round(task_est.get(g, 0), 2),
+            "done": done(t),
+            "estimated": round(task_est[g], 2),
             "logged": round(task_min.get(g, 0) / 60, 2),
         })
     tasks.sort(key=lambda r: (r["done"], -r["estimated"], -r["logged"]))
@@ -1111,12 +1125,10 @@ def carve_out_summary(c, start, end, refresh=False):
         "source_name": PROJECT_NAMES.get(gid, gid),
         "match": c["match"],
         "kind": c.get("kind"),
-        # Capacity for the range = open estimates less the work already logged against them
-        # before it started (never below zero).
-        "cap": round(max(est - prior_min / 60, 0), 2),
+        "cap": round(max(est - prior_min / 60, 0), 2),   # never below zero
         "estimated": round(est, 2),
         "prior": round(prior_min / 60, 2),
-        "ntasks": len(live),
+        "ntasks": open_n,
         "hours": round(logged / 60, 2),
         "nentries": nentries,
         "tasks": tasks,
@@ -1218,7 +1230,9 @@ PAGE = r"""<!DOCTYPE html>
   .cap-bar .blk.on { background:var(--green); }
   .cap-bar.at .blk.on { background:var(--amber); }
   .cap-bar.over .blk.on { background:var(--red); }
-  .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; }
+  .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; display:flex; gap:12px;
+                 justify-content:space-between; font-variant-numeric:tabular-nums; }
+  .cap-bar .lab-r { color:var(--faint); white-space:nowrap; }
   /* Filter toolbar. Every tab that filters anything uses exactly one of these, directly
      under the stat strip, and it always opens with a bold .tb-label. It sits in its own
      panel so the controls read as one strip instead of floating on the page. */
@@ -1369,7 +1383,6 @@ PAGE = r"""<!DOCTYPE html>
   #updated { font-size:12px; color:var(--muted); }
   .chart-box { position:relative; height:480px; margin-top:10px; }
   .muted { color:var(--muted); }
-  .card-note { font-size:11px; color:var(--muted); margin:-2px 0 8px; font-variant-numeric:tabular-nums; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   /* Team Capacity: per-person project donuts under the bar chart */
   .donut-sub { margin:-4px 0 12px; }
@@ -1865,8 +1878,8 @@ function capBar(hours, cap){
   const tone = over ? ' over' : (pct >= 100 ? ' at' : '');
   return `<div class="cap-bar${tone}">
       <div class="track">${blocks}</div>
-      <div class="lab">${h2(hours)} / ${h2(cap)} h used · ${pct.toFixed(0)}%${
-        over ? ' — over capacity' : (pct >= 100 ? ' — at capacity' : '')}</div>
+      <div class="lab"><span>${h2(hours)} / ${h2(cap)} h used · ${pct.toFixed(0)}%${
+        over ? ' — over capacity' : (pct >= 100 ? ' — at capacity' : '')}</span></div>
     </div>`;
 }
 function setCrumbs(items) {
@@ -2098,11 +2111,13 @@ function carveCard(w) {
   const c = capCard(Object.assign({}, w, { kind: null }));
   if (w.match) c.querySelector('h3').insertAdjacentHTML('beforeend',
     ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
-  c.querySelector('.stat .l').textContent = 'Est. Hours';
-  // Time logged before the range already burned part of the estimate; say so, so the
-  // capacity figure isn't mistaken for the raw estimate.
-  if (w.prior > 0) c.querySelector('.stats').insertAdjacentHTML('afterend',
-    `<div class="card-note">${h2(w.estimated)} h estimated − ${h2(w.prior)} h logged before ${fmtDate(dateStart)}</div>`);
+  c.querySelector('.stat .l').textContent = 'Capacity';
+  // Capacity is the estimate less time already logged before the range. Show that sum in the
+  // bar's footer (right-aligned), so every card keeps the same shape.
+  const lab = c.querySelector('.cap-bar .lab');
+  if (lab) lab.insertAdjacentHTML('beforeend', w.prior > 0
+    ? `<span class="lab-r">${h2(w.estimated)} est − ${h2(w.prior)} before ${fmtDate(dateStart).replace(/, \d{4}$/, '')}</span>`
+    : `<span class="lab-r">${h2(w.estimated)} est</span>`);
   c.onclick = () => { location.hash = '#/carve/' + encodeURIComponent(w.name); };
   return c;
 }
@@ -3844,7 +3859,10 @@ async function renderCarveDetail(name) {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:w.name}]);
     const used = Number(w.hours || 0), cap = Number(w.cap || 0), left = r2(cap - used);
     view.innerHTML = summaryBar([
-      { n: h2(cap) + ' h', l: 'Est. hours (capacity)' },
+      // Capacity = the tasks' estimates less what was logged to them before the range.
+      { n: h2(w.estimated ?? cap) + ' h', l: 'Estimated hours' },
+      ...(w.prior > 0 ? [{ n: h2(w.prior) + ' h', l: 'Logged before ' + fmtDate(dateStart) }] : []),
+      { n: h2(cap) + ' h', l: 'Capacity' },
       { n: h2(used) + ' h', l: 'Hours used' },
       { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
       { n: (cap ? (used / cap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
@@ -3867,7 +3885,7 @@ async function renderCarveDetail(name) {
          <thead><tr><th>Task</th><th>Status</th><th>Assignee</th>
            <th class="hours">Est.</th><th class="hours">Logged</th></tr></thead>
          <tbody>${taskRows}
-           <tr class="parent"><td colspan="3">All tasks</td><td class="hours">${h2(cap)} h</td>
+           <tr class="parent"><td colspan="3">All tasks</td><td class="hours">${h2(w.estimated ?? cap)} h</td>
              <td class="hours">${h2(used)} h</td></tr></tbody>
        </table>`);
     if (people.length) {
@@ -3928,7 +3946,7 @@ async function renderCarveDetail(name) {
       document.getElementById('page-title').textContent = w.name;
       document.getElementById('sub').textContent =
         (w.match ? `Tasks on ${w.source_name} containing “${w.match}”` : `All tasks on ${w.source_name}`) +
-        ` · estimated hours (excludes Completed tasks) ` +
+        ` · estimates of tasks open or worked on in the range, less time logged before it, ` +
         `against hours logged ${rangeLabel(dateStart, dateEnd)}`;
       document.getElementById('dash-updated').textContent = w.updated ? ('Updated ' + w.updated) : '';
       notesRefresh = refresh;

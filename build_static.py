@@ -510,21 +510,18 @@ function carveOutHits(c, tree){
   return tree.tasks.filter(t => (t.name || '').toLowerCase().includes(needle));
 }
 async function carveOutSummary(c, start, end){
+  // Mirrors carve_out_summary: capacity = estimates of every matching task still open OR worked
+  // on in the range, less time logged to those same items before the range; usage = range hours.
   const gid = c.source;
   const tree = await fetchTree(gid, false);
   const hits = carveOutHits(c, tree);
-  // Same rules as projectDetail: checked-off tasks and excluded columns carry no estimate.
-  const live = {}, taskEst = {};
-  for (const t of hits.filter(t => !t.completed && !isExcluded(t, gid))){
-    const d = live[t.gid] = buildTask(t, gid, tree.subs[t.gid] || []);
-    taskEst[t.gid] = d.hours + sum(d.subtasks.map(s => s.hours));
-  }
-  const est = sum(Object.values(taskEst));
+  const done = x => !!x.completed || isExcluded(x, gid);
+  const subsOf = t => tree.subs[t.gid] || [];
   // Logged time counts whether or not the task has since been finished. A subtask's time is
   // credited to its parent's row, so the task table adds up to the card.
   const owner = {}, minutes = {};
   for (const t of hits)
-    for (const it of [t, ...(tree.subs[t.gid] || [])]){
+    for (const it of [t, ...subsOf(t)]){
       owner[it.gid] = t.gid;
       if ((it.actual_time_minutes || 0) > 0) minutes[it.gid] = it.actual_time_minutes;
     }
@@ -534,46 +531,56 @@ async function carveOutSummary(c, start, end){
   for (const t of hits){
     const tname = t.name || '(untitled)';
     label[t.gid] = tname;
-    for (const s of tree.subs[t.gid] || []) label[s.gid] = `${tname} › ${s.name || '(untitled)'}`;
+    for (const s of subsOf(t)) label[s.gid] = `${tname} › ${s.name || '(untitled)'}`;
   }
-  // Work already done before the range has burned part of the estimate, so it comes off the
-  // capacity. Only time on items the estimate covers counts: an open task itself and its
-  // subtasks, except a finished subtask with its own estimate (a closed budget, see buildTask).
-  const covered = new Set();
-  for (const g of Object.keys(live)){
-    covered.add(g);
-    for (const s of tree.subs[g] || [])
-      if (!((s.completed || isExcluded(s, gid)) && taskMinutes(s))) covered.add(s.gid);
-  }
-  const seen = new Set(), prior = new Set(), taskMin = {}, people = {}, rowsOut = [];
-  let logged = 0, nentries = 0, priorMin = 0;
+  const seen = new Set(), worked = new Set(), taskMin = {}, people = {}, rowsOut = [];
+  let logged = 0, nentries = 0;
   for (const [g, rows] of Object.entries(byGid))
     for (const e of rows || []){
       const entered = e.entered_on || '';
-      if (entered && entered < start && covered.has(g) && !(e.gid && prior.has(e.gid))){
-        if (e.gid) prior.add(e.gid);
-        priorMin += e.duration_minutes || 0;
-      }
       if (!entered || entered < start || entered > end) continue;
       if (e.gid && seen.has(e.gid)) continue;
       if (e.gid) seen.add(e.gid);
       const m = e.duration_minutes || 0, by = (e.created_by || {}).name || 'Unknown';
+      worked.add(g);
       logged += m; nentries++;
       taskMin[owner[g]] = (taskMin[owner[g]] || 0) + m;
       people[by] = (people[by] || 0) + m;
       rowsOut.push({ gid: e.gid, date: entered, by, task: label[g] || '', hours: round2(m / 60) });
     }
   rowsOut.sort((x, y) => y.date.localeCompare(x.date) || y.by.localeCompare(x.by));
-  // One row per matching task that is still open or had time logged in the range.
-  const tasks = hits.filter(t => live[t.gid] || taskMin[t.gid]).map(t => ({
+  // Which tasks bring their estimate into the range: open ones, plus any worked on in it. Within
+  // such a task, a subtask with its own estimate closed without range time stays out.
+  const taskEst = {}, covered = new Set();
+  let openN = 0;
+  for (const t of hits){
+    if (done(t) && ![t, ...subsOf(t)].some(i => worked.has(i.gid))) continue;
+    if (!done(t)) openN++;
+    const keep = [t, ...subsOf(t).filter(s => !(done(s) && taskMinutes(s) && !worked.has(s.gid)))];
+    keep.forEach(i => covered.add(i.gid));
+    taskEst[t.gid] = sum(keep.map(taskMinutes)) / 60;
+  }
+  const est = sum(Object.values(taskEst));
+  // Work logged to those items before the range already burned part of their estimate.
+  const priorSeen = new Set();
+  let priorMin = 0;
+  for (const [g, rows] of Object.entries(byGid)){
+    if (!covered.has(g)) continue;
+    for (const e of rows || []){
+      const entered = e.entered_on || '';
+      if (!entered || entered >= start || (e.gid && priorSeen.has(e.gid))) continue;
+      if (e.gid) priorSeen.add(e.gid);
+      priorMin += e.duration_minutes || 0;
+    }
+  }
+  // One row per task that brought its estimate in (open, or worked on in the range).
+  const tasks = hits.filter(t => t.gid in taskEst).map(t => ({
     name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
-    section: sectionName(t, gid), done: !live[t.gid],
-    estimated: round2(taskEst[t.gid] || 0), logged: round2((taskMin[t.gid] || 0) / 60) }))
+    section: sectionName(t, gid), done: done(t),
+    estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
   return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null,
-    // Capacity for the range = open estimates less the work already logged against them
-    // before it started (never below zero).
-    cap: round2(Math.max(est - priorMin / 60, 0)), estimated: round2(est), prior: round2(priorMin / 60), ntasks: Object.keys(live).length, hours: round2(logged / 60), nentries, tasks,
+    cap: round2(Math.max(est - priorMin / 60, 0)), estimated: round2(est), prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes
     updated: nowStr() };
