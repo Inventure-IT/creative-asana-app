@@ -32,6 +32,7 @@ DEF_END = json.dumps(a.DEFAULT_END)
 PORTFOLIO = json.dumps(a.PORTFOLIO_GID)
 FIREBASE = json.dumps(a.FIREBASE_CONFIG)
 PLAN_DOMAIN = json.dumps(a.PLANNING_DOMAINS)
+TEAM_EXCL = json.dumps(sorted(a.TEAM_CAPACITY_EXCLUDE))
 
 # ---- Browser-side data layer + fetch shim + PAT auth (prepended before the UI script) ----
 PREPEND = r'''
@@ -56,6 +57,10 @@ const DEF_START = __DEFSTART__, DEF_END = __DEFEND__;
 // these, so the local app's boot script injects them too.
 const FIREBASE_CONFIG = __FIREBASE__;
 const PLANNING_DOMAINS = __PLANDOMAIN__;
+// Projects (gid or lower-cased name) left out of both Team Capacity views (see
+// TEAM_CAPACITY_EXCLUDE in creative_asana_app.py). The UI script reads this too, so the local
+// app's boot script injects it as well.
+const TEAM_CAPACITY_EXCLUDE = __TEAMEXCL__;
 const PROJECT_ROSTER = PROJECTS.map(p => p.name);
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
 const PROJECT_CAPS  = Object.fromEntries(PROJECTS.map(p => [p.gid, p.cap == null ? null : p.cap]));
@@ -396,7 +401,9 @@ function assigneeProjectTasks(d, name){
 }
 async function getAssigneeLoad(refresh){
   await syncPortfolio(false);
-  const details = await mapAll(EST_PROJECTS, p => getDetail(p.gid, refresh));
+  const excl = new Set(TEAM_CAPACITY_EXCLUDE);
+  const projects = EST_PROJECTS.filter(p => !excl.has(p.gid) && !excl.has((p.name || '').trim().toLowerCase()));
+  const details = await mapAll(projects, p => getDetail(p.gid, refresh));
   const est = {}, act = {}, counts = {}, breakdown = {};
   for (const d of details){
     d.labels.forEach((name, i) => {
@@ -629,14 +636,15 @@ async function carveOutSummary(c, start, end){
       rowsOut.push({ gid: e.gid, date: entered, by, task: label[g] || '', hours: round2(m / 60) });
     }
   rowsOut.sort((x, y) => y.date.localeCompare(x.date) || y.by.localeCompare(x.by));
-  // Which tasks bring their estimate into the range: open ones, plus any worked on in it. Within
-  // such a task, a subtask with its own estimate closed without range time stays out.
+  // Which tasks bring their estimate into the range: open ones, plus any worked on in it. Such a
+  // task brings ALL its subtasks, finished ones too, so remaining = estimated − actual, as in
+  // Asana (mirrors carve_out_summary).
   const taskEst = {}, covered = new Set();
   let openN = 0;
   for (const t of hits){
     if (done(t) && ![t, ...subsOf(t)].some(i => worked.has(i.gid))) continue;
     if (!done(t)) openN++;
-    const keep = [t, ...subsOf(t).filter(s => !(done(s) && taskMinutes(s) && !worked.has(s.gid)))];
+    const keep = [t, ...subsOf(t)];
     keep.forEach(i => covered.add(i.gid));
     taskEst[t.gid] = sum(keep.map(taskMinutes)) / 60;
   }
@@ -745,6 +753,7 @@ def build():
                .replace('__ESTPROJECTS__', EST_PROJECTS)
                .replace('__PORTFOLIO__', PORTFOLIO)
                .replace('__ARCHIVED__', ARCHIVED)
+               .replace('__TEAMEXCL__', TEAM_EXCL)
                .replace('__GROUPS__', GROUPS)
                .replace('__CARVEOUTS__', CARVE_OUTS)
                .replace('__UNBILLABLE__', UNBILLABLE)

@@ -138,6 +138,20 @@ ARCHIVED_GIDS = {
 # endpoint keeps all of PROJECTS and lets the UI split off the archived section.
 EST_PROJECTS = [p for p in PROJECTS if p["gid"] not in ARCHIVED_GIDS]
 
+# Projects left out of BOTH Team Capacity views (Estimated and Logged) — boards whose hours
+# shouldn't count toward anyone's monthly load. Everything else (Bar Charts, Task List, Daily
+# Log, cards) still reports them. Each entry is a project gid or a project name (matched
+# case-insensitively, so a portfolio project works without looking its gid up); prefer the gid
+# once known, so a rename can't silently bring the project back.
+TEAM_CAPACITY_EXCLUDE = {
+    "archive board",
+}
+
+
+def team_capacity_excluded(gid, name):
+    """True if a project is left out of the Team Capacity views (TEAM_CAPACITY_EXCLUDE)."""
+    return gid in TEAM_CAPACITY_EXCLUDE or (name or "").strip().lower() in TEAM_CAPACITY_EXCLUDE
+
 # The project list also comes from this Asana portfolio, read on each load (and on Refresh), so
 # a new project shows up without a code change. PROJECTS above then only needs entries that
 # carry settings (cap, kind) or that aren't in the portfolio; a portfolio project with no entry
@@ -881,7 +895,8 @@ def get_assignee_load(refresh=False):
     detail, so it adds no Asana calls when the projects are already loaded.
     """
     sync_portfolio()
-    details = list(PROJECT_POOL.map(lambda p: get_detail(p["gid"], refresh=refresh), EST_PROJECTS))
+    projects = [p for p in EST_PROJECTS if not team_capacity_excluded(p["gid"], p["name"])]
+    details = list(PROJECT_POOL.map(lambda p: get_detail(p["gid"], refresh=refresh), projects))
     est, act, counts, breakdown = {}, {}, {}, {}
     for d in details:
         for name, e, a, cnt in zip(d["labels"], d["hours"], d["actual_hours"], d["counts"]):
@@ -1226,16 +1241,17 @@ def carve_out_summary(c, start, end, refresh=False):
                              "task": label.get(item_gid, ""), "hours": round(m / 60, 2)})
     rows_out.sort(key=lambda r: (r["date"], r["by"]), reverse=True)
 
-    # Which tasks bring their estimate into the range: open ones, plus any worked on in it. Within
-    # such a task, a subtask with its own estimate that was closed without range time is a
-    # finished budget of its own (see build_task) and stays out.
+    # Which tasks bring their estimate into the range: open ones, plus any worked on in it. Such a
+    # task brings ALL of its subtasks — finished ones too — so capacity matches Asana: estimate
+    # minus everything logged before the range, leaving remaining = estimated − actual. (Dropping
+    # a finished subtask's estimate and its time used to forgive any overrun on it, overstating
+    # what's left.)
     task_est, covered, open_n = {}, set(), 0
     for t in hits:
         if done(t) and not any(i["gid"] in worked for i in [t] + subs_of(t)):
             continue
         open_n += not done(t)
-        keep = [t] + [s for s in subs_of(t)
-                      if not (done(s) and task_minutes(s) and s["gid"] not in worked)]
+        keep = [t] + subs_of(t)
         covered.update(i["gid"] for i in keep)
         task_est[t["gid"]] = sum(task_minutes(i) for i in keep) / 60
     est = sum(task_est.values())
@@ -2360,6 +2376,11 @@ const ARCHIVED = new Set(ARCHIVED_GIDS);
 // Rows also carry `archived` from the server, which covers projects archived in Asana
 // (picked up from the portfolio after this page was built).
 const isArchived = w => !!w.archived || ARCHIVED.has(w.gid);
+// Projects left out of both Team Capacity views (TEAM_CAPACITY_EXCLUDE: gids or lower-cased
+// names, injected by both deploy paths). Every other tab still reports them.
+const TEAM_EXCLUDED = new Set(TEAM_CAPACITY_EXCLUDE);
+const teamCapacityExcluded = (gid, name) =>
+  TEAM_EXCLUDED.has(gid) || TEAM_EXCLUDED.has((name || '').trim().toLowerCase());
 
 // Which dashboard tab is active; remembered across renders/drill-ins.
 let dashTab = 'team';   // Team Capacity is the default tab
@@ -3574,18 +3595,25 @@ async function renderDashboard() {
     delete personLoading[key];
     if (key !== dateStart + ':' + dateEnd) return;   // range changed while loading
     const agg = {}, unbill = {}, byGid = {}, items = {}, daily = {};
+    // The same per-person totals minus TEAM_CAPACITY_EXCLUDE projects, for Team Capacity · Logged.
+    const teamAgg = {}, teamUnbill = {};
     gids.forEach((g, idx) => {
       const d = details[idx], pm = byGid[g] = {};
+      const forTeam = !teamCapacityExcluded(g, d.name || (loggedData.find(w => w.gid === g) || {}).name);
       (d.labels || []).forEach((name, i) => {
         agg[name] = (agg[name] || 0) + d.hours[i];
         pm[name] = (pm[name] || 0) + d.hours[i];
+        if (forTeam) teamAgg[name] = (teamAgg[name] || 0) + d.hours[i];
       });
       // Roll each project's time entries up by task AND the person who logged them, so the
       // Items tab can list every worked-on item with who logged the time and how much. Key by
       // project + task + person so identically named tasks / multiple loggers stay separate.
       (d.entries || []).forEach(e => {
         const person = e.by || 'Unknown';
-        if (e.billable === false) unbill[person] = (unbill[person] || 0) + e.hours;
+        if (e.billable === false) {
+          unbill[person] = (unbill[person] || 0) + e.hours;
+          if (forTeam) teamUnbill[person] = (teamUnbill[person] || 0) + e.hours;
+        }
         const ikey = (d.name || '') + ' | ' + e.task + ' | ' + person;
         const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', person: person, hours: 0, entries: 0 });
         it.hours += e.hours;
@@ -3602,7 +3630,11 @@ async function renderDashboard() {
     projPersonCache[key] = byGid;
     personStatsCache[key] = Object.keys(agg)
       // `unbillable` is the share of `hours` logged to unbillable work (UNBILLABLE_GIDS).
-      .map(name => ({ name, hours: agg[name], unbillable: Math.min(unbill[name] || 0, agg[name]) }))
+      // `teamHours` / `teamUnbillable` are the same without TEAM_CAPACITY_EXCLUDE projects —
+      // what Team Capacity · Logged charts.
+      .map(name => ({ name, hours: agg[name], unbillable: Math.min(unbill[name] || 0, agg[name]),
+                      teamHours: teamAgg[name] || 0,
+                      teamUnbillable: Math.min(teamUnbill[name] || 0, teamAgg[name] || 0) }))
       .sort((a, b) => b.hours - a.hours);
     itemStatsCache[key] = Object.values(items)
       // Group by project (A→Z), then heaviest items first within each project.
@@ -3970,7 +4002,8 @@ async function renderDashboard() {
       wireRangeSel(); loadPersonStats(key); return;
     }
     const cap = (teamData && teamData.cap) || 128;
-    const rows = people.map(p => ({ name: p.name, total: p.hours, unbill: p.unbillable || 0 }))
+    // Team Capacity leaves TEAM_CAPACITY_EXCLUDE projects out (teamHours, see loadPersonStats).
+    const rows = people.map(p => ({ name: p.name, total: p.teamHours, unbill: p.teamUnbillable || 0 }))
       .filter(p => p.total > 0)
       .sort((a, b) => b.total - a.total);
     // Headline stats: what the team actually booked against what it could have.
@@ -4049,8 +4082,10 @@ async function renderDashboard() {
             } } } } }
     });
     // One donut per person under the bars: which projects they logged their hours against.
-    const pc = projPersonCache[key] || {};
     const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
+    // Per-project split, minus TEAM_CAPACITY_EXCLUDE projects (as the bars above).
+    const pc = Object.fromEntries(Object.entries(projPersonCache[key] || {})
+      .filter(([gid]) => !teamCapacityExcluded(gid, nameOf[gid])));
     // Exactly what the chart and donuts show: a total row per person, then their projects.
     document.getElementById('team-export').onclick = () => {
       const out = [];
@@ -4088,8 +4123,11 @@ async function renderDashboard() {
   // Capacity chart. Built from the per-project/person split (projPersonCache) for the range.
   function showLoggedBreakdown(person) {
     destroyCharts();
-    const key = dateStart + ':' + dateEnd, pc = projPersonCache[key] || {};
+    const key = dateStart + ':' + dateEnd;
     const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
+    // Opened from Team Capacity, so TEAM_CAPACITY_EXCLUDE projects stay out here too.
+    const pc = Object.fromEntries(Object.entries(projPersonCache[key] || {})
+      .filter(([gid]) => !teamCapacityExcluded(gid, nameOf[gid])));
     // Every task this person logged time to in the range, keyed by project — the same
     // per-item rollup the Items tab uses, so the numbers agree.
     const tasksByProject = {};
@@ -4112,7 +4150,7 @@ async function renderDashboard() {
     const cap = (teamData && teamData.cap) || 128;
     const pct = (tot / cap * 100).toFixed(0);
     const ps = (personStatsCache[key] || []).find(p => p.name === person);
-    const unbill = ps ? ps.unbillable || 0 : 0;
+    const unbill = ps ? ps.teamUnbillable || 0 : 0;
     const cell = (h) => `<td class="hours">${h2(h)} h</td>`;
     // Each project is a bold header row, with the tasks that person logged to it beneath it.
     let body = rows_.map(r => {
@@ -5296,10 +5334,11 @@ bootAuth();
 # in a <script> that runs before the UI script, so identifiers like TEAM_MEMBERS are defined.
 def render_page():
     boot = ("<script>\nconst TEAM_MEMBERS = %s;\nconst PROJECT_ROSTER = %s;\n"
-            "const ARCHIVED_GIDS = %s;\nconst FIREBASE_CONFIG = %s;\nconst PLANNING_DOMAINS = %s;\n</script>\n"
+            "const ARCHIVED_GIDS = %s;\nconst FIREBASE_CONFIG = %s;\nconst PLANNING_DOMAINS = %s;\n"
+            "const TEAM_CAPACITY_EXCLUDE = %s;\n</script>\n"
             % (json.dumps(TEAM_MEMBERS), json.dumps([p["name"] for p in PROJECTS]),
                json.dumps(sorted(ARCHIVED_GIDS)), json.dumps(FIREBASE_CONFIG),
-               json.dumps(PLANNING_DOMAINS)))
+               json.dumps(PLANNING_DOMAINS), json.dumps(sorted(TEAM_CAPACITY_EXCLUDE))))
     return PAGE.replace('<div class="wrap" id="app"></div>\n<script>',
                         '<div class="wrap" id="app"></div>\n' + boot + '<script>', 1)
 

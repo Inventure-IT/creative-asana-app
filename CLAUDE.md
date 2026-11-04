@@ -29,8 +29,8 @@ stays obvious.
 
 **The UI script may only use identifiers it defines itself, plus `TEAM_MEMBERS`,
 `PROJECT_ROSTER`** (the configured project names, in `PROJECTS` order), **`ARCHIVED_GIDS`,
-`FIREBASE_CONFIG` and `PLANNING_DOMAINS`**. `PREPEND` runs before
-it in the static build but *not* in the local app, which injects only those two — if the UI
+`FIREBASE_CONFIG`, `PLANNING_DOMAINS` and `TEAM_CAPACITY_EXCLUDE`**. `PREPEND` runs before
+it in the static build but *not* in the local app, which injects only those — if the UI
 script ever needs another config value, add it to **both** `render_page()`'s boot script and
 `PREPEND`. Reaching for a `PREPEND` helper (`round2`, `sum`, `asanaGet`, …) from the UI
 script works on GitHub Pages and throws a `ReferenceError` locally. The UI script has its own
@@ -42,6 +42,13 @@ script works on GitHub Pages and throws a `ReferenceError` locally. The UI scrip
 `DEFAULT_START`/`DEFAULT_END`. `build_static.py` imports these and injects them into the static
 build, so **adding a project or team member is a one-line change plus a rebuild.** Never
 duplicate a project list or a team roster anywhere else.
+
+- `TEAM_CAPACITY_EXCLUDE` lists projects (gid, or lower-cased name for a portfolio project
+  whose gid isn't known yet) left out of **both Team Capacity views** only — currently the
+  Archive Board. Estimated skips them in `get_assignee_load` / `getAssigneeLoad`; Logged charts
+  the per-person `teamHours` / `teamUnbillable` that `loadPersonStats` totals without them, and
+  filters them out of the donuts and the drill-in (`teamCapacityExcluded`). Every other tab still
+  reports them.
 
 - **Projects also come from the Asana portfolio `PORTFOLIO_GID`**, read on each load and on
   Refresh (`sync_portfolio` / `syncPortfolio`, which rebuild `PROJECTS`, `EST_PROJECTS`,
