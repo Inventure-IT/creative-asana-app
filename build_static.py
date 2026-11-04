@@ -73,6 +73,9 @@ const _CONFIG_PROJECTS = PROJECTS.map(p => Object.assign({}, p));
 const _CONFIG_ARCHIVED = new Set(ARCHIVED_GIDS);
 const ARCHIVED_NOW = new Set(ARCHIVED_GIDS);
 let _portfolioSync = null, _portfolioAt = 0;
+// Gids actually in the portfolio (archived included) from the last good read; null = unknown.
+// Project Cards lists only these (summary rows carry in_portfolio). Mirrors _PORTFOLIO_MEMBERS.
+let _portfolioMembers = null;
 function syncPortfolio(refresh){
   if (!PORTFOLIO_GID) return Promise.resolve();
   // A Refresh fires the estimated and logged loads together; one read serves both.
@@ -85,13 +88,15 @@ function syncPortfolio(refresh){
     } catch (e) { console.warn('Could not read portfolio ' + PORTFOLIO_GID + ': ' + e.message); return; }
     const configured = new Set(_CONFIG_PROJECTS.map(p => p.gid));
     const merged = _CONFIG_PROJECTS.map(p => Object.assign({}, p));
-    const archived = new Set(_CONFIG_ARCHIVED);
+    const archived = new Set(_CONFIG_ARCHIVED), members = new Set();
     for (const it of items || []){
       if (it.resource_type !== 'project' || !it.gid) continue;
+      members.add(it.gid);
       if (it.archived) archived.add(it.gid);
       if (!configured.has(it.gid)) merged.push({ gid: it.gid, name: it.name || it.gid });
     }
     PROJECTS.splice(0, PROJECTS.length, ...merged);
+    _portfolioMembers = members;
     ARCHIVED_NOW.clear(); archived.forEach(g => ARCHIVED_NOW.add(g));
     EST_PROJECTS.splice(0, EST_PROJECTS.length, ...PROJECTS.filter(p => !ARCHIVED_NOW.has(p.gid)));
     for (const m of [PROJECT_NAMES, PROJECT_CAPS, PROJECT_KINDS]) for (const k of Object.keys(m)) delete m[k];
@@ -359,7 +364,10 @@ async function getMe(refresh){
   const rows = await asanaGet('/users/me?opt_fields=name');
   return (CACHE.me = { name: ((rows[0] || {}).name) || '' });
 }
-function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], archived: ARCHIVED_NOW.has(d.gid), updated: d.updated }; }
+// in_portfolio: Project Cards lists only portfolio projects; null (no portfolio / read failed)
+// = show all. Mirrors summary_from_detail.
+function summaryFromDetail(d){ return { gid: d.gid,
+  in_portfolio: _portfolioMembers ? _portfolioMembers.has(d.gid) : null, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], archived: ARCHIVED_NOW.has(d.gid), updated: d.updated }; }
 
 async function getDetail(gid, refresh){
   if (!refresh && CACHE.detail[gid]) return CACHE.detail[gid];

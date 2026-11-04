@@ -438,6 +438,9 @@ const _CONFIG_PROJECTS = PROJECTS.map(p => Object.assign({}, p));
 const _CONFIG_ARCHIVED = new Set(ARCHIVED_GIDS);
 const ARCHIVED_NOW = new Set(ARCHIVED_GIDS);
 let _portfolioSync = null, _portfolioAt = 0;
+// Gids actually in the portfolio (archived included) from the last good read; null = unknown.
+// Project Cards lists only these (summary rows carry in_portfolio). Mirrors _PORTFOLIO_MEMBERS.
+let _portfolioMembers = null;
 function syncPortfolio(refresh){
   if (!PORTFOLIO_GID) return Promise.resolve();
   // A Refresh fires the estimated and logged loads together; one read serves both.
@@ -450,13 +453,15 @@ function syncPortfolio(refresh){
     } catch (e) { console.warn('Could not read portfolio ' + PORTFOLIO_GID + ': ' + e.message); return; }
     const configured = new Set(_CONFIG_PROJECTS.map(p => p.gid));
     const merged = _CONFIG_PROJECTS.map(p => Object.assign({}, p));
-    const archived = new Set(_CONFIG_ARCHIVED);
+    const archived = new Set(_CONFIG_ARCHIVED), members = new Set();
     for (const it of items || []){
       if (it.resource_type !== 'project' || !it.gid) continue;
+      members.add(it.gid);
       if (it.archived) archived.add(it.gid);
       if (!configured.has(it.gid)) merged.push({ gid: it.gid, name: it.name || it.gid });
     }
     PROJECTS.splice(0, PROJECTS.length, ...merged);
+    _portfolioMembers = members;
     ARCHIVED_NOW.clear(); archived.forEach(g => ARCHIVED_NOW.add(g));
     EST_PROJECTS.splice(0, EST_PROJECTS.length, ...PROJECTS.filter(p => !ARCHIVED_NOW.has(p.gid)));
     for (const m of [PROJECT_NAMES, PROJECT_CAPS, PROJECT_KINDS]) for (const k of Object.keys(m)) delete m[k];
@@ -724,7 +729,10 @@ async function getMe(refresh){
   const rows = await asanaGet('/users/me?opt_fields=name');
   return (CACHE.me = { name: ((rows[0] || {}).name) || '' });
 }
-function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], archived: ARCHIVED_NOW.has(d.gid), updated: d.updated }; }
+// in_portfolio: Project Cards lists only portfolio projects; null (no portfolio / read failed)
+// = show all. Mirrors summary_from_detail.
+function summaryFromDetail(d){ return { gid: d.gid,
+  in_portfolio: _portfolioMembers ? _portfolioMembers.has(d.gid) : null, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], archived: ARCHIVED_NOW.has(d.gid), updated: d.updated }; }
 
 async function getDetail(gid, refresh){
   if (!refresh && CACHE.detail[gid]) return CACHE.detail[gid];
@@ -1862,7 +1870,7 @@ const TABS = {
   estproj: { label:'Bar Chart', title:'Projects · Estimated',
     sub:'Remaining estimated hours per project, stacked by the person assigned.' },
   estimated: { label:'Project Cards', title:'Project Cards · Estimated',
-    sub:'One card per project: estimated hours still on the board and how many tasks they sit in.' },
+    sub:'One card per project in the Asana portfolio: estimated hours still on the board and how many tasks they sit in.' },
   teamactual: { label:'Team Capacity', title:'Team Capacity · Logged',
     sub:'Hours actually logged per person in the selected range, against the monthly target. The amber line is where each person should be today, based on how far through the work month (Mon–Fri, minus holidays) we are — a bar is green when it is at that line or within 5 h of it, red when it falls further behind.' },
   capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity · Logged',
@@ -2479,16 +2487,30 @@ function planWire(root){
     });
   });
   root.querySelectorAll('[data-drop]').forEach(z => {
-    // The card being dragged, if it already sits in this grid (a reorder, not a move).
-    const sameGrid = () => plan.dragId &&
-      [...z.querySelectorAll(':scope > [data-plan-id]')].some(c => c.dataset.planId === plan.dragId);
+    // Whether card `id` (default: the one being dragged) already sits in this grid — a reorder,
+    // not a move. The drop handler passes the id explicitly: it has cleared plan.dragId by then.
+    const sameGrid = (id = plan.dragId) => !!id &&
+      [...z.querySelectorAll(':scope > [data-plan-id]')].some(c => c.dataset.planId === id);
+    // The card a drop lands next to: the one under the pointer, or — dropped in a gap between
+    // cards — the nearest card in this grid, so a near miss still reorders.
+    const targetOf = (e, id) => {
+      const hit = e.target.closest('[data-plan-id]');
+      if (hit && hit.parentElement === z) return hit;
+      let best = null, bestD = Infinity;
+      z.querySelectorAll(':scope > [data-plan-id]').forEach(c => {
+        if (c.dataset.planId === id) return;
+        const r = c.getBoundingClientRect();
+        const d = Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+        if (d < bestD) { bestD = d; best = c; }
+      });
+      return best;
+    };
     z.addEventListener('dragover', e => {
       e.preventDefault();
       z.classList.add('drop-hot');
       planClearMarks();
-      const target = e.target.closest('[data-plan-id]');
-      if (z.dataset.drop !== 'out' && sameGrid() && target && target.parentElement === z
-          && target.dataset.planId !== plan.dragId)
+      const target = z.dataset.drop !== 'out' && sameGrid() ? targetOf(e, plan.dragId) : null;
+      if (target && target.dataset.planId !== plan.dragId)
         target.classList.add('drop-' + planDropSide(target, e));
     });
     z.addEventListener('dragleave', e => {
@@ -2505,8 +2527,9 @@ function planWire(root){
       if (out !== !!plan.out[id]) return planMove(id, out);   // into / out of "Not this month"
       // Reorder within one section: rebuild the on-screen order with the card moved,
       // and keep any ids not on screen (moved out, or not in this range) after them.
-      const target = e.target.closest('[data-plan-id]');
-      if (out || !sameGrid() || !target || target.parentElement !== z || target.dataset.planId === id) return;
+      if (out || !sameGrid(id)) return;
+      const target = targetOf(e, id);
+      if (!target || target.dataset.planId === id) return;
       const ids = [...root.querySelectorAll('[data-drop="in"] > [data-plan-id], [data-drop="sort"] > [data-plan-id]')]
         .map(c => c.dataset.planId).filter(x => x !== id);
       ids.splice(ids.indexOf(target.dataset.planId) + (planDropSide(target, e) === 'after' ? 1 : 0), 0, id);
@@ -3643,9 +3666,12 @@ async function renderDashboard() {
     } else if (dashTab === 'estimated') {
       if (!estData) view.innerHTML = loading;
       else {
+        // Only projects in the Asana portfolio (in_portfolio; a project configured in PROJECTS
+        // but not in the portfolio stays off this tab). null = portfolio unreadable → show all.
         // Archived projects sit in their own section below the active ones and stay out of
         // the headline stats, which are about the work in flight.
-        const live = estData.filter(w => !isArchived(w)), arch = estData.filter(isArchived);
+        const cards = estData.filter(w => w.in_portfolio !== false);
+        const live = cards.filter(w => !isArchived(w)), arch = cards.filter(isArchived);
         const summary = summaryBar([
           { n: h2(live.reduce((a, w) => a + (w.hours || 0), 0)) + ' h', l: 'Estimated remaining' },
           { n: live.length, l: 'Projects' },
@@ -3820,8 +3846,10 @@ async function renderDashboard() {
             const grid = document.createElement('div');
             grid.className = 'grid cap-grid';
             grid.dataset.drop = 'in';
-            planSort(hourlyCap).forEach(c => { c.classList.add('cap'); grid.appendChild(c); });
-            planSort(hourly.map(tagSort)).forEach(c => grid.appendChild(c));
+            // One shared order for the whole section, so a budgeted card can be moved past an
+            // uncapped one and stay there.
+            hourlyCap.forEach(c => c.classList.add('cap'));
+            planSort([...hourlyCap, ...hourly.map(tagSort)]).forEach(c => grid.appendChild(c));
             view.appendChild(grid);
           }
           const section = (title, rows, flush, aside) => {

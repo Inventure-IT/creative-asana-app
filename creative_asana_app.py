@@ -194,6 +194,10 @@ _CONFIG_ARCHIVED = set(ARCHIVED_GIDS)
 _PORTFOLIO_LOCK = threading.Lock()
 _PORTFOLIO_SYNCED = [False]
 _PORTFOLIO_AT = [0.0]
+# Gids of the projects actually in PORTFOLIO_GID (archived ones included), from the last good
+# read; None until one succeeds. Project Cards lists only these (summary rows carry
+# `in_portfolio`); None means unknown, and then every project shows rather than none.
+_PORTFOLIO_MEMBERS = [None]
 
 
 def sync_portfolio(refresh=False):
@@ -220,16 +224,18 @@ def sync_portfolio(refresh=False):
         configured = {p["gid"]: p for p in _CONFIG_PROJECTS}
         merged = [dict(p) for p in _CONFIG_PROJECTS]
         archived = set(_CONFIG_ARCHIVED)
-        added = []
+        added, members = [], set()
         for it in items:
             if it.get("resource_type") != "project" or not it.get("gid"):
                 continue   # a nested portfolio isn't a project
+            members.add(it["gid"])
             if it.get("archived"):
                 archived.add(it["gid"])
             if it["gid"] not in configured:
                 merged.append({"gid": it["gid"], "name": it.get("name") or it["gid"]})
                 added.append(it.get("name") or it["gid"])
         PROJECTS[:] = merged
+        _PORTFOLIO_MEMBERS[0] = members
         ARCHIVED_GIDS.clear()
         ARCHIVED_GIDS.update(archived)
         EST_PROJECTS[:] = [p for p in PROJECTS if p["gid"] not in ARCHIVED_GIDS]
@@ -801,8 +807,12 @@ def project_detail(gid, refresh=False):
 # ---- Cache layer: only hits Asana when refresh=True; otherwise serves cached data ----
 
 def summary_from_detail(d):
+    # in_portfolio: Project Cards shows only portfolio projects. True/False once the portfolio
+    # has been read; None (no portfolio, or the read failed) tells the page to show everything.
+    members = _PORTFOLIO_MEMBERS[0]
     return {
         "gid": d["gid"],
+        "in_portfolio": None if members is None else d["gid"] in members,
         "name": d["name"],
         "ntasks": d["ntasks"],
         "hours": round(sum(d["hours"]), 2),
@@ -2499,7 +2509,7 @@ const TABS = {
   estproj: { label:'Bar Chart', title:'Projects · Estimated',
     sub:'Remaining estimated hours per project, stacked by the person assigned.' },
   estimated: { label:'Project Cards', title:'Project Cards · Estimated',
-    sub:'One card per project: estimated hours still on the board and how many tasks they sit in.' },
+    sub:'One card per project in the Asana portfolio: estimated hours still on the board and how many tasks they sit in.' },
   teamactual: { label:'Team Capacity', title:'Team Capacity · Logged',
     sub:'Hours actually logged per person in the selected range, against the monthly target. The amber line is where each person should be today, based on how far through the work month (Mon–Fri, minus holidays) we are — a bar is green when it is at that line or within 5 h of it, red when it falls further behind.' },
   capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity · Logged',
@@ -3116,16 +3126,30 @@ function planWire(root){
     });
   });
   root.querySelectorAll('[data-drop]').forEach(z => {
-    // The card being dragged, if it already sits in this grid (a reorder, not a move).
-    const sameGrid = () => plan.dragId &&
-      [...z.querySelectorAll(':scope > [data-plan-id]')].some(c => c.dataset.planId === plan.dragId);
+    // Whether card `id` (default: the one being dragged) already sits in this grid — a reorder,
+    // not a move. The drop handler passes the id explicitly: it has cleared plan.dragId by then.
+    const sameGrid = (id = plan.dragId) => !!id &&
+      [...z.querySelectorAll(':scope > [data-plan-id]')].some(c => c.dataset.planId === id);
+    // The card a drop lands next to: the one under the pointer, or — dropped in a gap between
+    // cards — the nearest card in this grid, so a near miss still reorders.
+    const targetOf = (e, id) => {
+      const hit = e.target.closest('[data-plan-id]');
+      if (hit && hit.parentElement === z) return hit;
+      let best = null, bestD = Infinity;
+      z.querySelectorAll(':scope > [data-plan-id]').forEach(c => {
+        if (c.dataset.planId === id) return;
+        const r = c.getBoundingClientRect();
+        const d = Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+        if (d < bestD) { bestD = d; best = c; }
+      });
+      return best;
+    };
     z.addEventListener('dragover', e => {
       e.preventDefault();
       z.classList.add('drop-hot');
       planClearMarks();
-      const target = e.target.closest('[data-plan-id]');
-      if (z.dataset.drop !== 'out' && sameGrid() && target && target.parentElement === z
-          && target.dataset.planId !== plan.dragId)
+      const target = z.dataset.drop !== 'out' && sameGrid() ? targetOf(e, plan.dragId) : null;
+      if (target && target.dataset.planId !== plan.dragId)
         target.classList.add('drop-' + planDropSide(target, e));
     });
     z.addEventListener('dragleave', e => {
@@ -3142,8 +3166,9 @@ function planWire(root){
       if (out !== !!plan.out[id]) return planMove(id, out);   // into / out of "Not this month"
       // Reorder within one section: rebuild the on-screen order with the card moved,
       // and keep any ids not on screen (moved out, or not in this range) after them.
-      const target = e.target.closest('[data-plan-id]');
-      if (out || !sameGrid() || !target || target.parentElement !== z || target.dataset.planId === id) return;
+      if (out || !sameGrid(id)) return;
+      const target = targetOf(e, id);
+      if (!target || target.dataset.planId === id) return;
       const ids = [...root.querySelectorAll('[data-drop="in"] > [data-plan-id], [data-drop="sort"] > [data-plan-id]')]
         .map(c => c.dataset.planId).filter(x => x !== id);
       ids.splice(ids.indexOf(target.dataset.planId) + (planDropSide(target, e) === 'after' ? 1 : 0), 0, id);
@@ -4280,9 +4305,12 @@ async function renderDashboard() {
     } else if (dashTab === 'estimated') {
       if (!estData) view.innerHTML = loading;
       else {
+        // Only projects in the Asana portfolio (in_portfolio; a project configured in PROJECTS
+        // but not in the portfolio stays off this tab). null = portfolio unreadable → show all.
         // Archived projects sit in their own section below the active ones and stay out of
         // the headline stats, which are about the work in flight.
-        const live = estData.filter(w => !isArchived(w)), arch = estData.filter(isArchived);
+        const cards = estData.filter(w => w.in_portfolio !== false);
+        const live = cards.filter(w => !isArchived(w)), arch = cards.filter(isArchived);
         const summary = summaryBar([
           { n: h2(live.reduce((a, w) => a + (w.hours || 0), 0)) + ' h', l: 'Estimated remaining' },
           { n: live.length, l: 'Projects' },
@@ -4457,8 +4485,10 @@ async function renderDashboard() {
             const grid = document.createElement('div');
             grid.className = 'grid cap-grid';
             grid.dataset.drop = 'in';
-            planSort(hourlyCap).forEach(c => { c.classList.add('cap'); grid.appendChild(c); });
-            planSort(hourly.map(tagSort)).forEach(c => grid.appendChild(c));
+            // One shared order for the whole section, so a budgeted card can be moved past an
+            // uncapped one and stay there.
+            hourlyCap.forEach(c => c.classList.add('cap'));
+            planSort([...hourlyCap, ...hourly.map(tagSort)]).forEach(c => grid.appendChild(c));
             view.appendChild(grid);
           }
           const section = (title, rows, flush, aside) => {
