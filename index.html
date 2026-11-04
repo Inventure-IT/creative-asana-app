@@ -108,6 +108,7 @@
   .content h1 { font-size:20px; margin:0; }
   .content .sub { margin:3px 0 16px; }   /* tighter than the standalone .sub default */
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
+  .section-aside { font-size:13px; font-weight:400; color:var(--muted); margin-left:4px; }
   .section-h.flush { margin-top:8px; padding-top:0; border-top:0; }   /* first heading under the filter */
   /* Headline stat strip. Every tab opens with one so the top-line numbers are always in
      the same place. Deliberately quieter than the <h1> above it — it summarises the page,
@@ -2855,10 +2856,11 @@ async function renderDashboard() {
             hourly.forEach(w => grid.appendChild(loggedCard(w)));
             view.appendChild(grid);
           }
-          const section = (title, rows, flush) => {
+          const section = (title, rows, flush, aside) => {
             if (!rows.length) return;
             view.insertAdjacentHTML('beforeend',
-              `<h2 class="section-h${flush ? ' flush' : ''}">${esc(title)}</h2>`);
+              `<h2 class="section-h${flush ? ' flush' : ''}">${esc(title)}` +
+              `${aside ? ` <span class="section-aside">${esc(aside)}</span>` : ''}</h2>`);
             const grid = document.createElement('div');
             grid.className = 'grid';
             rows.forEach(w => grid.appendChild(loggedCard(w)));
@@ -2866,7 +2868,7 @@ async function renderDashboard() {
           };
           const rest = others.filter(w => w.kind !== 'Hourly');
           const anyAbove = hasCapShown || hourlyCap.length || hourly.length;
-          section('Other projects', rest, !anyAbove);
+          section('Other projects', rest, !anyAbove, '(not calculated into capacity)');
           section('Archived projects', archived, !anyAbove && !rest.length);
         }
         wireRangeSel();
