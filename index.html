@@ -120,21 +120,37 @@
   .summary-stat .l { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.05em; }
   .summary-bar.est .summary-stat .n { color:var(--blue-d); }
   .summary-stat .n.neg { color:var(--red); }
-  /* Team availability (MSA Project Capacity): a plain-words verdict, then a meter. Red when
-     the remaining capacity is more than the team can physically work this month. */
-  .avail-verdict { padding:10px 14px; margin:0 0 12px; border-radius:8px; border:1px solid var(--border);
-                   border-left:4px solid var(--green); background:var(--panel); line-height:1.5; }
-  .avail-verdict.over { border-color:var(--red); border-left-width:4px;
-                        background:color-mix(in srgb, var(--red) 14%, var(--panel)); }
-  .avail-verdict.over strong { color:var(--red); }
-  .avail-verdict.ok strong { color:var(--green-d); }
-  .avail-meter { position:relative; display:flex; height:14px; border-radius:7px; overflow:hidden;
+  /* Team availability (MSA Project Capacity): verdict badge + one-line headline, a labelled
+     meter, then four aligned stats. Red accent when the remaining capacity is more than the
+     team can physically work this month. */
+  .avail { background:var(--panel); border:1px solid var(--border); border-left:4px solid var(--green);
+           border-radius:10px; padding:16px 18px 14px; margin:0 0 18px; }
+  .avail.over { border-left-color:var(--red); }
+  .av-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; margin-bottom:16px; }
+  .av-badge { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+              padding:4px 10px; border-radius:999px; color:var(--bg); background:var(--green); }
+  .avail.over .av-badge { background:var(--red); }
+  .av-line { font-size:16px; color:var(--text); }
+  .avail.over .av-line strong { color:var(--red); }
+  .avail.ok .av-line strong { color:var(--green-d); }
+  .av-meter-labels { display:flex; font-size:11px; color:var(--muted); margin-bottom:5px; white-space:nowrap; }
+  .av-meter-labels span { overflow:hidden; text-overflow:ellipsis; padding-right:6px; }
+  .av-meter-labels span.over { color:var(--red); padding-left:6px; }
+  .avail-meter { position:relative; display:flex; height:12px; border-radius:6px; overflow:hidden;
                  background:var(--panel2); }
   .avail-meter .seg.ok { background:var(--green); }
   .avail-meter .seg.over { background:var(--red); }
   .avail-meter .mark { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:var(--text); }
   .avail-legend { display:flex; justify-content:space-between; font-size:11px; color:var(--faint);
-                  margin:4px 0 14px; font-variant-numeric:tabular-nums; }
+                  margin:4px 0 16px; font-variant-numeric:tabular-nums; }
+  .av-stats { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:12px 20px;
+              padding-top:14px; border-top:1px solid var(--border); }
+  @media (max-width:760px) { .av-stats { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
+  .av-stat .n { font-size:19px; font-weight:600; line-height:1.2; color:var(--green-d);
+                font-variant-numeric:tabular-nums; }
+  .av-stat .n.neg { color:var(--red); }
+  .av-stat .l { font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.05em; margin-top:2px; }
+  .av-stat .s { font-size:11px; color:var(--muted); margin-top:2px; }
   .card.logged:hover { border-color:var(--green); }
   .card.logged .stat .n, .card.logged .go { color:var(--green-d); }
   .card.logged .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
@@ -2761,37 +2777,39 @@ async function renderDashboard() {
             // Pace each person would need to clear the remaining capacity by month end.
             const perDay = people && wp.left ? remaining / (people * wp.left) : null;
             const pctNeeded = possible ? remaining / possible * 100 : (remaining > 0 ? Infinity : 0);
-            // The verdict leads, in words, so "can we physically do this?" is never a sum the
-            // reader has to do from the stats. Red banner = impossible at TEAM_DAILY_HOURS.
-            const verdict = short
-              ? `<div class="avail-verdict over"><strong>Not achievable this month.</strong>
-                   The remaining capacity is ${h2(remaining)} h but the team can work at most
-                   ${h2(possible)} h — <strong>${h2(-gap)} h can't be worked</strong>, even with all
-                   ${people} people at ${h2(TEAM_DAILY_HOURS)} h/day for the ${plural(wp.left, 'work day')} left.
-                   ${perDay != null ? `Clearing it would take ${h2(perDay)} h/day each.` : ''}</div>`
-              : `<div class="avail-verdict ok"><strong>Achievable.</strong>
-                   The team can work ${h2(possible)} h before month end, ${h2(gap)} h more than the
-                   ${h2(remaining)} h of remaining capacity${perDay != null ? ` (${h2(perDay)} h/day each)` : ''}.</div>`;
-            // Meter scaled to the larger of the two: green = hours the team can cover, red = the
-            // shortfall beyond what's physically possible, faint = spare team hours.
+            // One panel: verdict headline, a labelled meter, then four aligned stats. The verdict
+            // leads so "can we physically do this?" is never a sum the reader has to work out.
             const scale = Math.max(possible, remaining) || 1;
             const pct = v => (v / scale * 100).toFixed(2) + '%';
-            const meter = `<div class="avail-meter" role="img" aria-label="Remaining capacity ${h2(remaining)} h against ${h2(possible)} h possible">
-                <div class="seg ok" style="width:${pct(Math.min(possible, remaining))}"></div>
-                ${short ? `<div class="seg over" style="width:${pct(-gap)}"></div>` : ''}
-                <div class="mark" style="left:${pct(possible)}" title="Team hours possible"></div>
-              </div>
-              <div class="avail-legend"><span>0 h</span>
-                <span>${short ? `Team limit ${h2(possible)} h · need ${h2(remaining)} h` : `Need ${h2(remaining)} h · team limit ${h2(possible)} h`}</span></div>`;
+            const covered = Math.min(possible, remaining);
+            const stat = (n, l, sub, neg) => `<div class="av-stat"><div class="n${neg ? ' neg' : ''}">${esc(n)}</div>
+                <div class="l">${esc(l)}</div>${sub ? `<div class="s">${esc(sub)}</div>` : ''}</div>`;
+            const panel = `<div class="avail ${short ? 'over' : 'ok'}">
+                <div class="av-head">
+                  <span class="av-badge">${short ? 'Not achievable' : 'Achievable'}</span>
+                  <span class="av-line">${short
+                    ? `<strong>${h2(-gap)} h</strong> of remaining capacity can't be worked this month`
+                    : `<strong>${h2(gap)} h</strong> of team time to spare this month`}</span>
+                </div>
+                <div class="av-meter-labels">
+                  <span style="width:${pct(covered)}">${short ? 'Team can work' : 'Remaining capacity'} · ${h2(covered)} h</span>
+                  ${short ? `<span class="over" style="width:${pct(-gap)}">Over limit · ${h2(-gap)} h</span>` : ''}
+                </div>
+                <div class="avail-meter" role="img" aria-label="Remaining capacity ${h2(remaining)} h against ${h2(possible)} h possible">
+                  <div class="seg ok" style="width:${pct(covered)}"></div>
+                  ${short ? `<div class="seg over" style="width:${pct(-gap)}"></div>` : ''}
+                  <div class="mark" style="left:${pct(possible)}"></div>
+                </div>
+                <div class="avail-legend"><span>0 h</span><span>${short ? `${h2(remaining)} h needed` : `${h2(possible)} h possible`}</span></div>
+                <div class="av-stats">
+                  ${stat(h2(possible) + ' h', 'Team hours possible', `${people} people × ${h2(TEAM_DAILY_HOURS)} h × ${plural(wp.left, 'day')}`)}
+                  ${stat(h2(remaining) + ' h', 'Remaining capacity', 'across every budget below', short)}
+                  ${stat(perDay != null ? h2(perDay) + ' h' : '—', 'Hours/day each needed', `limit ${h2(TEAM_DAILY_HOURS)} h`, perDay != null && perDay > TEAM_DAILY_HOURS)}
+                  ${stat((isFinite(pctNeeded) ? pctNeeded.toFixed(0) : '—') + '%', 'Of possible hours needed', 'over 100% = impossible', short)}
+                </div>
+              </div>`;
             view.insertAdjacentHTML('beforeend',
-              '<h2 class="section-h flush">Team availability · rest of month</h2>' + verdict + meter + summaryBar([
-                { n: h2(possible) + ' h', l: 'Team hours possible' },
-                { n: h2(remaining) + ' h', l: 'Remaining capacity', neg: short },
-                { n: h2(Math.abs(gap)) + ' h', l: short ? 'Cannot be worked' : 'Spare team hours', neg: short },
-                { n: (isFinite(pctNeeded) ? pctNeeded.toFixed(0) : '—') + '%', l: 'Of possible hours needed', neg: short },
-                { n: perDay != null ? h2(perDay) + ' h' : '—', l: 'Hours/day each needed', neg: perDay != null && perDay > TEAM_DAILY_HOURS },
-                { n: `${people} × ${h2(TEAM_DAILY_HOURS)} h × ${wp.left}`, l: 'People × hours/day × days left' },
-              ]));
+              '<h2 class="section-h flush">Team availability · rest of month</h2>' + panel);
             const msa = capSection('MSA projects · monthly capacity', null, false);
             const est = capSection('Estimate-based projects · capacity = open task estimates', 'Estimate', false);
             const sup = capSection('Support · monthly capacity', 'Support', false);
