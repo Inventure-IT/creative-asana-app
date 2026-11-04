@@ -9,7 +9,8 @@ per-assignee estimated-hours bar chart, a Refresh button, and a "last updated" t
 Run:  python creative_asana_app.py     (opens http://localhost:8765)
 
 Add more widgets by appending to PROJECTS below.
-Token lookup: ASANA_PAT env var, falling back to the Windows User env var (registry).
+Token: the signed-in user's, posted by the page to /api/token (from Firestore). ASANA_PAT
+(env var, or the Windows User env var in the registry) is optional and only used until then.
 """
 
 import gzip
@@ -137,6 +138,13 @@ ARCHIVED_GIDS = {
 # endpoint keeps all of PROJECTS and lets the UI split off the archived section.
 EST_PROJECTS = [p for p in PROJECTS if p["gid"] not in ARCHIVED_GIDS]
 
+# The project list also comes from this Asana portfolio, read on each load (and on Refresh), so
+# a new project shows up without a code change. PROJECTS above then only needs entries that
+# carry settings (cap, kind) or that aren't in the portfolio; a portfolio project with no entry
+# gets the defaults (no budget). Projects Asana marks archived join ARCHIVED_GIDS automatically.
+# None turns the sync off.
+PORTFOLIO_GID = "1214229029715231"
+
 EST_FIELD = "Estimated time"             # stored in minutes
 EXCLUDE_SECTIONS = {"completed"}         # status columns excluded from hour totals (case-insensitive)
 DEFAULT_START = "2026-06-01"             # default date range (inclusive) for the "Hours logged" view
@@ -144,11 +152,81 @@ DEFAULT_END = "2026-06-30"               #   entries with start <= entered_on <=
 ASSIGNEE_HOURS_CAP = 128                 # estimated hours each assignee is expected to fill (all projects)
 # Team Capacity chart shows only these people (sorted by remaining), with Unassigned pinned far right.
 TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roach"]
+
+# MSA Project Capacity's "Not this month" planning: cards dragged out of a month's capacity are
+# shared live through Firestore (doc capacity/{YYYY-MM}). This web config is public by design;
+# access is enforced by the Firestore rules, which only admit signed-in Google accounts on
+# PLANNING_DOMAINS. Both deploy paths inject these into the page.
+FIREBASE_CONFIG = {
+    "apiKey": "AIzaSyBkzlPD3VdRN6t3cUbAy2XiPUeu--MiImc",
+    "authDomain": "calm-seeker-473214-q2.firebaseapp.com",
+    "projectId": "calm-seeker-473214-q2",
+    "storageBucket": "calm-seeker-473214-q2.firebasestorage.app",
+    "messagingSenderId": "681192461133",
+    "appId": "1:681192461133:web:065b6403c9eb29ee3c9d04",
+}
+PLANNING_DOMAINS = ["inventureit.com", "complete.md"]   # keep the Firestore rules in step
 PORT = 8765
 API = "https://app.asana.com/api/1.0"
 PROJECT_NAMES = {p["gid"]: p["name"] for p in PROJECTS}
 PROJECT_CAPS = {p["gid"]: p.get("cap") for p in PROJECTS}   # monthly hour capacity, or None
 PROJECT_KINDS = {p["gid"]: p.get("kind") for p in PROJECTS}  # classification, or None
+
+# The configured lists, kept so each portfolio sync rebuilds from them (a project dropped from
+# the portfolio, or un-archived, doesn't linger). The live lists above are updated in place —
+# every reader holds the same objects.
+_CONFIG_PROJECTS = [dict(p) for p in PROJECTS]
+_CONFIG_ARCHIVED = set(ARCHIVED_GIDS)
+_PORTFOLIO_LOCK = threading.Lock()
+_PORTFOLIO_SYNCED = [False]
+_PORTFOLIO_AT = [0.0]
+
+
+def sync_portfolio(refresh=False):
+    """Fold PORTFOLIO_GID's projects into PROJECTS (once per session, and again on Refresh).
+
+    Configured projects keep their order, name and settings; portfolio projects not configured
+    are appended in portfolio order. Archived-in-Asana projects are added to ARCHIVED_GIDS.
+    One paginated Asana read. A failure keeps whatever list is current and is reported once.
+    """
+    if not PORTFOLIO_GID:
+        return
+    with _PORTFOLIO_LOCK:
+        # A Refresh fires the estimated and logged loads together; one read serves both.
+        if _PORTFOLIO_SYNCED[0] and (not refresh or time.time() - _PORTFOLIO_AT[0] < REFRESH_SHARE_WINDOW):
+            return
+        try:
+            items = api_pages(f"/portfolios/{PORTFOLIO_GID}/items"
+                              f"?opt_fields=name,archived,resource_type&limit=100")
+        except urllib.error.HTTPError as e:
+            print(f"WARNING: could not read portfolio {PORTFOLIO_GID} (Asana {e.code}) — "
+                  f"using the configured project list.")
+            _PORTFOLIO_SYNCED[0] = True
+            return
+        configured = {p["gid"]: p for p in _CONFIG_PROJECTS}
+        merged = [dict(p) for p in _CONFIG_PROJECTS]
+        archived = set(_CONFIG_ARCHIVED)
+        added = []
+        for it in items:
+            if it.get("resource_type") != "project" or not it.get("gid"):
+                continue   # a nested portfolio isn't a project
+            if it.get("archived"):
+                archived.add(it["gid"])
+            if it["gid"] not in configured:
+                merged.append({"gid": it["gid"], "name": it.get("name") or it["gid"]})
+                added.append(it.get("name") or it["gid"])
+        PROJECTS[:] = merged
+        ARCHIVED_GIDS.clear()
+        ARCHIVED_GIDS.update(archived)
+        EST_PROJECTS[:] = [p for p in PROJECTS if p["gid"] not in ARCHIVED_GIDS]
+        for d, key in ((PROJECT_NAMES, "name"), (PROJECT_CAPS, "cap"), (PROJECT_KINDS, "kind")):
+            d.clear()
+            d.update({p["gid"]: p.get(key) for p in PROJECTS})
+        if added and not _PORTFOLIO_SYNCED[0]:
+            print(f"Portfolio: {len(added)} project(s) not in PROJECTS were added — "
+                  + ", ".join(added[:8]) + (" …" if len(added) > 8 else ""))
+        _PORTFOLIO_SYNCED[0] = True
+        _PORTFOLIO_AT[0] = time.time()
 
 # In-memory cache so navigating between pages never re-hits the Asana API.
 # Data is fetched once and reused until the user explicitly clicks Refresh.
@@ -174,10 +252,23 @@ def get_token():
                 return val.strip()
     except (ImportError, FileNotFoundError, OSError):
         pass
-    sys.exit('ERROR: ASANA_PAT not found. Set it with:  setx ASANA_PAT "your_token"')
+    return None   # fine: the page's sign-in posts the user's token to /api/token
 
 
 TOKEN = get_token()
+
+
+def set_token(tok):
+    """Switch the token every Asana call uses — the page's sign-in posts the signed-in user's
+    (from Firestore) to /api/token. A different token drops the computed caches; the raw task
+    trees and time entries are workspace data and are kept."""
+    global TOKEN
+    with CACHE_LOCK:
+        if tok == TOKEN:
+            return
+        TOKEN = tok
+        CACHE.update({"summaries": None, "detail": {}, "logged_summaries": {}, "logged_detail": {},
+                      "me": None, "carve_outs": {}})
 
 # Two long-lived, bounded thread pools shared across all requests.
 #  - LEAF_POOL runs the many small API calls (subtasks, time entries). The binding limit is
@@ -247,6 +338,7 @@ REQ_LOCK = threading.Lock()
 
 def _count(target):
     kind = ("batch" if "batch_requests" in target else
+            "project-entries" if "attributable_project=" in target else
             "entries" if "time_tracking_entries" in target else
             "subtasks" if "/subtasks" in target else
             "tasks" if "/tasks?" in target else "other")
@@ -269,7 +361,7 @@ def api_post(path, body, tries=4):
     return _api_call("POST", path, json.dumps(body).encode(), tries)
 
 
-def _api_call(method, path_or_url, payload, tries=4):
+def _api_call(method, path_or_url, payload, tries=4, token=None):
     """One Asana request over the thread's keep-alive connection.
 
     Retries a rate limit (429), a 5xx, and a connection the server closed between calls —
@@ -280,7 +372,7 @@ def _api_call(method, path_or_url, payload, tries=4):
     url = path_or_url if path_or_url.startswith("http") else API + path_or_url
     parts = urllib.parse.urlsplit(url)
     target = parts.path + (("?" + parts.query) if parts.query else "")
-    headers = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json",
+    headers = {"Authorization": f"Bearer {token or TOKEN}", "Accept": "application/json",
                "Accept-Encoding": "gzip"}
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -477,6 +569,48 @@ def entries_path(task_gid):
     return f"/tasks/{task_gid}/time_tracking_entries?opt_fields={fields}&limit=100"
 
 
+# A cold load reads time entries one task at a time — hundreds of calls. Asana can also list a
+# whole project's entries (/time_tracking_entries?attributable_project=…, 100 per page), so when a
+# project has at least PROJECT_ENTRIES_MIN tasks to read, read the project instead. It's only a
+# shortcut: a task's rows are kept only if they add up to exactly its actual_time_minutes (the
+# same invariant the entry cache trusts); any task that doesn't — time attributed to another
+# project, a subtask outside the project — is read on its own as before. So it can cost calls
+# but never lose rows. If the endpoint isn't available it's switched off for the session.
+PROJECT_ENTRIES_MIN = 8
+_PROJECT_ENTRIES_OK = [True]
+
+
+def project_entries_path(project_gid):
+    fields = "duration_minutes,entered_on,created_by.name,task"
+    return (f"/time_tracking_entries?attributable_project={project_gid}"
+            f"&opt_fields={fields}&limit=100")
+
+
+def project_entries(project_gid, minutes_by_gid):
+    """{task gid: rows} for the tasks in minutes_by_gid whose rows in the project-wide entry
+    list add up to their tracked minutes. Tasks it can't vouch for are simply left out."""
+    if not _PROJECT_ENTRIES_OK[0]:
+        return {}
+    try:
+        rows = api_pages(project_entries_path(project_gid))
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 402, 403, 404) and _PROJECT_ENTRIES_OK[0]:
+            _PROJECT_ENTRIES_OK[0] = False
+            print(f"NOTE: project-wide time-entry reads unavailable (Asana {e.code}) — reading "
+                  f"entries task by task. Data is unaffected.")
+        return {}
+    by_task, seen = {}, set()
+    for r in rows:
+        g = (r.pop("task", None) or {}).get("gid")
+        if not g or g not in minutes_by_gid or (r.get("gid") and r["gid"] in seen):
+            continue
+        if r.get("gid"):
+            seen.add(r["gid"])
+        by_task.setdefault(g, []).append(r)
+    return {g: rs for g, rs in by_task.items()
+            if sum(x.get("duration_minutes") or 0 for x in rs) == minutes_by_gid[g]}
+
+
 # A refresh landing within this many seconds of the last one reuses the fetched tree. The
 # dashboard refreshes estimated and logged hours as two concurrent requests, and they must not
 # pull the same project twice; a real refresh minutes later still re-reads Asana.
@@ -659,6 +793,7 @@ def summary_from_detail(d):
         "ntasks": d["ntasks"],
         "hours": round(sum(d["hours"]), 2),
         "cap": PROJECT_CAPS.get(d["gid"]),
+        "archived": d["gid"] in ARCHIVED_GIDS,
         "updated": d["updated"],
     }
 
@@ -689,6 +824,7 @@ def get_summaries(refresh=False):
             cached = CACHE["summaries"]
         if cached is not None:
             return cached
+    sync_portfolio(refresh)
     # Build every project's detail concurrently instead of one-at-a-time.
     details = PROJECT_POOL.map(lambda p: get_detail(p["gid"], refresh=refresh), PROJECTS)
     out = [summary_from_detail(d) for d in details]
@@ -744,6 +880,7 @@ def get_assignee_load(refresh=False):
     `hours` is the work each person still has left to do. Reuses the cached per-project
     detail, so it adds no Asana calls when the projects are already loaded.
     """
+    sync_portfolio()
     details = list(PROJECT_POOL.map(lambda p: get_detail(p["gid"], refresh=refresh), EST_PROJECTS))
     est, act, counts, breakdown = {}, {}, {}, {}
     for d in details:
@@ -835,7 +972,7 @@ def _has_recent(rows, cutoff):
     return any((r.get("entered_on") or "") >= cutoff for r in rows)
 
 
-def entries_for_tasks(minutes_by_gid, refresh=False):
+def entries_for_tasks(minutes_by_gid, refresh=False, project=None):
     """Time entries for many tasks -> {task gid: rows}. Input is {task gid: tracked minutes}.
 
     This is the call that dominates a load — one request per task that has tracked time, and
@@ -869,11 +1006,15 @@ def entries_for_tasks(minutes_by_gid, refresh=False):
             else:
                 missing.append(g)
     if missing:
-        by_path = api_batch(entries_path(g) for g in missing)
+        # Many to read on one project (a cold load or Refresh): try the project-wide list first.
+        found = (project_entries(project, {g: minutes_by_gid[g] for g in missing})
+                 if project and len(missing) >= PROJECT_ENTRIES_MIN else {})
+        rest = [g for g in missing if g not in found]
+        by_path = api_batch(entries_path(g) for g in rest) if rest else {}
         fetched = time.time()
         with CACHE_LOCK:
             for g in missing:
-                rows = by_path[entries_path(g)]
+                rows = found[g] if g in found else by_path[entries_path(g)]
                 CACHE["entries"][g] = {"rows": rows, "minutes": minutes_by_gid[g], "at": fetched}
                 out[g] = rows
         _ENTRY_CACHE_DIRTY[0] = True
@@ -909,7 +1050,8 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
         if minutes > 0:
             cand_by_gid[item["gid"]] = (item.get("name", "(untitled)"), minutes)
     # Only tasks whose tracked total moved are read from Asana; the rest come from cache.
-    by_gid = entries_for_tasks({g: m for g, (_, m) in cand_by_gid.items()}, refresh=refresh)
+    by_gid = entries_for_tasks({g: m for g, (_, m) in cand_by_gid.items()}, refresh=refresh,
+                               project=gid)
     # On an unbillable board, only a carve-out's tasks (and their subtasks) are billable —
     # unless that carve-out is itself marked "billable": False.
     carved = set()
@@ -979,6 +1121,7 @@ def logged_summary_from_detail(d):
         "nentries": d["nentries"],
         "cap": PROJECT_CAPS.get(d["gid"]),
         "kind": PROJECT_KINDS.get(d["gid"]),
+        "archived": d["gid"] in ARCHIVED_GIDS,
         "updated": d["updated"],
     }
 
@@ -1011,6 +1154,7 @@ def get_logged_summaries(refresh=False, start=DEFAULT_START, end=DEFAULT_END):
             cached = CACHE["logged_summaries"].get(key)
         if cached is not None:
             return cached
+    sync_portfolio(refresh)
     # Build every project's logged-hours detail concurrently instead of one-at-a-time.
     details = PROJECT_POOL.map(lambda p: get_logged_detail(p["gid"], refresh=refresh, start=start, end=end), PROJECTS)
     out = [logged_summary_from_detail(d) for d in details]
@@ -1202,7 +1346,7 @@ PAGE = r"""<!DOCTYPE html>
              background of the capacity cards the bar sits on — at --panel2 it disappeared. */
           --blk-off:#5b6474; }
   body { font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin:0; background:var(--bg); color:var(--text); }
-  .wrap { max-width:1040px; margin:32px auto; padding:0 20px; }
+  .wrap { max-width:1320px; margin:32px auto; padding:0 20px; }
   h1 { font-size:22px; margin:0 0 2px; }
   .sub { color:var(--muted); font-size:13px; margin:0 0 24px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:18px; }
@@ -1294,6 +1438,58 @@ PAGE = r"""<!DOCTYPE html>
   .content .sub { margin:3px 0 16px; }   /* tighter than the standalone .sub default */
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
   .section-aside { font-size:13px; font-weight:400; color:var(--muted); margin-left:4px; }
+  /* Sign-in screen + floating sign-out (both builds). */
+  .login { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .login-card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:34px 32px;
+                max-width:430px; width:100%; box-shadow:0 10px 34px rgba(0,0,0,.5); }
+  .login-card h1 { font-size:22px; margin:0 0 6px; }
+  .login-card .sub { margin:0 0 18px; }
+  .login-card input[type=password] { width:100%; box-sizing:border-box; background:var(--panel2); color:var(--text);
+                border:1px solid var(--border); border-radius:8px; padding:11px 12px; font-size:14px; margin-bottom:12px; }
+  .login-card .remember { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); margin:0 0 16px; }
+  .login-card .btn { width:100%; padding:11px; }
+  .login-err { color:var(--red); font-size:13px; margin:0 0 12px; }
+  .login-note { font-size:11px; color:var(--faint); margin-top:16px; line-height:1.55; }
+  .login-note.center { text-align:center; }
+  .login-note a { color:var(--blue-d); }
+  .signout { position:fixed; top:16px; right:18px; z-index:50; background:var(--panel2); color:var(--text);
+             border:1px solid var(--border); border-radius:8px; padding:7px 12px; font-size:12px; cursor:pointer; }
+  .signout:hover { border-color:var(--muted); }
+  /* "Not this month" planning on MSA Project Capacity: draggable capacity cards, drop zones
+     outlined while dragging, moved-out cards dimmed. */
+  [data-plan-id][draggable="true"] { cursor:grab; }
+  [data-plan-id][draggable="true"]:active { cursor:grabbing; }
+  body.plan-dragging [data-drop] { outline:2px dashed var(--border); outline-offset:6px; border-radius:12px; }
+  body.plan-dragging [data-drop].drop-hot { outline-color:var(--blue); }
+  .plan-out .card { opacity:.55; }
+  /* Reorder marker: a blue bar on the side of the card the dragged one will land next to. */
+  .card.drop-before { box-shadow:-4px 0 0 0 var(--blue); }
+  .card.drop-after { box-shadow:4px 0 0 0 var(--blue); }
+  .grp-card.wide.drop-before { box-shadow:0 -4px 0 0 var(--blue); }
+  .grp-card.wide.drop-after { box-shadow:0 4px 0 0 var(--blue); }
+  .plan-out .card:hover { opacity:.85; }
+  .plan-by { font-size:11px; color:var(--faint); margin-top:10px; }
+  .plan-empty { grid-column:1 / -1; border:1px dashed var(--border); border-radius:10px; padding:22px;
+                color:var(--faint); text-align:center; font-size:13px; line-height:1.6; }
+  .plan-empty.slim { padding:10px; }
+  .plan-empty .btn { margin-top:10px; }
+  .plan-who { font-size:13px; color:var(--muted); margin-right:8px; }
+  .toolbar #cap-edit { margin-right:6px; }
+  .cap-edit-help { font-size:13px; color:var(--muted); margin:-4px 0 12px; }
+  table.tasks.cap-edit { max-width:760px; }
+  table.tasks.cap-edit .cap-in { width:110px; background:var(--panel2); color:var(--text); text-align:right;
+                                 border:1px solid var(--border); border-radius:6px; padding:6px 8px;
+                                 font-variant-numeric:tabular-nums; }
+  table.tasks.cap-edit .cap-in.bad { border-color:var(--red); }
+  .cap-edit-actions { display:flex; gap:10px; margin:16px 0 0; }
+  /* Settings › Holidays */
+  .toolbar .hol-name { background:var(--panel2); color:var(--text); border:1px solid var(--border);
+                       border-radius:6px; padding:6px 8px; min-width:220px; }
+  table.tasks.hol-table { max-width:760px; }
+  table.tasks.hol-table tr.past td { color:var(--faint); }
+  table.tasks.hol-table td.hol-act { text-align:right; width:1%; }
+  table.tasks.hol-table .hol-del { padding:4px 10px; font-size:12px; }
+  .plan-err { color:var(--red); font-size:13px; margin:0 0 10px; }
   .section-h.flush { margin-top:8px; padding-top:0; border-top:0; }   /* first heading under the filter */
   /* Headline stat strip. Every tab opens with one so the top-line numbers are always in
      the same place. Deliberately quieter than the <h1> above it — it summarises the page,
@@ -1344,11 +1540,37 @@ PAGE = r"""<!DOCTYPE html>
   .card.logged .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
   /* MSA/capacity cards: lighter panel + brighter border so they stand out at the top of the list */
   .card.cap { background:var(--panel2); border-color:#5c6b86; }
-  /* Standalone cap cards size to their content rather than stretching to match a bucket beside
-     them. Bucket cards do stretch, so neighbouring buckets line up, with the "Open bucket" link
-     pinned to the bottom of the card. */
-  .grid.cap-grid { align-items:start; }
-  .grid.cap-grid .grp-card { align-self:stretch; display:flex; flex-direction:column; }
+  /* Cards in a row are the same height (they stretch to the tallest), content top-aligned, with a
+     bucket's "Open bucket" link pinned to the bottom. Combined buckets sit in a row of their own
+     (see capSection), so a bucket's member list never stretches a project card. "Not this month"
+     keeps natural heights. */
+  .grid.cap-grid + .grid.cap-grid { margin-top:18px; }   /* bucket row, then project row */
+  /* Combined buckets run wide (two to a row) and put their member list beside the numbers
+     instead of under them, so the bucket row stays short. */
+  .grid.bucket-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  /* (selectors carry .grid.cap-grid so they outrank the stacked bucket layout above) */
+  .grid.cap-grid.bucket-grid .grp-card { display:grid; grid-template-columns:auto minmax(0, 1fr);
+                                         grid-template-rows:auto auto 1fr auto; column-gap:22px; }
+  .grid.cap-grid.bucket-grid .grp-card > h3 { grid-column:1 / -1; grid-row:1; }
+  .grid.cap-grid.bucket-grid .grp-card > .stats { grid-column:1; grid-row:2; }
+  .grid.cap-grid.bucket-grid .grp-card > .cap-bar { grid-column:1; grid-row:3; align-self:start; margin-top:18px; }
+  /* Members in a column to the right of the numbers. */
+  .grid.cap-grid.bucket-grid .grp-card > .grp-members {
+    grid-column:2; grid-row:2 / span 2; align-self:start; margin-top:0; padding:0 0 0 16px;
+    border-top:0; border-left:1px solid var(--border); }
+  .grid.cap-grid.bucket-grid .grp-card > .go { grid-column:1 / -1; grid-row:4; }
+  .grid.cap-grid.bucket-grid .grp-row .grp-name { white-space:normal; }   /* wrap long names, don't cut them */
+  @media (max-width:1100px) {
+    .grid.bucket-grid { grid-template-columns:minmax(0, 1fr); }
+  }
+  @media (max-width:900px) {
+    .grid.cap-grid.bucket-grid .grp-card { display:flex; }
+    .grid.cap-grid.bucket-grid .grp-card > .grp-members { margin-top:16px; border-left:0; padding:6px 0 0;
+                                                          border-top:1px solid var(--border); }
+  }
+  .grid.cap-grid:not(.plan-out), .grid[data-drop="sort"] { align-items:stretch; }
+  .grid.cap-grid.plan-out { align-items:start; }
+  .grid.cap-grid .grp-card { display:flex; flex-direction:column; }
   .grid.cap-grid .grp-card .go { margin-top:auto; padding-top:14px; }
   /* A project (or bucket) that has spent its whole monthly budget: gold tint, so "no hours
      left" is visible from the grid without reading a single number. */
@@ -1536,7 +1758,7 @@ const C = {
 Chart.defaults.color = '#9aa0a8';
 Chart.defaults.borderColor = 'rgba(255,255,255,.08)';
 
-// Draws a dashed horizontal target line (e.g. the 128 h per-assignee cap) on a bar chart.
+// Draws a dashed horizontal target line (e.g. the per-assignee monthly target) on a bar chart.
 // Enable per-chart via options.plugins.capLine = { value: <hours> }.
 // `pace` adds a second, amber line below the target: where a person should already be today,
 // given how far through the work month the range is. Labels sit above their own line.
@@ -1573,6 +1795,13 @@ const capColorPace = (h, paceTarget) => h >= paceTarget - PACE_TOLERANCE ? C.gre
 const CAP_GREEN_MIN = 80;
 // Workable hours per person per day, for MSA Project Capacity's "Team hours possible".
 const TEAM_DAILY_HOURS = 6;
+// Each person's monthly target on the Team Capacity tabs: TEAM_DAILY_HOURS × the work days in
+// the current month (weekdays minus the shared holidays). Replaces the server's fixed
+// ASSIGNEE_HOURS_CAP, so a short month or a holiday lowers the target for everyone.
+function personTarget(){
+  const [s, e] = monthRange();
+  return TEAM_DAILY_HOURS * workdayProgress(s, e).total;
+}
 const capColorEst = h => h > CAP_GREEN_MIN ? C.green : C.red;
 
 // Label for task rows that sit in no status column; used by the status filters and shown
@@ -1601,7 +1830,18 @@ const capMarksPlugin = {
 };
 Chart.register(capMarksPlugin);
 
-function fmtErr(e){ return '<p class="note">Error: '+e+'</p>'; }
+function fmtErr(e){ return '<p class="note">Error: '+esc(String(e && e.message || e))+'</p>'; }
+// fetch() + JSON that fails loudly: a non-2xx status or an {"error": …} body (e.g. Asana
+// rejecting the token) throws, so a failed load shows an error instead of being rendered as data.
+async function getJson(url){
+  const r = await fetch(url);
+  const j = await r.json().catch(() => null);
+  if (!r.ok || (j && !Array.isArray(j) && j.error))
+    throw new Error((j && j.error) ? (j.error === 'Asana 401'
+      ? 'Asana rejected the token (401). It may have expired or been revoked — create a new one.' : j.error)
+      : `${url} → ${r.status}`);
+  return j;
+}
 function esc(s){ return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function h2(x){ return Number(x || 0).toFixed(2); }   // always two decimals: 40.00, 40.50, 40.75
 // One phrasing for every loading / empty / nothing-matches state on every tab.
@@ -1773,7 +2013,7 @@ PROJECT_ROSTER.forEach(projectColor);
 const DONUT_MAX_SLICES = 7;
 const OTHER_SLICE = 'Other projects';
 // Filler slice: the part of a person's monthly capacity no project has claimed yet, so the
-// ring reads against the full 128 h target instead of only against their own workload.
+// ring reads against the full monthly target instead of only against their own workload.
 const FREE_SLICE = 'Unallocated capacity';
 // The two synthetic slices get fixed greys and always sort last in the legend.
 function sliceColor(label){
@@ -1905,7 +2145,9 @@ function setCrumbs(items) {
 // Archived projects (injected by both deploy paths): still listed on the card/list tabs, but
 // under their own section and out of the stats above it.
 const ARCHIVED = new Set(ARCHIVED_GIDS);
-const isArchived = w => ARCHIVED.has(w.gid);
+// Rows also carry `archived` from the server, which covers projects archived in Asana
+// (picked up from the portfolio after this page was built).
+const isArchived = w => !!w.archived || ARCHIVED.has(w.gid);
 
 // Which dashboard tab is active; remembered across renders/drill-ins.
 let dashTab = 'team';   // Team Capacity is the default tab
@@ -1949,32 +2191,38 @@ function fmtDate(d){ const [y,m,day]=d.split('-').map(Number); return new Date(y
 function rangeLabel(s, e){ return fmtDate(s) + ' – ' + fmtDate(e); }
 // Company holidays (YYYY-MM-DD) that fall on a weekday but are not worked, so they don't
 // count toward the work month. A week with one in it is four days, not five, which pushes the
-// pace target down for everyone instead of quietly marking the team behind. Add a date here
-// as it is announced — the list is only read by workdayProgress.
-// A date that lands on a weekend is harmless to list — it was never a work day — so the
-// published date goes in as-is rather than being shifted to an observed weekday.
-const HOLIDAYS = new Set([
-  '2025-09-01',   // Mon · Labor Day
-  // 2026 calendar, as published.
-  '2026-05-25',   // Mon · Memorial Day
-  '2026-07-04',   // Sat · Independence Day (weekend)
-  '2026-09-07',   // Mon · Labor Day
-  '2026-11-26',   // Thu · Thanksgiving
-  '2026-11-27',   // Fri · day after Thanksgiving
-  '2026-12-24',   // Thu · Christmas Eve
-  '2026-12-25',   // Fri · Christmas Day
-  '2027-01-01',   // Fri · New Year's Day
-  // 2027 extrapolated from the usual rules (last Mon of May, 1st Mon of Sep, 4th Thu of Nov).
-  // Replace these with the published dates when the calendar is announced.
-  '2027-05-31',   // Mon · Memorial Day
-  '2027-07-04',   // Sun · Independence Day (weekend)
-  '2027-09-06',   // Mon · Labor Day
-  '2027-11-25',   // Thu · Thanksgiving
-  '2027-11-26',   // Fri · day after Thanksgiving
-  '2027-12-24',   // Fri · Christmas Eve
-  '2027-12-25',   // Sat · Christmas Day (weekend)
-  '2028-01-01',   // Sat · New Year's Day (weekend)
-]);
+// pace target down for everyone instead of quietly marking the team behind. Read only by
+// workdayProgress. A date on a weekend is harmless — it was never a work day.
+// The list is shared and edited on the Holidays page (Settings), stored in Firestore at
+// settings/holidays = { days: [{ date, name }] }. DEFAULT_HOLIDAYS is only the starting list,
+// used until that doc exists (the first edit seeds it from here).
+const DEFAULT_HOLIDAYS = [
+  { date: '2025-09-01', name: 'Labor Day' },
+  { date: '2026-05-25', name: 'Memorial Day' },
+  { date: '2026-07-04', name: 'Independence Day' },
+  { date: '2026-09-07', name: 'Labor Day' },
+  { date: '2026-11-26', name: 'Thanksgiving' },
+  { date: '2026-11-27', name: 'Day after Thanksgiving' },
+  { date: '2026-12-24', name: 'Christmas Eve' },
+  { date: '2026-12-25', name: 'Christmas Day' },
+  { date: '2027-01-01', name: "New Year's Day" },
+  { date: '2027-05-31', name: 'Memorial Day' },
+  { date: '2027-07-04', name: 'Independence Day' },
+  { date: '2027-09-06', name: 'Labor Day' },
+  { date: '2027-11-25', name: 'Thanksgiving' },
+  { date: '2027-11-26', name: 'Day after Thanksgiving' },
+  { date: '2027-12-24', name: 'Christmas Eve' },
+  { date: '2027-12-25', name: 'Christmas Day' },
+  { date: '2028-01-01', name: "New Year's Day" },
+];
+// The live list (updated in place from Firestore) and the date set workdayProgress checks.
+let holidayList = DEFAULT_HOLIDAYS.slice();
+const HOLIDAYS = new Set(holidayList.map(h => h.date));
+function setHolidays(list){
+  holidayList = list.slice().sort((a, b) => a.date.localeCompare(b.date));
+  HOLIDAYS.clear();
+  holidayList.forEach(h => HOLIDAYS.add(h.date));
+}
 // How far through the *working* part of the selected range today sits. Mon–Fri minus the
 // HOLIDAYS above, so a month's 30 calendar days become ~22 billable ones and a holiday week
 // counts four. Today counts as elapsed once it starts, which is the reading a PM wants at a
@@ -2031,13 +2279,15 @@ const TABS = {
     sub:'Day by day, what each person logged their time to in the selected range.' },
   settings: { label:'Graph Colors', title:'Graph Colors',
     sub:'Pick a color for each person — saved in this browser and applied to every per-person chart.' },
+  holidays: { label:'Holidays', title:'Holidays',
+    sub:'Days off that are not work days. Shared with everyone — anyone signed in can add or remove one, and every work-day count (pace, team availability) updates.' },
 };
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views. `tone` picks the
 // section's accent — 'est' = blue, 'act' = green, omitted for neutral (Settings).
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tone: 'est', tabs: ['team', 'estproj', 'estimated'] },
   { title: 'Actual Hours', tone: 'act', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily'] },
-  { title: 'Settings', tabs: ['settings'] },
+  { title: 'Settings', tabs: ['settings', 'holidays'] },
 ];
 
 // Shared left nav, reused by the dashboard and the drill-in detail pages so the
@@ -2174,6 +2424,472 @@ function groupCard(g) {
   return c;
 }
 
+// ---- Sign-in (both builds) ----
+// Google first, on PLANNING_DOMAINS. The user's Asana token is kept in Firestore at
+// users/{uid}.asanaPat — readable only by that user (Firestore rules) — so it's entered once per
+// person, not per browser. First sign-in, or a saved token Asana now rejects, prompts for it.
+// The token then goes to the data layer: on GitHub Pages it stays in the browser
+// (window.__useToken, defined by the static build); locally it's POSTed to the server's
+// /api/token, which uses it for every Asana call. Signing in with Google here also signs the
+// user in to "Not this month" planning (same Firebase app, see plan below).
+const PAT_HELP = 'Create one in Asana → My Settings → Apps → Manage developer apps → Personal access tokens.';
+async function useToken(tok){
+  if (window.__useToken) return window.__useToken(tok);
+  const r = await fetch('/api/token', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ token: tok }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('Server ' + r.status));
+  return j;
+}
+// Company Google accounts only (PLANNING_DOMAINS; the Firestore rules enforce the same list).
+const domainOk = email => PLANNING_DOMAINS.some(d => (email || '').toLowerCase().endsWith('@' + d));
+const onDomain = u => !!u && domainOk(u.email);
+const DOMAIN_TEXT = PLANNING_DOMAINS.map(d => '@' + d).join(' or ');
+// Google's account chooser can only be narrowed to one domain, so hint it only when there's one.
+const signInParams = () => Object.assign({ prompt: 'select_account' },
+  PLANNING_DOMAINS.length === 1 ? { hd: PLANNING_DOMAINS[0] } : {});
+// The Google user once Firebase has restored any earlier sign-in (null if none).
+function authUser(){
+  const { A, auth } = plan.fb;
+  return new Promise(res => {
+    const off = A.onAuthStateChanged(auth, u => { off(); res(u); });
+    setTimeout(() => res(auth.currentUser), 5000);
+  });
+}
+async function savedPat(u){
+  const { F, db } = plan.fb;
+  const snap = await F.getDoc(F.doc(db, 'users', u.uid));
+  return snap.exists() ? (snap.data().asanaPat || null) : null;
+}
+async function storePat(u, tok, me){
+  const { F, db } = plan.fb;
+  await F.setDoc(F.doc(db, 'users', u.uid),
+    { asanaPat: tok, asanaName: me.name || '', email: u.email, updatedAt: F.serverTimestamp() },
+    { merge: true });
+}
+function showSignout(who){
+  let b = document.getElementById('signout-fab');
+  if (!b) { b = document.createElement('button'); b.id = 'signout-fab'; b.className = 'signout'; document.body.appendChild(b); }
+  b.textContent = 'Sign out'; b.title = who ? ('Signed in as ' + who) : ''; b.onclick = doLogout; b.style.display = 'block';
+}
+function hideSignout(){ const b = document.getElementById('signout-fab'); if (b) b.style.display = 'none'; }
+function doLogout(){
+  if (window.__dropToken) window.__dropToken();
+  if (plan.fb) plan.fb.A.signOut(plan.fb.auth);
+  destroyCharts();
+  location.hash = '';
+  renderLogin();
+}
+function loginStart(me){
+  window.__authed = true;
+  showSignout(me && (me.name || me.email) || 'Signed in');
+  route();
+}
+function loginCard(inner){
+  window.__authed = false; hideSignout();
+  app.innerHTML = `<div class="login"><div class="login-card"><h1>Asana Dashboard</h1>${inner}</div></div>`;
+}
+// step: 'google' (choose sign-in) · 'token' (signed in with Google, needs an Asana token) ·
+// 'legacy' (token only: kept in this browser on Pages, in the server's memory locally).
+function renderLogin(err, step){
+  step = step || 'google';
+  const errHtml = err ? `<p class="login-err">${esc(err)}</p>` : '';
+  if (step === 'google') {
+    loginCard(`<p class="sub">Sign in with your ${esc(DOMAIN_TEXT)} Google account.</p>${errHtml}
+      <button class="btn" id="g-in">Sign in with Google</button>
+      <p class="login-note center"><a href="#" id="use-pat">Use an Asana token without Google</a></p>`);
+    document.getElementById('g-in').onclick = googleSignIn;
+    document.getElementById('use-pat').onclick = ev => { ev.preventDefault(); renderLogin(null, 'legacy'); };
+    return;
+  }
+  const u = step === 'token' && plan.fb ? plan.fb.auth.currentUser : null;
+  const browser = !!window.__browserToken;
+  loginCard(step === 'token'
+    ? `<p class="sub">Signed in as <strong>${esc(u ? u.email : '')}</strong>. Paste your Asana Personal Access
+         Token once — it's saved to your account, so you won't be asked again. ${PAT_HELP}</p>
+       <input type="password" id="pat" placeholder="Paste your Asana PAT" autocomplete="off" spellcheck="false">
+       ${errHtml}<button class="btn" id="connect">Save and connect</button>
+       <p class="login-note">Stored in the dashboard's Firestore database, readable only by your Google account.
+         <a href="#" id="switch">Use a different Google account</a></p>`
+    : `<p class="sub">Connect with a Personal Access Token. ${PAT_HELP}</p>
+       <input type="password" id="pat" placeholder="Paste your Asana PAT" autocomplete="off" spellcheck="false">
+       ${browser ? '<label class="remember"><input type="checkbox" id="remember"> Remember on this device</label>' : ''}
+       ${errHtml}<button class="btn" id="connect">Connect</button>
+       <p class="login-note">${browser ? 'Your token is stored only in this browser and sent directly to Asana over HTTPS.'
+                                       : 'Your token is kept in the local server\u2019s memory until it restarts.'}
+         <a href="#" id="switch">Sign in with Google instead</a></p>`);
+  const inp = document.getElementById('pat'), go = document.getElementById('connect');
+  document.getElementById('switch').onclick = async ev => {
+    ev.preventDefault();
+    if (step === 'token' && plan.fb) await plan.fb.A.signOut(plan.fb.auth);
+    renderLogin(null, 'google');
+  };
+  const submit = async () => {
+    const tok = inp.value.trim(); if (!tok) return;
+    go.disabled = true; go.textContent = 'Connecting…';
+    let me;
+    try { me = await useToken(tok); }
+    catch (e) { return renderLogin(e && e.message || String(e), step); }
+    if (step === 'token') {
+      try { await storePat(plan.fb.auth.currentUser, tok, me); }
+      catch (e) { return renderLogin('Could not save your token: ' + e.message, step); }
+    } else if (browser) {
+      window.__browserToken.save(tok, document.getElementById('remember').checked);
+    }
+    location.hash = ''; loginStart(me);
+  };
+  go.onclick = submit;
+  inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); };
+  inp.focus();
+}
+// Signed in with Google: use the saved Asana token, or ask for one.
+async function afterGoogle(u){
+  loginCard('<p class="sub">Signing in…</p>');
+  let tok;
+  try { tok = await savedPat(u); }
+  catch (e) { return renderLogin('Could not read your saved token: ' + e.message, 'token'); }
+  if (!tok) return renderLogin(null, 'token');
+  try { loginStart(await useToken(tok)); }
+  catch (e) { renderLogin('Your saved Asana token no longer works — paste a new one.', 'token'); }
+}
+async function googleSignIn(){
+  if (!plan.fb) { plan.status = 'off'; await planInit(); }
+  if (!plan.fb) return renderLogin(plan.error || 'Google sign-in is unavailable.');
+  const { A, auth } = plan.fb;
+  const provider = new A.GoogleAuthProvider();
+  provider.setCustomParameters(signInParams());
+  try {
+    const r = await A.signInWithPopup(auth, provider);
+    if (!onDomain(r.user)) { await A.signOut(auth); return renderLogin(`Use your ${DOMAIN_TEXT} Google account.`); }
+    afterGoogle(r.user);
+  } catch (e) {
+    if (e.code !== 'auth/popup-closed-by-user' && e.code !== 'auth/cancelled-popup-request')
+      renderLogin('Google sign-in failed: ' + e.message);
+  }
+}
+async function bootAuth(){
+  loginCard('<p class="sub">Signing in…</p>');
+  await planInit();
+  const u = plan.fb ? await authUser() : null;
+  if (u && onDomain(u)) return afterGoogle(u);
+  if (u) { await plan.fb.A.signOut(plan.fb.auth); return renderLogin(`Use your ${DOMAIN_TEXT} Google account.`); }
+  // A token-only sign-in from an earlier visit (GitHub Pages) still works.
+  const saved = window.__browserToken && window.__browserToken.load();
+  if (saved) {
+    try { return loginStart(await useToken(saved)); }
+    catch (e) { if (window.__dropToken) window.__dropToken(); }
+  }
+  if (plan.fb) renderLogin();
+  else renderLogin('Google sign-in is unavailable right now — connect with a token instead.', 'legacy');
+}
+
+// ---- "Not this month" planning (MSA Project Capacity) ----
+// Capacity cards the team has dragged out of a month, shared live through Firestore:
+// doc capacity/{YYYY-MM} = { out: { <card id>: { by, email, at } } }. Card ids are
+// 'grp:<group name>', 'p:<project gid>' or 'carve:<carve-out name>'. Reading or writing needs a
+// Google sign-in on PLANNING_DOMAINS — enforced by the Firestore rules, not just here. The SDK is
+// imported lazily (ES modules from gstatic) the first time MSA Project Capacity opens.
+const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+const plan = { status: 'off', fb: null, user: null, month: null, watching: null, unsub: null,
+               out: {}, error: null, onChange: null,
+               // Card order on MSA Project Capacity, shared by everyone and not per month:
+               // doc layout/capacity = { order: [card id, …], by, at }.
+               order: [], unsubOrder: null, dragId: null,
+               // Capacity overrides, shared by everyone: doc settings/capacity =
+               // { caps: { 'p:<gid>' | 'grp:<group>': hours }, by, at }. A card id missing from
+               // caps uses the configured cap from PROJECTS / GROUPS.
+               caps: {}, unsubCaps: null, editingCaps: false,
+               // Shared holiday list (settings/holidays). holidaysSaved = the doc exists yet.
+               unsubHolidays: null, holidaysSaved: false };
+// The monthly capacity for a card id: the shared override if there is one, else `fallback`.
+function capOverride(id, fallback){ return id in plan.caps ? plan.caps[id] : fallback; }
+function planChanged(){ if (plan.onChange) plan.onChange(); }
+async function planInit(){
+  if (plan.fb || plan.status === 'loading') return;
+  plan.status = 'loading';
+  try {
+    const [app, A, F] = await Promise.all(['firebase-app.js', 'firebase-auth.js', 'firebase-firestore.js']
+      .map(f => import(FIREBASE_SDK + f)));
+    // The static build's login may already have started Firebase; reuse that app.
+    const fapp = app.getApps().length ? app.getApp() : app.initializeApp(FIREBASE_CONFIG);
+    plan.fb = { A, F, auth: A.getAuth(fapp), db: F.getFirestore(fapp) };
+    // If restoring a previous sign-in is slow, offer the button anyway rather than sit on
+    // "Connecting…"; onAuthStateChanged still signs the user in when it lands.
+    setTimeout(() => { if (plan.status === 'loading') { plan.status = 'out'; planChanged(); } }, 4000);
+    A.onAuthStateChanged(plan.fb.auth, user => {
+      if (user && !domainOk(user.email)) {
+        plan.error = `Sign in with your ${DOMAIN_TEXT} Google account.`;
+        A.signOut(plan.fb.auth);
+        return;
+      }
+      plan.user = user;
+      plan.status = user ? 'in' : 'out';
+      if (user) plan.error = null;
+      planWatch(plan.month);
+      planChanged();
+    });
+  } catch (e) {
+    plan.status = 'error';
+    plan.error = 'Planning is unavailable: ' + (e && e.message || e);
+    planChanged();
+  }
+}
+// Follow one month's doc. Called on every capacity render; a no-op unless the month changed.
+function planWatch(month){
+  if (month) plan.month = month;
+  month = plan.month;
+  if (!plan.fb || plan.status !== 'in') {
+    if (plan.unsub) plan.unsub();
+    if (plan.unsubOrder) plan.unsubOrder();
+    if (plan.unsubCaps) plan.unsubCaps();
+    plan.unsub = null; plan.watching = null; plan.out = {};
+    plan.unsubOrder = null; plan.order = [];
+    plan.unsubCaps = null; plan.caps = {}; plan.editingCaps = false;
+    if (plan.unsubHolidays) plan.unsubHolidays();
+    plan.unsubHolidays = null; plan.holidaysSaved = false;
+    return;
+  }
+  if (!plan.unsubHolidays) {
+    const { F, db } = plan.fb;
+    plan.unsubHolidays = F.onSnapshot(F.doc(db, 'settings', 'holidays'), snap => {
+      plan.holidaysSaved = snap.exists();
+      setHolidays(plan.holidaysSaved ? (snap.data().days || []) : DEFAULT_HOLIDAYS);
+      planChanged();
+    }, err => {
+      plan.error = 'Could not read holidays: ' + err.message;
+      planChanged();
+    });
+  }
+  if (!plan.unsubCaps) {
+    const { F, db } = plan.fb;
+    plan.unsubCaps = F.onSnapshot(F.doc(db, 'settings', 'capacity'), snap => {
+      plan.caps = (snap.exists() && snap.data().caps) || {};
+      planChanged();
+    }, err => {
+      plan.caps = {};
+      plan.error = 'Could not read capacity settings: ' + err.message;
+      planChanged();
+    });
+  }
+  if (!plan.unsubOrder) {
+    const { F, db } = plan.fb;
+    plan.unsubOrder = F.onSnapshot(F.doc(db, 'layout', 'capacity'), snap => {
+      plan.order = (snap.exists() && snap.data().order) || [];
+      planChanged();
+    }, err => {
+      plan.order = [];
+      plan.error = 'Could not read the card order: ' + err.message;
+      planChanged();
+    });
+  }
+  if (!month || plan.watching === month) return;
+  if (plan.unsub) plan.unsub();
+  plan.watching = month; plan.out = {};
+  const { F, db } = plan.fb;
+  plan.unsub = F.onSnapshot(F.doc(db, 'capacity', month), snap => {
+    if (plan.watching !== month) return;
+    plan.out = (snap.exists() && snap.data().out) || {};
+    plan.error = null;
+    planChanged();
+  }, err => {
+    plan.out = {};
+    plan.error = 'Could not read planning data: ' + err.message;
+    planChanged();
+  });
+}
+async function planSignIn(){
+  if (!plan.fb) {
+    if (plan.status !== 'loading') plan.status = 'off';
+    await planInit();
+    for (let i = 0; i < 50 && !plan.fb && plan.status === 'loading'; i++) await new Promise(r => setTimeout(r, 100));
+    if (!plan.fb) return;
+  }
+  const { A, auth } = plan.fb;
+  const provider = new A.GoogleAuthProvider();
+  provider.setCustomParameters(signInParams());
+  try { await A.signInWithPopup(auth, provider); }
+  catch (e) {
+    if (e.code !== 'auth/popup-closed-by-user' && e.code !== 'auth/cancelled-popup-request') {
+      plan.error = 'Sign-in failed: ' + e.message; planChanged();
+    }
+  }
+}
+function planSignOut(){ if (plan.fb) plan.fb.A.signOut(plan.fb.auth); }
+// Move a card out of (out = true) or back into the watched month. Applied locally at once;
+// Firestore's snapshot confirms it, and a failed write rolls it back.
+async function planMove(id, out){
+  if (plan.status !== 'in' || !plan.watching) return;
+  const { F, db } = plan.fb, u = plan.user, who = u.displayName || u.email;
+  const prev = plan.out;
+  plan.out = Object.assign({}, prev);
+  if (out) plan.out[id] = { by: who, at: null }; else delete plan.out[id];
+  planChanged();
+  try {
+    await F.setDoc(F.doc(db, 'capacity', plan.watching),
+      { out: { [id]: out ? { by: who, email: u.email, at: F.serverTimestamp() } : F.deleteField() } },
+      { merge: true });
+  } catch (e) {
+    plan.out = prev;
+    plan.error = 'Could not save that move: ' + e.message;
+    planChanged();
+  }
+}
+// Sort capacity cards by the shared order. Cards it doesn't list yet (new projects) keep their
+// default position, after the ordered ones.
+function planSort(cards){
+  const pos = new Map(plan.order.map((id, i) => [id, i]));
+  return cards.map((c, i) => [c, pos.has(c.dataset.planId) ? pos.get(c.dataset.planId) : 1e6 + i])
+              .sort((a, b) => a[1] - b[1]).map(x => x[0]);
+}
+// Save a new order. Applied locally at once; a failed write rolls back.
+async function planSaveOrder(order){
+  if (plan.status !== 'in') return;
+  const { F, db } = plan.fb, u = plan.user, prev = plan.order;
+  plan.order = order;
+  planChanged();
+  try {
+    await F.setDoc(F.doc(db, 'layout', 'capacity'),
+      { order, by: u.displayName || u.email, at: F.serverTimestamp() });
+  } catch (e) {
+    plan.order = prev;
+    plan.error = 'Could not save the card order: ' + e.message;
+    planChanged();
+  }
+}
+// Save the whole set of capacity overrides (replaces the doc). Applied locally at once; a failed
+// write rolls back.
+async function planSaveCaps(caps){
+  if (plan.status !== 'in') return false;
+  const { F, db } = plan.fb, u = plan.user, prev = plan.caps;
+  plan.caps = caps;
+  try {
+    await F.setDoc(F.doc(db, 'settings', 'capacity'),
+      { caps, by: u.displayName || u.email, at: F.serverTimestamp() });
+    return true;
+  } catch (e) {
+    plan.caps = prev;
+    plan.error = 'Could not save capacity: ' + e.message;
+    return false;
+  }
+}
+// Add or remove one holiday. Atomic array updates, so two people editing at once don't
+// overwrite each other; the very first edit seeds the doc from the current (default) list.
+async function planHoliday(day, add){
+  if (plan.status !== 'in') return false;
+  const { F, db } = plan.fb, u = plan.user, ref = F.doc(db, 'settings', 'holidays');
+  try {
+    if (!plan.holidaysSaved)
+      await F.setDoc(ref, { days: holidayList.map(h => ({ date: h.date, name: h.name || '' })) });
+    await F.updateDoc(ref, { days: add ? F.arrayUnion(day) : F.arrayRemove(day),
+                             by: u.displayName || u.email, at: F.serverTimestamp() });
+    return true;
+  } catch (e) {
+    plan.error = 'Could not save the holiday: ' + e.message;
+    planChanged();
+    return false;
+  }
+}
+// Where a drop lands relative to a card: before or after it. Cards flow left-to-right, so it's
+// the horizontal half — except a full-width card (e.g. CMD), where it's the vertical half.
+function planDropSide(card, e){
+  const r = card.getBoundingClientRect(), grid = card.parentElement.getBoundingClientRect();
+  return (r.width > grid.width * 0.6 ? e.clientY < r.top + r.height / 2 : e.clientX < r.left + r.width / 2)
+    ? 'before' : 'after';
+}
+// While a card is being dragged, holding it near the top or bottom of the window scrolls the
+// page — faster the closer to the edge — so a card can be carried to a section off screen.
+// (dragover keeps firing while the pointer is still, so the speed tracks the pointer.)
+const DRAG_EDGE = 90;
+let _dragScroll = 0, _dragRaf = 0;
+document.addEventListener('dragover', e => {
+  if (!plan.dragId) return;
+  const h = window.innerHeight;
+  _dragScroll = e.clientY < DRAG_EDGE ? -Math.ceil((DRAG_EDGE - e.clientY) / 3)
+              : e.clientY > h - DRAG_EDGE ? Math.ceil((e.clientY - (h - DRAG_EDGE)) / 3) : 0;
+  if (_dragScroll && !_dragRaf) _dragRaf = requestAnimationFrame(function step(){
+    if (!plan.dragId || !_dragScroll) { _dragRaf = 0; return; }
+    window.scrollBy(0, _dragScroll);
+    _dragRaf = requestAnimationFrame(step);
+  });
+});
+function planClearMarks(){
+  document.querySelectorAll('.drop-before, .drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after'));
+}
+
+// The toolbar control group: who's signed in, or the sign-in button.
+function planToolbar(){
+  const who = plan.status === 'in'
+    ? `<span class="plan-who">${esc(plan.user.displayName || plan.user.email)}</span>
+       <button class="btn" id="cap-edit">${plan.editingCaps ? 'Done editing' : 'Edit capacity'}</button>
+       <button class="btn" id="plan-signout">Sign out</button>`
+    : '<button class="btn plan-signin">Sign in with Google</button>';
+  return `<span class="tb-group"><span class="tb-label">Planning</span>${who}</span>`;
+}
+function planMovedLine(id){
+  const m = plan.out[id] || {};
+  const when = m.at && m.at.toDate
+    ? m.at.toDate().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'just now';
+  return `<div class="plan-by">Moved out by ${esc(m.by || 'someone')} · ${esc(when)}</div>`;
+}
+// Sign-in buttons, plus drag-and-drop between the capacity grids ([data-drop="in"]) and the
+// "Not this month" grid ([data-drop="out"]). Cards carry their id in data-plan-id.
+function planWire(root){
+  root.querySelectorAll('.plan-signin').forEach(b => b.onclick = planSignIn);
+  const so = document.getElementById('plan-signout');
+  if (so) so.onclick = planSignOut;
+  const ce = document.getElementById('cap-edit');
+  if (ce) ce.onclick = () => { plan.editingCaps = !plan.editingCaps; plan.error = null; planChanged(); };
+  if (plan.status !== 'in') return;
+  root.querySelectorAll('[data-plan-id]').forEach(c => {
+    c.draggable = true;
+    c.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/plain', c.dataset.planId);
+      e.dataTransfer.effectAllowed = 'move';
+      plan.dragId = c.dataset.planId;
+      document.body.classList.add('plan-dragging');
+    });
+    c.addEventListener('dragend', () => {
+      plan.dragId = null; planClearMarks();
+      document.body.classList.remove('plan-dragging');
+    });
+  });
+  root.querySelectorAll('[data-drop]').forEach(z => {
+    // The card being dragged, if it already sits in this grid (a reorder, not a move).
+    const sameGrid = () => plan.dragId &&
+      [...z.querySelectorAll(':scope > [data-plan-id]')].some(c => c.dataset.planId === plan.dragId);
+    z.addEventListener('dragover', e => {
+      e.preventDefault();
+      z.classList.add('drop-hot');
+      planClearMarks();
+      const target = e.target.closest('[data-plan-id]');
+      if (z.dataset.drop !== 'out' && sameGrid() && target && target.parentElement === z
+          && target.dataset.planId !== plan.dragId)
+        target.classList.add('drop-' + planDropSide(target, e));
+    });
+    z.addEventListener('dragleave', e => {
+      if (!z.contains(e.relatedTarget)) { z.classList.remove('drop-hot'); planClearMarks(); }
+    });
+    z.addEventListener('drop', e => {
+      e.preventDefault();
+      z.classList.remove('drop-hot');
+      planClearMarks();
+      plan.dragId = null;   // stops edge scrolling (dragend may not fire once the grid redraws)
+      document.body.classList.remove('plan-dragging');
+      const id = e.dataTransfer.getData('text/plain'), out = z.dataset.drop === 'out';
+      if (!id) return;
+      if (out !== !!plan.out[id]) return planMove(id, out);   // into / out of "Not this month"
+      // Reorder within one section: rebuild the on-screen order with the card moved,
+      // and keep any ids not on screen (moved out, or not in this range) after them.
+      const target = e.target.closest('[data-plan-id]');
+      if (out || !sameGrid() || !target || target.parentElement !== z || target.dataset.planId === id) return;
+      const ids = [...root.querySelectorAll('[data-drop="in"] > [data-plan-id], [data-drop="sort"] > [data-plan-id]')]
+        .map(c => c.dataset.planId).filter(x => x !== id);
+      ids.splice(ids.indexOf(target.dataset.planId) + (planDropSide(target, e) === 'after' ? 1 : 0), 0, id);
+      planSaveOrder([...ids, ...plan.order.filter(x => !ids.includes(x))]);
+    });
+  });
+}
+
 async function renderDashboard() {
   destroyCharts();
   app.innerHTML = `
@@ -2196,11 +2912,19 @@ async function renderDashboard() {
   let estData = null, loggedData = null, teamData = null;   // cached so switching tabs is instant
   let groupsConfig = null;   // budget-group definitions (loaded once); combined per current range
   let carveData = null;      // CARVE_OUTS budgets for the current range (MSA Project Capacity)
+  let loadError = null;      // the last load's failure, if any — shown instead of the tab
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
   let projPersonCache = {};    // per-project person split { gid: { person: hours } }, keyed by 'start:end'
   let itemStatsCache = {};     // Actual Hours per-item (task) totals, keyed by 'start:end'
   let dailyStatsCache = {};    // Actual Hours per-person/per-day task rows, keyed by 'start:end'
   let personLoading = {};      // in-flight guard so the chart + summary don't double-fetch
+  // A planning change (sign-in, a drag, someone else's move) redraws MSA Project Capacity from
+  // the cached data — no Asana calls.
+  plan.onChange = () => {
+    if (!view.isConnected || loadError) return;
+    // Holidays move the work-day clock, so the tabs that read it redraw too.
+    if (['capacity', 'holidays', 'teamactual', 'team'].includes(dashTab)) renderTab();
+  };
 
   // Wire the date-range Search button (if the current tab rendered one). Editing the date
   // fields does nothing until Search is clicked (or Enter is pressed in a field).
@@ -2837,7 +3561,8 @@ async function renderDashboard() {
   }
 
   function renderTeam() {
-    // Bar chart of estimated hours per assignee, with a dashed line at the 128 h target.
+    // Bar chart of estimated hours per assignee, with a dashed line at the monthly target
+    // (personTarget: TEAM_DAILY_HOURS × this month's work days).
     // Bars can be filtered to a subset of status columns; Unassigned is hidden by default.
     const src = teamData, hasU = src.labels.includes('Unassigned');
     const statusList = statusColumns();
@@ -3184,14 +3909,71 @@ async function renderDashboard() {
     const el = document.getElementById('dash-updated');
     if (!el) return;
     let u = null;
-    if (dashTab === 'settings') u = null;
+    if (dashTab === 'settings' || dashTab === 'holidays') u = null;
     else if (dashTab === 'team') u = teamData && teamData.updated;
     else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
     else u = loggedData && loggedData[0] && loggedData[0].updated;
     el.textContent = u ? ('Updated ' + u) : '';
   }
 
+  // Shared capacity overrides (plan.caps) replace the configured caps on the loaded rows, so
+  // every tab that shows a budget agrees. The configured value is kept as cfgCap.
+  function applyCapOverrides() {
+    const fix = (row, id) => {
+      if (!('cfgCap' in row)) row.cfgCap = row.cap == null ? null : row.cap;
+      row.cap = capOverride(id, row.cfgCap);
+    };
+    (Array.isArray(estData) ? estData : []).forEach(w => fix(w, 'p:' + w.gid));
+    (Array.isArray(loggedData) ? loggedData : []).forEach(w => fix(w, 'p:' + w.gid));
+    (Array.isArray(groupsConfig) ? groupsConfig : []).forEach(g => fix(g, 'grp:' + g.name));
+  }
+
+  // "Edit capacity": one table of every budget a PM can set — combined buckets, then each
+  // project not inside a bucket. Blank = use the configured default. Saved to Firestore for
+  // everyone (planSaveCaps); carve-outs aren't listed, their capacity is computed from estimates.
+  function renderCapEditor(memberGids) {
+    const rows = [
+      ...(groupsConfig || []).map(g => ({ id: 'grp:' + g.name, name: g.name, note: 'Combined bucket', def: g.cfgCap })),
+      ...(loggedData || []).filter(w => !memberGids.has(w.gid) && !isArchived(w))
+        .map(w => ({ id: 'p:' + w.gid, name: w.name, note: w.kind || '', def: w.cfgCap }))
+        .sort((a, b) => (b.def != null) - (a.def != null) || a.name.localeCompare(b.name)),
+    ];
+    const val = id => id in plan.caps && plan.caps[id] != null ? plan.caps[id] : '';
+    view.insertAdjacentHTML('beforeend', `
+      <h2 class="section-h flush">Edit monthly capacity</h2>
+      <p class="cap-edit-help">Hours per month. Leave a box blank to use the default from the code. Changes are saved for everyone.</p>
+      ${plan.error ? `<p class="plan-err">${esc(plan.error)}</p>` : ''}
+      <table class="tasks cap-edit">
+        <thead><tr><th>Budget</th><th></th><th class="hours">Default</th><th class="hours">Capacity h/mo</th></tr></thead>
+        <tbody>${rows.map(r => `<tr class="parent">
+          <td>${esc(r.name)}</td><td>${r.note ? `<span class="badge">${esc(r.note)}</span>` : ''}</td>
+          <td class="hours">${r.def != null ? h2(r.def) : '—'}</td>
+          <td class="hours"><input type="number" min="0" step="0.25" class="cap-in" data-id="${esc(r.id)}"
+               value="${val(r.id)}" placeholder="${r.def != null ? h2(r.def) : 'none'}"></td></tr>`).join('')}</tbody>
+      </table>
+      <div class="cap-edit-actions"><button class="btn" id="cap-save">Save</button>
+        <button class="btn" id="cap-cancel">Cancel</button></div>`);
+    document.getElementById('cap-cancel').onclick = () => { plan.editingCaps = false; plan.error = null; planChanged(); };
+    document.getElementById('cap-save').onclick = async ev => {
+      const b = ev.currentTarget, caps = {};
+      let bad = null;
+      view.querySelectorAll('.cap-in').forEach(inp => {
+        const v = inp.value.trim();
+        if (v === '') return;
+        const n = Number(v);
+        if (!isFinite(n) || n < 0) bad = bad || inp;
+        else caps[inp.dataset.id] = Math.round(n * 100) / 100;
+      });
+      if (bad) { bad.focus(); bad.classList.add('bad'); return; }
+      b.disabled = true; b.textContent = 'Saving…';
+      if (await planSaveCaps(caps)) plan.editingCaps = false;
+      planChanged();
+    };
+  }
+
   function renderTab() {
+    applyCapOverrides();
+    if (teamData) teamData.cap = personTarget();   // live: follows holiday edits
     destroyCharts();   // leaving any chart tab
     estDrillGroup = null; actualDrillGroup = null;   // switching tabs collapses any drilled-in bucket
     document.querySelectorAll('.nav-item').forEach(a =>
@@ -3238,18 +4020,21 @@ async function renderDashboard() {
         }
       }
     } else if (dashTab === 'capacity') {
-      const picker = rangePicker();
-      if (!loggedData) { view.innerHTML = picker + loading; wireRangeSel(); }
+      const month = dateStart.slice(0, 7);
+      planInit();
+      planWatch(month);
+      const picker = rangePicker(planToolbar());
+      if (!loggedData) { view.innerHTML = picker + loading; wireRangeSel(); planWire(view); }
       else {
         // MSA projects with a monthly capacity lead the list and are highlighted: combined
         // budget buckets first, then any standalone capped project (group members roll into
         // their bucket). Everything else that logged hours follows as plain statistics cards.
         const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
         const allCarves = Array.isArray(carveData) ? carveData : [];
-        const groups = (groupsConfig || []).map(g => buildGroupSummary(g, loggedData, allCarves))
-                         .filter(g => g.members.length);
-        const standalone = loggedData.filter(w => w.cap != null && !memberGids.has(w.gid))
-                             .sort((a, b) => b.hours - a.hours);
+        const groupsAll = (groupsConfig || []).map(g => buildGroupSummary(g, loggedData, allCarves))
+                            .filter(g => g.members.length);
+        const standaloneAll = loggedData.filter(w => w.cap != null && !memberGids.has(w.gid))
+                                .sort((a, b) => b.hours - a.hours);
         // Archived projects still show their logged hours, but in a section of their own at
         // the bottom rather than mixed in with the active work.
         // A carve-out with an empty match is the whole board, so that board shows only as its card.
@@ -3261,8 +4046,26 @@ async function renderDashboard() {
                            .sort((a, b) => b.hours - a.hours);
         // A carve-out rolled into a group counts there, not on a card of its own.
         const groupedCarves = new Set((groupsConfig || []).flatMap(g => g.carves || []));
-        const carves = allCarves.filter(w => !groupedCarves.has(w.name));
-        const hasCap = groups.length || standalone.length || carves.length;
+        const carvesAll = allCarves.filter(w => !groupedCarves.has(w.name));
+        const hasCap = groupsAll.length || standaloneAll.length || carvesAll.length;
+        // Cards dragged into "Not this month" (shared through Firestore) leave every total below.
+        // Until the viewer signs in, no moves are known and every card counts.
+        const planId = { grp: w => 'grp:' + w.name, p: w => 'p:' + w.gid, carve: w => 'carve:' + w.name };
+        const outIds = plan.status === 'in' && plan.watching === month ? plan.out : {};
+        const isOut = id => !!outIds[id];
+        const groups = groupsAll.filter(w => !isOut(planId.grp(w)));
+        const standalone = standaloneAll.filter(w => !isOut(planId.p(w)));
+        const carves = carvesAll.filter(w => !isOut(planId.carve(w)));
+        const tag = (c, id) => { c.dataset.planId = id; return c; };
+        const tagSort = w => { const c = loggedCard(w); c.dataset.planId = 'p:' + w.gid; return c; };
+        const moved = [
+          ...groupsAll.filter(w => isOut(planId.grp(w))).map(w => tag(groupCard(w), planId.grp(w))),
+          ...standaloneAll.filter(w => isOut(planId.p(w))).map(w => tag(capCard(w), planId.p(w))),
+          ...carvesAll.filter(w => isOut(planId.carve(w))).map(w => tag(carveCard(w), planId.carve(w))),
+          // Cards outside capacity can be filed here too — it just moves them out of the way.
+          ...others.filter(w => isOut('p:' + w.gid)).map(tagSort),
+          ...archived.filter(w => isOut('p:' + w.gid)).map(tagSort),
+        ];
         // Headline stats cover every card in the monthly-capacity grid (carve-outs included) —
         // the budget picture in one line.
         const budgeted = [...groups, ...standalone, ...carves];
@@ -3280,11 +4083,11 @@ async function renderDashboard() {
           { n: wp.pct.toFixed(0) + '%', l: 'Of work month elapsed' },
           { n: `${wp.elapsed} of ${wp.total}`, l: 'Work days used' },
           { n: wp.left, l: 'Work days left' },
-          // Pace needed to use the remaining budget by month end; nothing left = nothing needed.
-          { n: wp.left ? h2(Math.max(left, 0) / wp.left) + ' h' : '—', l: 'Team hours / day needed' },
         ]);
         view.innerHTML = (hasCap ? summary : '') + picker;
-        if (!hasCap && !others.length && !archived.length) {
+        if (plan.editingCaps && plan.status === 'in') {
+          renderCapEditor(memberGids);
+        } else if (!hasCap && !others.length && !archived.length) {
           view.insertAdjacentHTML('beforeend', note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`));
         } else {
           // Budgets split into sections by kind: plain MSA projects, then "Estimate" (budget = the
@@ -3292,14 +4095,24 @@ async function renderDashboard() {
           const SECTION_KINDS = ['Estimate', 'Support', 'Hourly'];
           const capSection = (title, kind, flush) => {
             const pick = w => kind ? w.kind === kind : !SECTION_KINDS.includes(w.kind);
-            const cards = [...groups.filter(pick).map(groupCard), ...standalone.filter(pick).map(capCard),
-                           ...carves.filter(pick).map(carveCard)];
-            if (!cards.length) return false;
+            // Combined buckets get a row of their own above the single-project cards, so a tall
+            // bucket (member list) never stretches a short project card beside it.
+            const buckets = groups.filter(pick).map(w => tag(groupCard(w), planId.grp(w)));
+            const cards = [...standalone.filter(pick).map(w => tag(capCard(w), planId.p(w))),
+                           ...carves.filter(pick).map(w => tag(carveCard(w), planId.carve(w)))];
+            if (!buckets.length && !cards.length) return false;
             view.insertAdjacentHTML('beforeend', `<h2 class="section-h${flush ? ' flush' : ''}">${esc(title)}</h2>`);
-            const capGrid = document.createElement('div');
-            capGrid.className = 'grid cap-grid';
-            cards.forEach(c => { c.classList.add('cap'); capGrid.appendChild(c); });
-            view.appendChild(capGrid);
+            // Two or more buckets get the wide two-per-row layout; a lone bucket (e.g. Support
+            // Tickets) is just a normal card among the section's others.
+            const wide = buckets.length >= 2;
+            (wide ? [buckets, cards] : [[...buckets, ...cards]]).forEach((list, i) => {
+              if (!list.length) return;
+              const capGrid = document.createElement('div');
+              capGrid.className = 'grid cap-grid' + (wide && i === 0 ? ' bucket-grid' : '');
+              capGrid.dataset.drop = 'in';
+              planSort(list).forEach(c => { c.classList.add('cap'); capGrid.appendChild(c); });
+              view.appendChild(capGrid);
+            });
             return true;
           };
           let hasCapShown = false;
@@ -3355,17 +4168,18 @@ async function renderDashboard() {
           }
           // Hourly engagements (billed by the hour): any budgeted card of kind "Hourly" (e.g. a
           // whole-board carve-out) followed by the uncapped hourly projects' logged-hours cards.
-          const hourlyCap = [...groups.filter(w => w.kind === 'Hourly').map(groupCard),
-                             ...standalone.filter(w => w.kind === 'Hourly').map(capCard),
-                             ...carves.filter(w => w.kind === 'Hourly').map(carveCard)];
-          const hourly = others.filter(w => w.kind === 'Hourly');
+          const hourlyCap = [...groups.filter(w => w.kind === 'Hourly').map(w => tag(groupCard(w), planId.grp(w))),
+                             ...standalone.filter(w => w.kind === 'Hourly').map(w => tag(capCard(w), planId.p(w))),
+                             ...carves.filter(w => w.kind === 'Hourly').map(w => tag(carveCard(w), planId.carve(w)))];
+          const hourly = others.filter(w => w.kind === 'Hourly' && !isOut('p:' + w.gid));
           if (hourlyCap.length || hourly.length) {
             view.insertAdjacentHTML('beforeend',
               `<h2 class="section-h${hasCapShown ? '' : ' flush'}">Hourly projects</h2>`);
             const grid = document.createElement('div');
             grid.className = 'grid cap-grid';
-            hourlyCap.forEach(c => { c.classList.add('cap'); grid.appendChild(c); });
-            hourly.forEach(w => grid.appendChild(loggedCard(w)));
+            grid.dataset.drop = 'in';
+            planSort(hourlyCap).forEach(c => { c.classList.add('cap'); grid.appendChild(c); });
+            planSort(hourly.map(tagSort)).forEach(c => grid.appendChild(c));
             view.appendChild(grid);
           }
           const section = (title, rows, flush, aside) => {
@@ -3375,19 +4189,109 @@ async function renderDashboard() {
               `${aside ? ` <span class="section-aside">${esc(aside)}</span>` : ''}</h2>`);
             const grid = document.createElement('div');
             grid.className = 'grid';
-            rows.forEach(w => grid.appendChild(loggedCard(w)));
+            grid.dataset.drop = 'sort';   // reorder only — these don't count toward capacity
+            planSort(rows.map(tagSort)).forEach(c => grid.appendChild(c));
             view.appendChild(grid);
           };
-          const rest = others.filter(w => w.kind !== 'Hourly');
-          const anyAbove = hasCapShown || hourlyCap.length || hourly.length;
+          // "Not this month": the drop zone for cards taken out of this month's capacity.
+          if (hasCap) {
+            const monthName = new Date(dateStart + 'T00:00').toLocaleDateString('en-US', { month: 'long' });
+            view.insertAdjacentHTML('beforeend', `<h2 class="section-h">Not this month ` +
+              `<span class="section-aside">(not calculated into capacity)</span></h2>`);
+            if (plan.error) view.insertAdjacentHTML('beforeend', `<p class="plan-err">${esc(plan.error)}</p>`);
+            if (plan.status !== 'in') {
+              view.insertAdjacentHTML('beforeend', `<div class="plan-empty">
+                Sign in with your ${esc(DOMAIN_TEXT)} Google account to see and change which projects
+                are out of ${esc(monthName)}. Until then every project counts toward capacity.
+                <div><button class="btn plan-signin">Sign in with Google</button></div></div>`);
+            } else {
+              const grid = document.createElement('div');
+              grid.className = 'grid cap-grid plan-out';
+              grid.dataset.drop = 'out';
+              moved.forEach(c => {
+                c.classList.add('cap');
+                c.insertAdjacentHTML('beforeend', planMovedLine(c.dataset.planId));
+                grid.appendChild(c);
+              });
+              grid.insertAdjacentHTML('beforeend', `<div class="plan-empty${moved.length ? ' slim' : ''}">
+                ${moved.length ? 'Drag a card back up to count it again.'
+                               : `Drag a card here to take it out of ${esc(monthName)}'s capacity.`}</div>`);
+              view.appendChild(grid);
+            }
+          }
+          const rest = others.filter(w => w.kind !== 'Hourly' && !isOut('p:' + w.gid));
+          const anyAbove = hasCap || hourlyCap.length || hourly.length;
           section('Other projects', rest, !anyAbove, '(not calculated into capacity)');
-          section('Archived projects', archived, !anyAbove && !rest.length);
+          section('Archived projects', archived.filter(w => !isOut('p:' + w.gid)), !anyAbove && !rest.length);
         }
         wireRangeSel();
+        planWire(view);
       }
     } else if (dashTab === 'settings') {
       renderSettings();
+    } else if (dashTab === 'holidays') {
+      renderHolidays();
     }
+  }
+
+  // Settings › Holidays: the shared list of days off. Summary, one toolbar (the add form),
+  // then a table per year. Each add/remove is saved straight away (planHoliday).
+  function renderHolidays() {
+    planInit();
+    planWatch();
+    const now = new Date(), pad = n => String(n).padStart(2, '0');
+    const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`, year = today.slice(0, 4);
+    const dow = d => new Date(d + 'T00:00').toLocaleDateString('en-US', { weekday: 'short' });
+    const weekend = d => [0, 6].includes(new Date(d + 'T00:00').getDay());
+    const [ms, me] = monthRange();
+    const upcoming = holidayList.filter(h => h.date >= today && !weekend(h.date));
+    const canEdit = plan.status === 'in';
+    view.innerHTML = summaryBar([
+      { n: holidayList.filter(h => h.date.startsWith(year) && !weekend(h.date)).length, l: `Weekday holidays in ${year}` },
+      { n: upcoming.length ? fmtDate(upcoming[0].date) : '—', l: upcoming.length ? 'Next: ' + (upcoming[0].name || 'holiday') : 'Next holiday' },
+      { n: workdayProgress(ms, me).total, l: 'Work days this month' },
+      { n: workdayProgress(`${year}-01-01`, `${year}-12-31`).total, l: `Work days in ${year}` },
+    ]) + (canEdit ? `<div class="toolbar">
+        <span class="tb-group"><span class="tb-label">Add holiday</span>
+          <input type="date" id="hol-date" aria-label="Date">
+          <input type="text" id="hol-name" class="hol-name" placeholder="Name (e.g. Thanksgiving)" maxlength="60">
+          <button class="btn" id="hol-add">Add</button></span>
+      </div>` : `<div class="plan-empty">Sign in with your ${esc(DOMAIN_TEXT)} Google account to add or remove holidays.
+        <div><button class="btn plan-signin">Sign in with Google</button></div></div>`)
+      + (plan.error ? `<p class="plan-err">${esc(plan.error)}</p>` : '')
+      + (!plan.holidaysSaved ? `<p class="cap-edit-help">Showing the starting list from the code — the first change saves it to the shared list.</p>` : '');
+    const years = [...new Set(holidayList.map(h => h.date.slice(0, 4)))].sort().reverse();
+    if (!years.length) view.insertAdjacentHTML('beforeend', note('No holidays yet.'));
+    years.forEach((y, i) => {
+      const rows = holidayList.filter(h => h.date.startsWith(y)).map(h => `
+        <tr class="parent${h.date < today ? ' past' : ''}">
+          <td class="nowrap">${esc(fmtDate(h.date))}</td><td>${esc(dow(h.date))}</td>
+          <td>${esc(h.name || '')}</td>
+          <td>${weekend(h.date) ? '<span class="badge none">Weekend — not a work day anyway</span>' : ''}</td>
+          <td class="hol-act">${canEdit ? `<button class="btn hol-del" data-date="${esc(h.date)}">Remove</button>` : ''}</td>
+        </tr>`).join('');
+      view.insertAdjacentHTML('beforeend', `<h2 class="section-h${i === 0 ? ' flush' : ''}">${esc(y)}</h2>
+        <table class="tasks hol-table"><thead><tr><th>Date</th><th>Day</th><th>Holiday</th><th></th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>`);
+    });
+    planWire(view);
+    if (!canEdit) return;
+    const add = document.getElementById('hol-add'), dIn = document.getElementById('hol-date'),
+          nIn = document.getElementById('hol-name');
+    const submit = async () => {
+      if (!dIn.value) { dIn.focus(); return; }
+      if (HOLIDAYS.has(dIn.value)) { plan.error = fmtDate(dIn.value) + ' is already on the list.'; renderHolidays(); return; }
+      add.disabled = true; plan.error = null;
+      await planHoliday({ date: dIn.value, name: nIn.value.trim() }, true);
+    };
+    add.onclick = submit;
+    [dIn, nIn].forEach(el => el.onkeydown = ev => { if (ev.key === 'Enter') submit(); });
+    view.querySelectorAll('.hol-del').forEach(b => b.onclick = async () => {
+      const day = holidayList.find(h => h.date === b.dataset.date);
+      if (!day || !confirm(`Remove ${day.name || 'the holiday'} on ${fmtDate(day.date)}?`)) return;
+      b.disabled = true; plan.error = null;
+      await planHoliday({ date: day.date, name: day.name || '' }, false);
+    });
   }
 
   // Settings: per-person graph colors. Choices persist to localStorage (see personColor)
@@ -3426,14 +4330,14 @@ async function renderDashboard() {
     personStatsCache = {}; projPersonCache = {}; itemStatsCache = {}; dailyStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
     try {
       const url = `/api/logged?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
-      const j = await fetch(url).then(r => r.json());
+      const j = await getJson(url);
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
       // Carve-outs read the project trees and time entries /api/logged just loaded, so they
       // are fetched after it rather than alongside — that way they cost no Asana calls.
-      const c = await fetch(url.replace('/api/logged', '/api/carveouts')).then(r => r.json());
+      const c = await getJson(url.replace('/api/logged', '/api/carveouts'));
       if (s !== dateStart || e !== dateEnd) return;
       loggedData = j; carveData = c;
-    } catch (err) { view.innerHTML = fmtErr(err); return; }
+    } catch (err) { loadError = err; view.innerHTML = fmtErr(err); return; }
     await mePromise;   // so Daily Log knows who "you" are before it picks its default assignee
     if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual'].includes(dashTab)) renderTab();
   }
@@ -3448,21 +4352,24 @@ async function renderDashboard() {
   async function loadAll(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     const q = refresh ? '?refresh=1' : '';
+    // Estimated and logged hours load together, but the estimated tabs paint as soon as their
+    // half lands — logged hours (most of the Asana calls) keep loading behind them, and the
+    // Actual Hours tabs show "Loading…" until loadLogged() paints them.
+    loadError = null;
+    const loggedDone = loadLogged(refresh);
     try {
-      // Estimated and logged hours are pulled together and both awaited: one wait at startup,
-      // after which every tab is already warm. Deferring the logged half would paint sooner
-      // but move the wait onto the first Actual tab you open, which is worse.
       const [e, grp] = await Promise.all([
-        fetch('/api/projects' + q).then(r => r.json()),
-        groupsConfig ? Promise.resolve(groupsConfig) : fetch('/api/groups').then(r => r.json()),
-        loadLogged(refresh),
+        getJson('/api/projects' + q),
+        groupsConfig ? Promise.resolve(groupsConfig) : getJson('/api/groups'),
       ]);
       estData = e; groupsConfig = grp;
       // Team load derives from the per-project detail that /api/projects just (re)built,
       // so it reads the warm cache — no refresh flag, no duplicate Asana pulls.
-      teamData = await fetch('/api/assignees').then(r => r.json());
-    } catch (err) { view.innerHTML = fmtErr(err); }
-    renderTab();
+      teamData = await getJson('/api/assignees');
+    } catch (err) { loadError = err; }
+    // A failed load shows its error rather than rendering half-loaded data.
+    if (loadError) view.innerHTML = fmtErr(loadError); else renderTab();
+    await loggedDone;
     btn.disabled = false; btn.textContent = 'Refresh';
   }
   btn.onclick = () => loadAll(true);
@@ -3822,7 +4729,8 @@ async function renderGroupDetail(name) {
         document.getElementById('view').innerHTML = note('No budget group named ' + name + '.');
         return;
       }
-      const g = buildGroupSummary(cfg, logged, carves);
+      const g = buildGroupSummary(Object.assign({}, cfg, { cap: capOverride('grp:' + cfg.name, cfg.cap) }),
+                                  logged, carves);
       document.getElementById('page-title').textContent = g.name;
       document.getElementById('sub').textContent =
         `Combined monthly bucket · ${plural(g.members.length, 'member')} · ` +
@@ -3976,8 +4884,8 @@ function route() {
   if (m) return renderCarveDetail(decodeURIComponent(m[1]));
   renderDashboard();
 }
-window.addEventListener('hashchange', route);
-route();
+window.addEventListener('hashchange', () => { if (window.__authed) route(); });
+bootAuth();
 </script>
 </body>
 </html>
@@ -3989,9 +4897,10 @@ route();
 # in a <script> that runs before the UI script, so identifiers like TEAM_MEMBERS are defined.
 def render_page():
     boot = ("<script>\nconst TEAM_MEMBERS = %s;\nconst PROJECT_ROSTER = %s;\n"
-            "const ARCHIVED_GIDS = %s;\n</script>\n"
+            "const ARCHIVED_GIDS = %s;\nconst FIREBASE_CONFIG = %s;\nconst PLANNING_DOMAINS = %s;\n</script>\n"
             % (json.dumps(TEAM_MEMBERS), json.dumps([p["name"] for p in PROJECTS]),
-               json.dumps(sorted(ARCHIVED_GIDS))))
+               json.dumps(sorted(ARCHIVED_GIDS)), json.dumps(FIREBASE_CONFIG),
+               json.dumps(PLANNING_DOMAINS)))
     return PAGE.replace('<div class="wrap" id="app"></div>\n<script>',
                         '<div class="wrap" id="app"></div>\n' + boot + '<script>', 1)
 
@@ -4037,6 +4946,30 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"Not found")
         except urllib.error.HTTPError as e:
             self._json(502, {"error": f"Asana {e.code}"})
+
+    def do_POST(self):
+        self._t0, self._c0 = time.time(), req_snapshot()
+        path = self.path.split("?")[0]
+        # Only this page may hand the server a token: refuse cross-site posts to localhost.
+        origin = self.headers.get("Origin")
+        if origin and urllib.parse.urlsplit(origin).hostname not in ("localhost", "127.0.0.1"):
+            return self._json(403, {"error": "Cross-site request refused"})
+        if path != "/api/token":
+            return self._send(404, "text/plain", b"Not found")
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            tok = (json.loads(self.rfile.read(n) or b"{}").get("token") or "").strip()
+        except (ValueError, AttributeError):
+            return self._json(400, {"error": "Bad request"})
+        if not tok:
+            return self._json(400, {"error": "No token given"})
+        try:
+            me = _api_call("GET", "/users/me?opt_fields=name,email", None, token=tok).get("data") or {}
+        except urllib.error.HTTPError as e:
+            return self._json(401 if e.code == 401 else 502,
+                              {"error": "Invalid token" if e.code == 401 else f"Asana {e.code}"})
+        set_token(tok)
+        return self._json(200, {"name": me.get("name"), "email": me.get("email")})
 
     def _json(self, code, obj):
         body = json.dumps(obj).encode()

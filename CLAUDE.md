@@ -27,8 +27,9 @@ implementation in `build_static.py`'s `PREPEND`. Keep the two functions named al
 (`project_detail` / `projectDetail`, `get_assignee_load` / `getAssigneeLoad`) so the pairing
 stays obvious.
 
-**The UI script may only use identifiers it defines itself, plus `TEAM_MEMBERS` and
-`PROJECT_ROSTER`** (the configured project names, in `PROJECTS` order). `PREPEND` runs before
+**The UI script may only use identifiers it defines itself, plus `TEAM_MEMBERS`,
+`PROJECT_ROSTER`** (the configured project names, in `PROJECTS` order), **`ARCHIVED_GIDS`,
+`FIREBASE_CONFIG` and `PLANNING_DOMAINS`**. `PREPEND` runs before
 it in the static build but *not* in the local app, which injects only those two — if the UI
 script ever needs another config value, add it to **both** `render_page()`'s boot script and
 `PREPEND`. Reaching for a `PREPEND` helper (`round2`, `sum`, `asanaGet`, …) from the UI
@@ -42,6 +43,12 @@ script works on GitHub Pages and throws a `ReferenceError` locally. The UI scrip
 build, so **adding a project or team member is a one-line change plus a rebuild.** Never
 duplicate a project list or a team roster anywhere else.
 
+- **Projects also come from the Asana portfolio `PORTFOLIO_GID`**, read on each load and on
+  Refresh (`sync_portfolio` / `syncPortfolio`, which rebuild `PROJECTS`, `EST_PROJECTS`,
+  `ARCHIVED_GIDS` and the name/cap/kind maps *in place*). A new portfolio project appears with
+  defaults; add it to `PROJECTS` only to give it settings. Archived-in-Asana projects are
+  archived automatically, and summary rows carry `archived` so the page (whose injected
+  `ARCHIVED_GIDS` is fixed at load) still splits them off.
 - A project's `cap` is its **monthly hour capacity**; omit it for projects with no budget.
 - A project's optional `kind` classifies the engagement (e.g. `"Support"`); it rides on the
   logged-hours rows and shows as a tag on the project's MSA Project Capacity card.
@@ -69,6 +76,14 @@ setx ASANA_PAT "your_token"      # once; also read from the HKCU Environment reg
 python creative_asana_app.py     # serves http://localhost:8765 and opens a browser
 python build_static.py           # regenerate index.html for Pages
 ```
+
+**Sign-in (both builds)** lives in the UI script (`bootAuth` / `renderLogin`): Google on
+`PLANNING_DOMAINS`, then the user's Asana token from Firestore `users/{uid}.asanaPat` (prompted for
+and saved on first sign-in, or when Asana rejects the saved one). The token is handed over through
+`useToken()`: the static build defines `window.__useToken` (token stays in the browser); locally it
+is POSTed to `/api/token`, which validates it and switches the server's `TOKEN` via `set_token()`.
+`ASANA_PAT` is optional — only used until someone signs in. A "token without Google" link remains
+as a fallback.
 
 ## UI conventions — follow these exactly
 
@@ -207,7 +222,24 @@ existing `capLinePlugin` / `capMarksPlugin` and are enabled per-chart through
 
 - Don't commit a PAT, and don't add one to `index.html` (the static build asks the user).
 - Don't add a build step, framework, or npm dependency. This stays a zero-install,
-  two-Python-file app with one CDN script.
+  two-Python-file app with one CDN script. The one exception is the Firebase SDK, imported
+  lazily (ES modules from gstatic) by MSA Project Capacity's "Not this month" planning.
+
+## "Not this month" planning (Firestore)
+
+On MSA Project Capacity, signed-in users drag capacity cards into a **Not this month** section;
+those cards leave every total on that tab. Moves are shared live through Firestore, doc
+`capacity/{YYYY-MM}` (month of the range start) = `{ out: { <card id>: { by, email, at } } }`,
+card ids `grp:<group>`, `p:<gid>`, `carve:<name>`. `FIREBASE_CONFIG` / `PLANNING_DOMAINS` live
+at the top of `creative_asana_app.py`; the web config is public by design — access is enforced
+by Firestore rules allowing only verified Google accounts on that domain. Card **order** within each
+section is shared too (not per month): doc `layout/capacity` = `{ order: [card id, …] }`, applied by
+`planSort()`, saved by `planSaveOrder()`. **Capacity overrides** (the "Edit capacity" button) live in doc `settings/capacity` = `{ caps: {
+'p:<gid>' | 'grp:<group>': hours } }`; `applyCapOverrides()` lays them over the loaded rows before
+every render (configured value kept as `cfgCap`), so every tab's budgets agree. **Holidays** (Settings › Holidays) live in doc `settings/holidays` = `{ days: [{ date, name }] }`,
+edited by anyone signed in (atomic `arrayUnion`/`arrayRemove`); `DEFAULT_HOLIDAYS` is only the
+starting list until that doc exists. `setHolidays()` refills the `HOLIDAYS` set `workdayProgress` reads. The `plan` object and
+`plan*` helpers hold the state; a change re-renders from cached data (never re-hits Asana).
 - Don't add light-mode styling or a third accent color without a reason that survives the
   blue/green semantics above.
 - Don't leave `index.html` out of sync with the Python — rebuild before committing.

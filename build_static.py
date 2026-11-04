@@ -29,6 +29,9 @@ ASSIGNEE_CAP = a.ASSIGNEE_HOURS_CAP
 TEAM = json.dumps(a.TEAM_MEMBERS)
 DEF_START = json.dumps(a.DEFAULT_START)
 DEF_END = json.dumps(a.DEFAULT_END)
+PORTFOLIO = json.dumps(a.PORTFOLIO_GID)
+FIREBASE = json.dumps(a.FIREBASE_CONFIG)
+PLAN_DOMAIN = json.dumps(a.PLANNING_DOMAINS)
 
 # ---- Browser-side data layer + fetch shim + PAT auth (prepended before the UI script) ----
 PREPEND = r'''
@@ -49,10 +52,50 @@ const GROUPS = __GROUPS__;
 const CARVE_OUTS = __CARVEOUTS__;
 const UNBILLABLE_GIDS = new Set(__UNBILLABLE__);
 const DEF_START = __DEFSTART__, DEF_END = __DEFEND__;
+// "Not this month" planning (see FIREBASE_CONFIG in creative_asana_app.py). The UI script reads
+// these, so the local app's boot script injects them too.
+const FIREBASE_CONFIG = __FIREBASE__;
+const PLANNING_DOMAINS = __PLANDOMAIN__;
 const PROJECT_ROSTER = PROJECTS.map(p => p.name);
 const PROJECT_NAMES = Object.fromEntries(PROJECTS.map(p => [p.gid, p.name]));
 const PROJECT_CAPS  = Object.fromEntries(PROJECTS.map(p => [p.gid, p.cap == null ? null : p.cap]));
 const PROJECT_KINDS = Object.fromEntries(PROJECTS.map(p => [p.gid, p.kind || null]));
+// Mirrors sync_portfolio: fold the portfolio's projects into PROJECTS (in place) once per
+// session and again on Refresh. Configured projects keep order, name and settings; others are
+// appended with defaults; archived-in-Asana projects join the archived set.
+const PORTFOLIO_GID = __PORTFOLIO__;
+const _CONFIG_PROJECTS = PROJECTS.map(p => Object.assign({}, p));
+const _CONFIG_ARCHIVED = new Set(ARCHIVED_GIDS);
+const ARCHIVED_NOW = new Set(ARCHIVED_GIDS);
+let _portfolioSync = null, _portfolioAt = 0;
+function syncPortfolio(refresh){
+  if (!PORTFOLIO_GID) return Promise.resolve();
+  // A Refresh fires the estimated and logged loads together; one read serves both.
+  if (_portfolioSync && (!refresh || Date.now() - _portfolioAt < 30000)) return _portfolioSync;
+  _portfolioAt = Date.now();
+  return (_portfolioSync = (async () => {
+    let items;
+    try {
+      items = await asanaGet(`/portfolios/${PORTFOLIO_GID}/items?opt_fields=name,archived,resource_type&limit=100`);
+    } catch (e) { console.warn('Could not read portfolio ' + PORTFOLIO_GID + ': ' + e.message); return; }
+    const configured = new Set(_CONFIG_PROJECTS.map(p => p.gid));
+    const merged = _CONFIG_PROJECTS.map(p => Object.assign({}, p));
+    const archived = new Set(_CONFIG_ARCHIVED);
+    for (const it of items || []){
+      if (it.resource_type !== 'project' || !it.gid) continue;
+      if (it.archived) archived.add(it.gid);
+      if (!configured.has(it.gid)) merged.push({ gid: it.gid, name: it.name || it.gid });
+    }
+    PROJECTS.splice(0, PROJECTS.length, ...merged);
+    ARCHIVED_NOW.clear(); archived.forEach(g => ARCHIVED_NOW.add(g));
+    EST_PROJECTS.splice(0, EST_PROJECTS.length, ...PROJECTS.filter(p => !ARCHIVED_NOW.has(p.gid)));
+    for (const m of [PROJECT_NAMES, PROJECT_CAPS, PROJECT_KINDS]) for (const k of Object.keys(m)) delete m[k];
+    for (const p of PROJECTS){
+      PROJECT_NAMES[p.gid] = p.name; PROJECT_CAPS[p.gid] = p.cap == null ? null : p.cap;
+      PROJECT_KINDS[p.gid] = p.kind || null;
+    }
+  })());
+}
 
 let TOKEN = null;
 const _realFetch = window.fetch.bind(window);
@@ -311,7 +354,7 @@ async function getMe(refresh){
   const rows = await asanaGet('/users/me?opt_fields=name');
   return (CACHE.me = { name: ((rows[0] || {}).name) || '' });
 }
-function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], updated: d.updated }; }
+function summaryFromDetail(d){ return { gid: d.gid, name: d.name, ntasks: d.ntasks, hours: round2(sum(d.hours)), cap: PROJECT_CAPS[d.gid], archived: ARCHIVED_NOW.has(d.gid), updated: d.updated }; }
 
 async function getDetail(gid, refresh){
   if (!refresh && CACHE.detail[gid]) return CACHE.detail[gid];
@@ -322,6 +365,7 @@ async function getDetail(gid, refresh){
 }
 async function getSummaries(refresh){
   if (!refresh && CACHE.summaries) return CACHE.summaries;
+  await syncPortfolio(refresh);
   const details = await mapAll(PROJECTS, p => getDetail(p.gid, refresh));
   return (CACHE.summaries = details.map(summaryFromDetail));
 }
@@ -351,6 +395,7 @@ function assigneeProjectTasks(d, name){
   return rows;
 }
 async function getAssigneeLoad(refresh){
+  await syncPortfolio(false);
   const details = await mapAll(EST_PROJECTS, p => getDetail(p.gid, refresh));
   const est = {}, act = {}, counts = {}, breakdown = {};
   for (const d of details){
@@ -408,8 +453,38 @@ function saveEntryCache(){
 function hasRecent(rows, cutoff){
   return (rows || []).some(r => (r.entered_on || '') >= cutoff);
 }
+// Mirrors project_entries: read a whole project's time entries in one paginated list and keep
+// only the tasks whose rows add up to their tracked minutes; the rest are read per task. Turned
+// off for the session if Asana doesn't offer the endpoint.
+const PROJECT_ENTRIES_MIN = 8;
+let _projectEntriesOk = true;
+async function projectEntries(projectGid, minutesByGid){
+  if (!_projectEntriesOk) return {};
+  let rows;
+  try {
+    rows = await asanaGet(`/time_tracking_entries?attributable_project=${projectGid}` +
+      '&opt_fields=duration_minutes,entered_on,created_by.name,task&limit=100');
+  } catch (e) {
+    if (/Asana (400|402|403|404)/.test(String(e && e.message))) {
+      _projectEntriesOk = false;
+      console.warn('Project-wide time-entry reads unavailable (' + e.message + ') — reading per task.');
+    }
+    return {};
+  }
+  const byTask = {}, seen = new Set();
+  for (const r of rows || []){
+    const g = (r.task || {}).gid; delete r.task;
+    if (!g || !(g in minutesByGid) || (r.gid && seen.has(r.gid))) continue;
+    if (r.gid) seen.add(r.gid);
+    (byTask[g] = byTask[g] || []).push(r);
+  }
+  const out = {};
+  for (const [g, rs] of Object.entries(byTask))
+    if (rs.reduce((a, x) => a + (x.duration_minutes || 0), 0) === minutesByGid[g]) out[g] = rs;
+  return out;
+}
 // minutesByGid: { task gid: tracked minutes }
-async function entriesForTasks(minutesByGid, refresh){
+async function entriesForTasks(minutesByGid, refresh, project){
   const out = {}, missing = [];
   const cutoff = new Date(Date.now() - ENTRY_RECHECK_DAYS * 864e5).toISOString().slice(0, 10);
   for (const [g, minutes] of Object.entries(minutesByGid)){
@@ -418,9 +493,13 @@ async function entriesForTasks(minutesByGid, refresh){
     else missing.push(g);
   }
   if (missing.length){
-    const byPath = await asanaBatch(missing.map(entriesPath));
+    // Many to read on one project (a cold load or Refresh): try the project-wide list first.
+    const found = project && missing.length >= PROJECT_ENTRIES_MIN
+      ? await projectEntries(project, Object.fromEntries(missing.map(g => [g, minutesByGid[g]]))) : {};
+    const rest = missing.filter(g => !(g in found));
+    const byPath = rest.length ? await asanaBatch(rest.map(entriesPath)) : {};
     for (const g of missing){
-      const rows = byPath[entriesPath(g)];
+      const rows = g in found ? found[g] : byPath[entriesPath(g)];
       _entries[g] = { rows, minutes: minutesByGid[g] };
       out[g] = rows;
     }
@@ -448,7 +527,7 @@ async function loggedDetail(gid, start, end, refresh){
   }
   // Only tasks whose tracked total moved are read from Asana; the rest come from cache.
   const byGid = await entriesForTasks(Object.fromEntries(
-    Object.entries(cand).map(([g, [, m]]) => [g, m])), refresh);
+    Object.entries(cand).map(([g, [, m]]) => [g, m])), refresh, gid);
   // On an unbillable board, only a carve-out's tasks (and their subtasks) are billable —
   // unless that carve-out is itself marked billable: false.
   const carved = new Set();
@@ -482,7 +561,7 @@ async function loggedDetail(gid, start, end, refresh){
     nentries: entries.length,
     entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable })), updated: nowStr() };
 }
-function loggedSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], kind: PROJECT_KINDS[d.gid], updated: d.updated }; }
+function loggedSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], kind: PROJECT_KINDS[d.gid], archived: ARCHIVED_NOW.has(d.gid), updated: d.updated }; }
 
 async function getLoggedDetail(gid, refresh, start, end){
   const key = start + ':' + end;
@@ -495,6 +574,7 @@ async function getLoggedDetail(gid, refresh, start, end){
 async function getLoggedSummaries(refresh, start, end){
   const key = start + ':' + end;
   if (!refresh && CACHE.logged_summaries[key]) return CACHE.logged_summaries[key];
+  await syncPortfolio(refresh);
   const details = await mapAll(PROJECTS, p => getLoggedDetail(p.gid, refresh, start, end));
   saveEntryCache();      // end of a full load: persist whatever it just read
   return (CACHE.logged_summaries[key] = details.map(loggedSummaryFromDetail));
@@ -633,7 +713,8 @@ window.fetch = async (input, init) => {
   return _realFetch(input, init);
 };
 
-// ---- PAT auth / login screen ----
+// ---- Token plumbing for the shared sign-in (the login screen lives in the UI script) ----
+// On Pages the Asana token never leaves the browser: the UI's login hands it over here.
 const STORE_KEY = 'asana_pat';
 function loadToken(){ return sessionStorage.getItem(STORE_KEY) || localStorage.getItem(STORE_KEY) || null; }
 function clearToken(){ sessionStorage.removeItem(STORE_KEY); localStorage.removeItem(STORE_KEY); }
@@ -642,73 +723,16 @@ async function validateToken(tok){
   if (!r.ok) throw new Error(r.status === 401 ? 'Invalid token' : 'Asana ' + r.status);
   return (await r.json()).data;
 }
-function showSignout(who){
-  let b = document.getElementById('signout-fab');
-  if (!b){ b = document.createElement('button'); b.id = 'signout-fab'; b.className = 'signout'; document.body.appendChild(b); }
-  b.textContent = 'Sign out'; b.title = who ? ('Signed in as ' + who) : ''; b.onclick = doLogout; b.style.display = 'block';
-}
-function hideSignout(){ const b = document.getElementById('signout-fab'); if (b) b.style.display = 'none'; }
-function doLogout(){ clearToken(); TOKEN = null; window.__authed = false; hideSignout();
-  if (typeof chart !== 'undefined' && chart){ try { chart.destroy(); } catch (e) {} chart = null; } location.hash = ''; renderLogin(); }
-
-function renderLogin(err){
-  window.__authed = false; hideSignout();
-  document.getElementById('app').innerHTML = `
-    <div class="login"><div class="login-card">
-      <h1>Asana Dashboard</h1>
-      <p class="sub">Connect with a Personal Access Token. Create one in Asana → My Settings → Apps → Manage developer apps → Personal access tokens.</p>
-      <input type="password" id="pat" placeholder="Paste your Asana PAT" autocomplete="off" spellcheck="false">
-      <label class="remember"><input type="checkbox" id="remember"> Remember on this device</label>
-      ${err ? `<p class="login-err">${esc(err)}</p>` : ''}
-      <button class="btn" id="connect">Connect</button>
-      <p class="login-note">Your token is stored only in this browser — sessionStorage, or localStorage if you check “remember” — and sent directly to Asana over HTTPS. Don’t use this on a shared computer, and never commit a token to the repo.</p>
-    </div></div>`;
-  const inp = document.getElementById('pat'), go = document.getElementById('connect');
-  const submit = async () => {
-    const tok = inp.value.trim(); if (!tok) return;
-    go.disabled = true; go.textContent = 'Connecting…'; TOKEN = tok;
-    try {
-      const me = await validateToken(tok);
-      (document.getElementById('remember').checked ? localStorage : sessionStorage).setItem(STORE_KEY, tok);
-      window.__authed = true; showSignout(me.name || me.email || 'Signed in'); location.hash = ''; window.__startApp();
-    } catch (e){ TOKEN = null; renderLogin(e && e.message || String(e)); }
-  };
-  go.onclick = submit;
-  inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); };
-  inp.focus();
-}
-
-async function bootAuth(){
-  const tok = loadToken();
-  if (!tok){ renderLogin(); return; }
+window.__useToken = async tok => {
   TOKEN = tok;
-  try { const me = await validateToken(tok); window.__authed = true; showSignout(me.name || me.email || 'Signed in'); window.__startApp(); }
-  catch (e){ clearToken(); TOKEN = null; renderLogin('Saved token is no longer valid — please reconnect.'); }
-}
+  try { return await validateToken(tok); } catch (e) { TOKEN = null; throw e; }
+};
+window.__dropToken = () => { TOKEN = null; clearToken(); };
+window.__browserToken = {
+  load: loadToken,
+  save: (tok, remember) => (remember ? localStorage : sessionStorage).setItem(STORE_KEY, tok),
+};
 '''
-
-LOGIN_CSS = '''
-  /* login + sign-out (static build) */
-  .login { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
-  .login-card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:34px 32px;
-                max-width:430px; width:100%; box-shadow:0 10px 34px rgba(0,0,0,.5); }
-  .login-card h1 { font-size:22px; margin:0 0 6px; }
-  .login-card .sub { margin:0 0 18px; }
-  .login-card input[type=password] { width:100%; box-sizing:border-box; background:var(--panel2); color:var(--text);
-                border:1px solid var(--border); border-radius:8px; padding:11px 12px; font-size:14px; }
-  .login-card .remember { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); margin:12px 0 16px; }
-  .login-card .btn { width:100%; padding:11px; }
-  .login-err { color:var(--red); font-size:13px; margin:0 0 12px; }
-  .login-note { font-size:11px; color:var(--faint); margin-top:16px; line-height:1.55; }
-  .signout { position:fixed; top:16px; right:18px; z-index:50; background:var(--panel2); color:var(--text);
-             border:1px solid var(--border); border-radius:8px; padding:7px 12px; font-size:12px; cursor:pointer; }
-  .signout:hover { background:#414854; }
-'''
-
-NEW_TAIL = """window.addEventListener('hashchange', () => { if (window.__authed) route(); });
-window.__startApp = route;
-bootAuth();"""
-
 
 def build():
     page = a.PAGE
@@ -719,27 +743,21 @@ def build():
                .replace('__TEAM__', TEAM)
                .replace('__PROJECTS__', PROJECTS)
                .replace('__ESTPROJECTS__', EST_PROJECTS)
+               .replace('__PORTFOLIO__', PORTFOLIO)
                .replace('__ARCHIVED__', ARCHIVED)
                .replace('__GROUPS__', GROUPS)
                .replace('__CARVEOUTS__', CARVE_OUTS)
                .replace('__UNBILLABLE__', UNBILLABLE)
                .replace('__DEFSTART__', DEF_START)
-               .replace('__DEFEND__', DEF_END))
+               .replace('__DEFEND__', DEF_END)
+               .replace('__FIREBASE__', FIREBASE)
+               .replace('__PLANDOMAIN__', PLAN_DOMAIN))
 
-    # 1) add login/sign-out CSS
-    assert '</style>' in page
-    page = page.replace('</style>', LOGIN_CSS + '</style>', 1)
-
-    # 2) inject the data layer + auth as a script that runs BEFORE the UI script
+    # inject the data layer + auth as a script that runs BEFORE the UI script
     anchor = '<div class="wrap" id="app"></div>\n<script>'
     assert anchor in page
     page = page.replace(anchor,
                         '<div class="wrap" id="app"></div>\n<script>\n' + prepend + '\n</script>\n<script>', 1)
-
-    # 3) gate the UI's auto-start on a valid token
-    old_tail = "window.addEventListener('hashchange', route);\nroute();"
-    assert old_tail in page
-    page = page.replace(old_tail, NEW_TAIL, 1)
 
     with open('index.html', 'w', encoding='utf-8') as f:
         f.write(page)
