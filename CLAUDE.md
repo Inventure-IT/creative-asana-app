@@ -124,9 +124,31 @@ Canvas can't read CSS variables, so the same palette is mirrored in the `C` obje
 chart and the CSS variables for everything else — never a bare hex in either place, and keep
 the two definitions in lockstep.
 
+**Themes** (Settings › Theme) are per person. A `THEMES` entry retints every surface (`surf`:
+bg, panel, panel2, border, text, muted, faint) and swaps the `--blue`/`--blue-d` (`est`) and
+`--green`/`--green-d` (`act`) pairs. `themeTones()` mixes the in-between greys (`--hover`,
+`--border-h`, `--sep`, `--cap-border`, `--disabled`, `--disabled-t`, `--blk-off`, chart ticks)
+unless a theme pins them (Classic does, so it matches `:root` exactly). `applyTheme()` sets the
+CSS variables *and* mutates `C`, so read colors at draw time from `C.*` or the variables — never
+cache one in a constant, and never hardcode a grey in the CSS (add a variable, then set it in
+`applyTheme`). Every theme stays dark, keeps estimated and logged clearly distinct, and avoids
+red, orange, amber and gold. The Theme tab orders cards by panel hue (`themeOrderKey`: neutrals
+first, then teal → pink), so a new preset needs no manual placement. A person can also build
+their own **Custom** theme (id `custom`) from the eight `CUSTOM_FIELDS` colors
+(`customThemeEntry` mixes the rest); colors pass `cleanCustom` (strict `#rrggbb`) because they
+land in style attributes, and live edits repaint only the Custom card so the open picker isn't
+detached.
+
+**Per-person preferences** live on the user's own Firestore doc `users/{uid}` (the one holding
+`asanaPat`), written through `saveUserPrefs()`, which replaces whole fields (`updateDoc`) so a
+reset value really goes away: `accentTheme` (`setTheme`), `customTheme` (`updateCustomTheme`) and `graphColors` = `{ people, projects }`
+(`queueGraphColorsSave`, debounced, called by `savePersonColorConfig` / `saveProjectColorConfig`).
+`savedPat` applies both on sign-in (`adoptGraphColors`). Both are also cached in `localStorage`,
+which is all a token-only sign-in gets.
+
 Chart data colors come from helpers, never literals:
 - `personColor(name)` — stable per-person hue, shared across every per-person chart, and
-  user-overridable in the Graph Colors tab (persisted in `localStorage`). Use it anywhere a
+  user-overridable in the Graph Colors tab (saved per person, see above). Use it anywhere a
   series represents a person.
 - `projectColor(name)` — stable per-project hue for the donuts, off its own `PROJECT_PALETTE`
   (longer than the project roster, so no two projects ever share a color). Colors are claimed
@@ -237,7 +259,8 @@ section is shared too (not per month): doc `layout/capacity` = `{ order: [card i
 `planSort()`, saved by `planSaveOrder()`. **Capacity overrides** (the "Edit capacity" button) live in doc `settings/capacity` = `{ caps: {
 'p:<gid>' | 'grp:<group>': hours } }`; `applyCapOverrides()` lays them over the loaded rows before
 every render (configured value kept as `cfgCap`), so every tab's budgets agree. **Holidays** (Settings › Holidays) live in doc `settings/holidays` = `{ days: [{ date, name }] }`,
-edited by anyone signed in (atomic `arrayUnion`/`arrayRemove`); `DEFAULT_HOLIDAYS` is only the
+edited by anyone signed in (atomic `arrayUnion`/`arrayRemove` to add or remove; an edit is a
+`runTransaction` swap in `planHolidayReplace`); `DEFAULT_HOLIDAYS` is only the
 starting list until that doc exists. `setHolidays()` refills the `HOLIDAYS` set `workdayProgress` reads. The `plan` object and
 `plan*` helpers hold the state; a change re-renders from cached data (never re-hits Asana).
 - Don't add light-mode styling or a third accent color without a reason that survives the

@@ -1344,7 +1344,10 @@ PAGE = r"""<!DOCTYPE html>
           --amber:#f0c674; --amber-line:#7d6a3c; --amber-tint:#2c281d;
           /* Unspent blocks on a budget bar. Deliberately lighter than --panel2, which is the
              background of the capacity cards the bar sits on — at --panel2 it disappeared. */
-          --blk-off:#5b6474; }
+          --blk-off:#5b6474;
+          /* Derived surface tones, so a theme can retint every grey (applyTheme sets them all). */
+          --hover:#414854; --border-h:#4d5666; --sep:#5a616b; --cap-border:#5c6b86;
+          --disabled:#434a56; --disabled-t:#8a929c; }
   body { font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin:0; background:var(--bg); color:var(--text); }
   .wrap { max-width:1320px; margin:32px auto; padding:0 20px; }
   h1 { font-size:22px; margin:0 0 2px; }
@@ -1391,13 +1394,16 @@ PAGE = r"""<!DOCTYPE html>
   .toolbar label:first-child { margin-left:0; }
   .toolbar select, .toolbar input[type=date] { background:var(--panel2); color:var(--text);
                     border:1px solid var(--border); border-radius:7px; padding:6px 9px; font-size:13px; cursor:pointer; }
-  .toolbar select:hover, .toolbar input[type=date]:hover { border-color:#4d5666; }
+  .toolbar select:hover, .toolbar input[type=date]:hover { border-color:var(--border-h); }
   .toolbar input[type=date]::-webkit-calendar-picker-indicator { filter:invert(.8); cursor:pointer; }
+  /* The native calendar popup follows color-scheme, and dark made it hard to read. A light
+     scheme on the input alone gives a white popup; the field keeps its explicit dark colors. */
+  input[type=date] { color-scheme:light; }
   /* Search re-runs the range; Refresh (top right) is the page's primary action, so this
      one stays secondary and doesn't compete with it. */
   .toolbar .btn { background:var(--panel2); color:var(--text); border:1px solid var(--border);
                   padding:6px 14px; font-size:13px; }
-  .toolbar .btn:hover { background:#414854; border-color:#4d5666; }
+  .toolbar .btn:hover { background:var(--hover); border-color:var(--border-h); }
   .toolbar .tb-label { font-weight:600; color:var(--text); margin-left:0; }
   /* A label and its control wrap as one unit, so a narrow window never strands a label
      on the end of a line with its <select> on the next. */
@@ -1482,13 +1488,48 @@ PAGE = r"""<!DOCTYPE html>
                                  font-variant-numeric:tabular-nums; }
   table.tasks.cap-edit .cap-in.bad { border-color:var(--red); }
   .cap-edit-actions { display:flex; gap:10px; margin:16px 0 0; }
+  /* Settings › Theme: a preview card per theme, painted in that theme's own colors (inline);
+     the current one is outlined in --text, not an accent, so it reads the same in any theme. */
+  .ct-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:6px 24px; }
+  .ct-row { display:flex; align-items:center; gap:12px; padding:8px 4px; border-radius:8px; cursor:pointer; }
+  .ct-row:hover { background:var(--panel2); }
+  .ct-text { display:flex; flex-direction:column; gap:1px; min-width:0; }
+  .ct-label { font-size:14px; color:var(--text); }
+  .ct-hint { font-size:12px; color:var(--faint); }
+  .ct-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:18px; padding-top:16px;
+                border-top:1px solid var(--border); }
+  .ct-actions select { background:var(--panel2); color:var(--text); border:1px solid var(--border);
+                       border-radius:7px; padding:6px 9px; font-size:13px; }
+  .ct-actions .ct-btn { background:var(--panel2); color:var(--text); border:1px solid var(--border);
+                        padding:6px 14px; font-size:13px; font-weight:500; }
+  .ct-actions .ct-btn:hover { background:var(--hover); border-color:var(--border-h); }
+  .th-mini { display:flex; gap:8px; padding:8px; border:1px solid; border-radius:8px; }
+  .th-side { flex:0 0 46px; display:flex; flex-direction:column; gap:5px; padding:6px; border:1px solid; border-radius:6px; }
+  .th-side i { display:block; height:6px; border-radius:3px; }
+  .th-main { flex:1; min-width:0; padding:2px 10px 10px; border:1px solid; border-radius:6px; }
+  .theme-card h3 { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .theme-card.on, .theme-card.on:hover { border-color:var(--text); box-shadow:0 0 0 1px var(--text); }
+  .th-cur { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
+            color:var(--bg); background:var(--text); padding:2px 8px; border-radius:999px; }
+  .th-row { display:flex; align-items:center; gap:10px; font-size:12px; color:var(--muted); margin-top:10px; }
+  .th-l { flex:0 0 66px; }
+  .th-bar { flex:1; height:8px; border-radius:4px; background:var(--blk-off); overflow:hidden; }
+  .th-bar i { display:block; height:100%; }
+  .th-n { flex:0 0 46px; text-align:right; font-weight:600; font-variant-numeric:tabular-nums; }
   /* Settings › Holidays */
   .toolbar .hol-name { background:var(--panel2); color:var(--text); border:1px solid var(--border);
                        border-radius:6px; padding:6px 8px; min-width:220px; }
   table.tasks.hol-table { max-width:760px; }
   table.tasks.hol-table tr.past td { color:var(--faint); }
   table.tasks.hol-table td.hol-act { text-align:right; width:1%; }
-  table.tasks.hol-table .hol-del { padding:4px 10px; font-size:12px; }
+  table.tasks.hol-table td.hol-act { white-space:nowrap; }
+  table.tasks.hol-table .hol-btn, table.tasks.hol-table .hol-save { padding:4px 10px; font-size:12px; }
+  table.tasks.hol-table .hol-btn { background:var(--panel2); color:var(--text); border:1px solid var(--border); font-weight:500; }
+  table.tasks.hol-table .hol-btn:hover { background:var(--hover); border-color:var(--border-h); }
+  table.tasks.hol-table tr.editing td { vertical-align:middle; background:var(--panel); }
+  table.tasks.hol-table input { background:var(--panel2); color:var(--text); border:1px solid var(--border);
+                                border-radius:6px; padding:6px 8px; font-size:13px; }
+  table.tasks.hol-table .hol-e-name { width:100%; box-sizing:border-box; min-width:0; }
   .plan-err { color:var(--red); font-size:13px; margin:0 0 10px; }
   .section-h.flush { margin-top:8px; padding-top:0; border-top:0; }   /* first heading under the filter */
   /* Headline stat strip. Every tab opens with one so the top-line numbers are always in
@@ -1539,7 +1580,7 @@ PAGE = r"""<!DOCTYPE html>
   .card.logged .stat .n, .card.logged .go { color:var(--green-d); }
   .card.logged .cap-bar { margin-top:22px; }   /* extra space between the big numbers and the bar */
   /* MSA/capacity cards: lighter panel + brighter border so they stand out at the top of the list */
-  .card.cap { background:var(--panel2); border-color:#5c6b86; }
+  .card.cap { background:var(--panel2); border-color:var(--cap-border); }
   /* Cards in a row are the same height (they stretch to the tallest), content top-aligned, with a
      bucket's "Open bucket" link pinned to the bottom. Combined buckets sit in a row of their own
      (see capSection), so a bucket's member list never stretches a project card. "Not this month"
@@ -1573,7 +1614,7 @@ PAGE = r"""<!DOCTYPE html>
   .grp-row:hover { background:var(--panel2); }
   /* On highlighted (.cap) bucket cards the card bg is already --panel2, so member rows need a
      lighter hover to stay visible. */
-  .card.cap .grp-row:hover { background:#414854; }
+  .card.cap .grp-row:hover { background:var(--hover); }
   .grp-row .grp-name { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .grp-row .grp-h { color:var(--green-d); font-variant-numeric:tabular-nums; white-space:nowrap; }
   /* detail */
@@ -1585,16 +1626,17 @@ PAGE = r"""<!DOCTYPE html>
             margin:0 0 8px; color:var(--faint); }
   .crumb { color:var(--blue-d); text-decoration:none; cursor:pointer; }
   .crumb:hover { text-decoration:underline; }
-  .crumb-sep { color:#5a616b; }
+  .crumb-sep { color:var(--sep); }
   .crumb-cur { font-weight:600; }
   button.btn { background:var(--blue); color:#10141a; border:0; border-radius:8px; padding:9px 16px; font-size:14px; font-weight:600; cursor:pointer; }
   button.btn:hover { background:var(--blue-d); }
-  button.btn:disabled { background:#434a56; color:#8a929c; cursor:default; }
+  button.btn:disabled { background:var(--disabled); color:var(--disabled-t); cursor:default; }
   .back { background:var(--panel2); color:var(--text); }
-  .back:hover { background:#414854; }
+  .back:hover { background:var(--hover); }
   .panel { background:var(--panel); border-radius:12px; padding:26px 30px 36px; box-shadow:0 1px 3px rgba(0,0,0,.4); border:1px solid var(--border); }
   #updated { font-size:12px; color:var(--muted); }
   .chart-box { position:relative; height:480px; margin-top:10px; }
+  .chart-box.preview-box { height:300px; }   /* Graph Colors' sample chart */
   .muted { color:var(--muted); }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   /* Team Capacity: per-person project donuts under the bar chart */
@@ -1664,7 +1706,7 @@ PAGE = r"""<!DOCTYPE html>
   .badge.none { color:var(--faint); }   /* the "No status" placeholder badge */
   .badge.done { color:var(--green); }   /* the "Completed" marker on a finished subtask */
   .sub-name { padding-left:22px; position:relative; }
-  .sub-name::before { content:'↳'; position:absolute; left:6px; color:#5a616b; }
+  .sub-name::before { content:'↳'; position:absolute; left:6px; color:var(--sep); }
   /* Nesting steps for rows in the breakdown tables: .lvl1 is a task under its project
      heading row, .lvl2 a subtask under that task (keeps the ↳ aligned with the indent). */
   .lvl1 { padding-left:22px; }
@@ -1733,15 +1775,182 @@ function externalTip(ctx){
 }
 
 // The :root palette, mirrored for canvas drawing (Chart.js can't read CSS variables).
-// Keep these in lockstep with the --blue/--green/... custom properties in <style>.
+// Keep these in lockstep with the --blue/--green/... custom properties in <style>. applyTheme()
+// rewrites both together, so read them at draw time — never copy one into a constant.
 const C = {
   blue:'#6aa9e0', blueD:'#9cc7f0', green:'#4cc085', greenD:'#6cd49d', red:'#e26b66',
   panel:'#2a2f38', panel2:'#353b45', border:'#3c4350', muted:'#a3aab4', faint:'#737b86',
+  sep:'#5a616b', disabled:'#434a56', tick:'#9aa0a8',
   amber:'#f0c674',   // reserved for capacity/budget markers only — never a data series
 };
 
-// Dark-mode chart defaults: light tick/legend text and faint gridlines.
-Chart.defaults.color = '#9aa0a8';
+// Themes (Settings › Theme), chosen per person. Each one retints every surface — page, panels,
+// inputs, borders, text greys — and swaps the two semantic accents: `est` (estimated/planned,
+// the --blue pair) and `act` (actual/logged, the --green pair), each [base, light]. All stay
+// dark, and none touch red (over budget) or amber/gold (the reserved pace/capacity marker), so
+// every color still means the same thing. `surf` = { bg, panel, panel2, border, text, muted,
+// faint }; the hover/separator/disabled tones are mixed from those (themeTones) unless a theme
+// pins them. The first entry is the default and matches :root / C exactly.
+const THEMES = [
+  { id: 'classic', name: 'Classic', est: ['#6aa9e0', '#9cc7f0'], act: ['#4cc085', '#6cd49d'],
+    surf: { bg:'#12151a', panel:'#2a2f38', panel2:'#353b45', border:'#3c4350', text:'#edeff2', muted:'#a3aab4', faint:'#737b86' },
+    tones: { blkOff:'#5b6474', hover:'#414854', borderH:'#4d5666', sep:'#5a616b', capBorder:'#5c6b86',
+             disabled:'#434a56', disabledT:'#8a929c', tick:'#9aa0a8' } },
+  { id: 'midnight', name: 'Midnight', est: ['#6ab0ff', '#a1ccff'], act: ['#4cd18e', '#7ee0ac'],
+    surf: { bg:'#0a0f1e', panel:'#151d33', panel2:'#1e2843', border:'#2a3656', text:'#eef2fb', muted:'#a3afcb', faint:'#6c7896' } },
+  { id: 'violet', name: 'Violet & Mint', est: ['#a48cf0', '#c6b8fa'], act: ['#3fcfb4', '#74e3cd'],
+    surf: { bg:'#13101b', panel:'#241f33', panel2:'#2f2942', border:'#3e3654', text:'#f1edf8', muted:'#b2a9c6', faint:'#7d7495' } },
+  { id: 'indigo', name: 'Indigo & Lime', est: ['#7d8ff2', '#a9b5f8'], act: ['#9acd52', '#bde283'],
+    surf: { bg:'#0f121e', panel:'#1e2337', panel2:'#282e46', border:'#353c57', text:'#eef0f8', muted:'#a7adc7', faint:'#737a97' } },
+  { id: 'cyan', name: 'Deep Sea', est: ['#4fc3e8', '#8ad8f2'], act: ['#5ad48f', '#8be4b1'],
+    surf: { bg:'#0b1618', panel:'#17282c', panel2:'#20353a', border:'#2d464c', text:'#eaf4f5', muted:'#9fb7ba', faint:'#6a868a' } },
+  { id: 'orchid', name: 'Orchid & Sea', est: ['#cf8ce8', '#e3b5f3'], act: ['#45c4a0', '#7ad8bd'],
+    surf: { bg:'#17101a', panel:'#2a1f2e', panel2:'#36293b', border:'#46364b', text:'#f6eef8', muted:'#bcaac1', faint:'#88748d' } },
+  { id: 'graphite', name: 'Graphite', est: ['#8fb4d8', '#b8d0e8'], act: ['#7cc49c', '#a3d8ba'],
+    surf: { bg:'#111111', panel:'#202020', panel2:'#2b2b2b', border:'#3a3a3a', text:'#ececec', muted:'#a8a8a8', faint:'#747474' } },
+  { id: 'vivid', name: 'High contrast', est: ['#4da3ff', '#8cc4ff'], act: ['#2ee88a', '#7af2b4'],
+    surf: { bg:'#000000', panel:'#14161a', panel2:'#1e2127', border:'#3b4049', text:'#ffffff', muted:'#c6cbd2', faint:'#8e959e' } },
+  { id: 'pine', name: 'Pine', est: ['#7ab8f5', '#a8d1fa'], act: ['#9fe070', '#c0eb9e'],
+    surf: { bg:'#0b140f', panel:'#172a20', panel2:'#1f362a', border:'#2b4a39', text:'#ebf5ee', muted:'#a3bdaf', faint:'#6d8a7a' } },
+  { id: 'arctic', name: 'Arctic', est: ['#7cc6f2', '#a9daf7'], act: ['#64d6a4', '#93e4c1'],
+    surf: { bg:'#0f1418', panel:'#222b33', panel2:'#2c3740', border:'#3b4853', text:'#eef4f8', muted:'#a9b8c4', faint:'#74838f' } },
+  { id: 'sapphire', name: 'Sapphire', est: ['#8fb8ff', '#b8d2ff'], act: ['#5be0a0', '#8ceabd'],
+    surf: { bg:'#061026', panel:'#0f1f45', panel2:'#172a57', border:'#24396e', text:'#eef3ff', muted:'#a6b5d9', faint:'#6e7ea6' } },
+  { id: 'plum', name: 'Plum', est: ['#e08ef0', '#ecb6f6'], act: ['#5ed6b4', '#8ce3ca'],
+    surf: { bg:'#160b16', panel:'#2b1630', panel2:'#381e3e', border:'#4a2a52', text:'#f7eef8', muted:'#c2a9c7', faint:'#8c7193' } },
+  { id: 'rosewood', name: 'Rosewood', est: ['#f29ac0', '#f7bfd7'], act: ['#5fd0b5', '#8cdfcb'],
+    surf: { bg:'#170d10', panel:'#2d1a20', panel2:'#3a222a', border:'#4c2e38', text:'#f8eef1', muted:'#c6abb3', faint:'#90747d' } },
+  { id: 'mocha', name: 'Mocha', est: ['#7fb2e5', '#aacbee'], act: ['#6fcf97', '#9adfb6'],
+    surf: { bg:'#16110c', panel:'#2c2219', panel2:'#382c21', border:'#4a3b2e', text:'#f5efe8', muted:'#c2b3a4', faint:'#8c7d6f' } },
+];
+// Mix two #rrggbb colors: t = 0 → a, 1 → b.
+function mixHex(a, b, t){
+  const p = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const x = p(a), y = p(b);
+  return '#' + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, '0')).join('');
+}
+// The in-between tones a theme doesn't pin, mixed from its surfaces.
+function themeTones(t){
+  const s = t.surf;
+  return Object.assign({
+    blkOff: mixHex(s.panel2, s.text, .2), hover: mixHex(s.panel2, s.text, .07),
+    borderH: mixHex(s.border, s.text, .12), sep: mixHex(s.border, s.text, .18),
+    capBorder: mixHex(s.border, t.est[0], .4), disabled: mixHex(s.panel2, s.text, .06),
+    disabledT: mixHex(s.faint, s.text, .15), tick: mixHex(s.muted, s.faint, .2),
+  }, t.tones || {});
+}
+const THEME_STORE = 'creativeHours.accentTheme';   // key kept so earlier choices carry over
+let theme = THEMES[0].id;
+// The person's own theme (id 'custom'), built in Settings › Theme from eight picked colors:
+// the six surfaces plus the estimated and logged accents. The light accent variants and the
+// tertiary text are mixed from those, so picking stays to colors a person can reason about.
+// Saved per person on users/{uid}.customTheme and cached in localStorage.
+const CUSTOM_STORE = 'creativeHours.customTheme';
+const CUSTOM_FIELDS = [
+  { k: 'bg',     label: 'Page background',   hint: 'Behind everything' },
+  { k: 'panel',  label: 'Panels & cards',    hint: 'Sidebar, cards, toolbar' },
+  { k: 'panel2', label: 'Raised surfaces',   hint: 'Inputs, buttons, chart tracks' },
+  { k: 'border', label: 'Borders',           hint: 'Card edges and dividers' },
+  { k: 'text',   label: 'Text',              hint: 'Headings and numbers' },
+  { k: 'muted',  label: 'Secondary text',    hint: 'Labels and notes' },
+  { k: 'est',    label: 'Estimated accent',  hint: 'Planned hours, links, active nav' },
+  { k: 'act',    label: 'Logged accent',     hint: 'Actual hours logged' },
+];
+const CUSTOM_DEFAULT = (t => Object.assign({}, t.surf, { est: t.est[0], act: t.act[0] }))(THEMES[0]);
+const isHex = v => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
+// Keep only well-formed colors (they go into style attributes), filling gaps from the default.
+function cleanCustom(c){
+  const out = {};
+  CUSTOM_FIELDS.forEach(f => { out[f.k] = c && isHex(c[f.k]) ? c[f.k].toLowerCase() : CUSTOM_DEFAULT[f.k]; });
+  return out;
+}
+let customTheme = (() => { try { return cleanCustom(JSON.parse(localStorage.getItem(CUSTOM_STORE))); }
+                           catch (e) { return cleanCustom(null); } })();
+// The custom colors as a full THEMES-shaped entry.
+function customThemeEntry(c){
+  return { id: 'custom', name: 'Custom',
+    est: [c.est, mixHex(c.est, '#ffffff', .35)], act: [c.act, mixHex(c.act, '#ffffff', .3)],
+    surf: { bg: c.bg, panel: c.panel, panel2: c.panel2, border: c.border, text: c.text,
+            muted: c.muted, faint: mixHex(c.muted, c.panel, .45) } };
+}
+function themeById(id){
+  return id === 'custom' ? customThemeEntry(customTheme) : (THEMES.find(x => x.id === id) || THEMES[0]);
+}
+// Point every CSS variable and the chart palette at a theme. Charts pick it up on their next draw.
+function applyTheme(id){
+  const t = themeById(id), s = t.surf, k = themeTones(t);
+  theme = t.id;
+  const vars = { '--blue': t.est[0], '--blue-d': t.est[1], '--green': t.act[0], '--green-d': t.act[1],
+    '--bg': s.bg, '--panel': s.panel, '--panel2': s.panel2, '--border': s.border,
+    '--text': s.text, '--muted': s.muted, '--faint': s.faint,
+    '--blk-off': k.blkOff, '--hover': k.hover, '--border-h': k.borderH, '--sep': k.sep,
+    '--cap-border': k.capBorder, '--disabled': k.disabled, '--disabled-t': k.disabledT };
+  const st = document.documentElement.style;
+  Object.entries(vars).forEach(([n, v]) => st.setProperty(n, v));
+  Object.assign(C, { blue: t.est[0], blueD: t.est[1], green: t.act[0], greenD: t.act[1],
+    panel: s.panel, panel2: s.panel2, border: s.border, muted: s.muted, faint: s.faint,
+    sep: k.sep, disabled: k.disabled, tick: k.tick });
+  if (window.Chart) Chart.defaults.color = C.tick;
+}
+function cacheTheme(){ try { localStorage.setItem(THEME_STORE, theme); } catch (e) {} }
+try { applyTheme(localStorage.getItem(THEME_STORE)); } catch (e) { applyTheme(null); }
+
+// Per-person preferences live on the user's own Firestore doc, users/{uid} (the doc that holds
+// their Asana token, readable and writable only by them): `accentTheme`, `customTheme` and `graphColors`
+// ({ people: { name: hex }, projects: { name: hex } }). Each named field is replaced whole —
+// updateDoc, not a deep merge, so a reset color really disappears — and the doc's other fields
+// are left alone. Resolves to an error message, or null once saved; without a Google sign-in
+// (token-only) the choice stays in this browser only.
+const LOCAL_ONLY = 'Not signed in with Google — saved in this browser only.';
+async function saveUserPrefs(fields){
+  const u = plan.fb && plan.fb.auth && plan.fb.auth.currentUser;
+  if (!u) return LOCAL_ONLY;
+  const { F, db } = plan.fb, ref = F.doc(db, 'users', u.uid);
+  try {
+    try { await F.updateDoc(ref, fields); }
+    catch (e) { if (e.code !== 'not-found') throw e; await F.setDoc(ref, fields, { merge: true }); }
+    return null;
+  } catch (e) { return 'Could not save to your account: ' + e.message; }
+}
+// Graph Colors (people + donut projects) go up to the user's doc a moment after the last
+// change, so dragging the color wheel is one write, not hundreds.
+let _graphSaveT = 0;
+function queueGraphColorsSave(){
+  clearTimeout(_graphSaveT);
+  _graphSaveT = setTimeout(async () => {
+    const m = await saveUserPrefs({ graphColors: { people: personColorConfig, projects: projectColorConfig } });
+    if (m && m !== LOCAL_ONLY) console.warn(m);
+  }, 600);
+}
+// Pick a theme: apply it now, cache it, and save it to the signed-in user's doc.
+async function setTheme(id){
+  applyTheme(id);
+  cacheTheme();
+  return saveUserPrefs(theme === 'custom' ? { accentTheme: theme, customTheme } : { accentTheme: theme });
+}
+// Change the custom colors (all of them, or one field): apply at once, cache, and save a moment
+// after the last change — like Graph Colors, so dragging a picker is one write.
+let _customSaveT = 0;
+function updateCustomTheme(next, onSaved){
+  customTheme = cleanCustom(Object.assign({}, customTheme, next));
+  applyTheme('custom');
+  cacheTheme();
+  try { localStorage.setItem(CUSTOM_STORE, JSON.stringify(customTheme)); } catch (e) {}
+  clearTimeout(_customSaveT);
+  _customSaveT = setTimeout(async () => {
+    const m = await saveUserPrefs({ accentTheme: 'custom', customTheme });
+    if (onSaved) onSaved(m);
+  }, 600);
+}
+// On sign-in: adopt the person's saved custom colors (before their theme is applied).
+function adoptCustomTheme(saved){
+  if (!saved) return;
+  customTheme = cleanCustom(saved);
+  try { localStorage.setItem(CUSTOM_STORE, JSON.stringify(customTheme)); } catch (e) {}
+}
+
+// Dark-mode chart defaults: themed tick/legend text and faint gridlines.
+Chart.defaults.color = C.tick;
 Chart.defaults.borderColor = 'rgba(255,255,255,.08)';
 
 // Draws a dashed horizontal target line (e.g. the per-assignee monthly target) on a bar chart.
@@ -1882,14 +2091,30 @@ const PERSON_PALETTE = [
 // Per-person preferences live in the Graph Colors tab, not here.
 const _personColors = { 'Unassigned': '#7f7f7f' };
 let _personColorN = 0;
-// User-picked colors (Settings tab), persisted per-browser. These win over the built-in
-// defaults/auto-assignment so a chosen color applies everywhere the same person is drawn.
+// User-picked colors (Graph Colors tab). These win over the built-in defaults/auto-assignment so
+// a chosen color applies everywhere the same person is drawn. Saved per person on their
+// Firestore doc (users/{uid}.graphColors, see queueGraphColorsSave) and cached in localStorage.
 const PERSON_COLOR_STORE = 'personColors.v1';
 function loadPersonColorConfig(){
   try { return JSON.parse(localStorage.getItem(PERSON_COLOR_STORE)) || {}; } catch (e) { return {}; }
 }
 function savePersonColorConfig(){
   try { localStorage.setItem(PERSON_COLOR_STORE, JSON.stringify(personColorConfig)); } catch (e) {}
+  queueGraphColorsSave();
+}
+// On sign-in: adopt the person's saved Graph Colors (users/{uid}.graphColors). A first sign-in
+// with none saved yet uploads whatever this browser already had, so nothing is lost.
+function adoptGraphColors(saved){
+  if (!saved) {
+    if (Object.keys(personColorConfig).length || Object.keys(projectColorConfig).length) queueGraphColorsSave();
+    return;
+  }
+  personColorConfig = Object.assign({}, saved.people || {});
+  projectColorConfig = Object.assign({}, saved.projects || {});
+  try {
+    localStorage.setItem(PERSON_COLOR_STORE, JSON.stringify(personColorConfig));
+    localStorage.setItem(PROJECT_COLOR_STORE, JSON.stringify(projectColorConfig));
+  } catch (e) {}
 }
 let personColorConfig = loadPersonColorConfig();
 // Every name we've been asked to color this session, so the Settings tab can list everyone
@@ -1963,8 +2188,8 @@ const PROJECT_PALETTE = [
 const PROJECT_COLORS = {
   'Georgia Grown Market MSA': '#2ca02c',   // green
 };
-// User-picked project colors, set by clicking a swatch in a donut legend and persisted
-// per-browser, exactly like the per-person colors. A choice here wins over the pinned
+// User-picked project colors, set by clicking a swatch in a donut legend and saved per person
+// exactly like the per-person colors (Firestore users/{uid}.graphColors.projects + localStorage). A choice here wins over the pinned
 // PROJECT_COLORS and over auto-assignment, so the project reads that color everywhere.
 const PROJECT_COLOR_STORE = 'projectColors.v1';
 function loadProjectColorConfig(){
@@ -1972,6 +2197,7 @@ function loadProjectColorConfig(){
 }
 function saveProjectColorConfig(){
   try { localStorage.setItem(PROJECT_COLOR_STORE, JSON.stringify(projectColorConfig)); } catch (e) {}
+  queueGraphColorsSave();
 }
 let projectColorConfig = loadProjectColorConfig();
 // Stable per-project colors for the Team Capacity donuts, so one project reads as the same
@@ -2003,8 +2229,8 @@ const OTHER_SLICE = 'Other projects';
 const FREE_SLICE = 'Unallocated capacity';
 // The two synthetic slices get fixed greys and always sort last in the legend.
 function sliceColor(label){
-  if (label === OTHER_SLICE) return '#5a616b';
-  if (label === FREE_SLICE) return '#434a56';
+  if (label === OTHER_SLICE) return C.sep;
+  if (label === FREE_SLICE) return C.disabled;
   return projectColor(label);
 }
 // Donut rings are drawn on .donut-card, whose background is --panel2 — the slice borders
@@ -2264,7 +2490,9 @@ const TABS = {
   actualdaily: { label:'Daily Log', title:'Daily Log · Logged',
     sub:'Day by day, what each person logged their time to in the selected range.' },
   settings: { label:'Graph Colors', title:'Graph Colors',
-    sub:'Pick a color for each person — saved in this browser and applied to every per-person chart.' },
+    sub:'Pick a color for each person — saved to your account (so it follows you to any browser) and applied to every per-person chart.' },
+  theme: { label:'Theme', title:'Theme',
+    sub:'Pick how the dashboard looks to you — backgrounds, panels and accents. Saved to your account, so it follows you to every browser and nobody else\'s view changes.' },
   holidays: { label:'Holidays', title:'Holidays',
     sub:'Days off that are not work days. Shared with everyone — anyone signed in can add or remove one, and every work-day count (pace, team availability) updates.' },
 };
@@ -2273,7 +2501,7 @@ const TABS = {
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tone: 'est', tabs: ['team', 'estproj', 'estimated'] },
   { title: 'Actual Hours', tone: 'act', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily'] },
-  { title: 'Settings', tabs: ['settings', 'holidays'] },
+  { title: 'Settings', tabs: ['settings', 'theme', 'holidays'] },
 ];
 
 // Shared left nav, reused by the dashboard and the drill-in detail pages so the
@@ -2445,7 +2673,12 @@ function authUser(){
 async function savedPat(u){
   const { F, db } = plan.fb;
   const snap = await F.getDoc(F.doc(db, 'users', u.uid));
-  return snap.exists() ? (snap.data().asanaPat || null) : null;
+  const d = snap.exists() ? snap.data() : {};
+  // Same doc carries the person's theme and Graph Colors; apply them as soon as we know who they are.
+  adoptCustomTheme(d.customTheme);
+  if (d.accentTheme) { applyTheme(d.accentTheme); cacheTheme(); }
+  adoptGraphColors(d.graphColors);
+  return d.asanaPat || null;
 }
 async function storePat(u, tok, me){
   const { F, db } = plan.fb;
@@ -2768,6 +3001,28 @@ async function planHoliday(day, add){
       await F.setDoc(ref, { days: holidayList.map(h => ({ date: h.date, name: h.name || '' })) });
     await F.updateDoc(ref, { days: add ? F.arrayUnion(day) : F.arrayRemove(day),
                              by: u.displayName || u.email, at: F.serverTimestamp() });
+    return true;
+  } catch (e) {
+    plan.error = 'Could not save the holiday: ' + e.message;
+    planChanged();
+    return false;
+  }
+}
+// Change one holiday (its date and/or name) in a single transaction: read the shared list, swap
+// the old entry for the new one, write it back — so a concurrent add or edit by someone else
+// isn't overwritten. Seeds the doc from the current list first, like planHoliday.
+async function planHolidayReplace(oldDay, newDay){
+  if (plan.status !== 'in') return false;
+  const { F, db } = plan.fb, u = plan.user, ref = F.doc(db, 'settings', 'holidays');
+  const same = (a, b) => a.date === b.date && (a.name || '') === (b.name || '');
+  try {
+    if (!plan.holidaysSaved)
+      await F.setDoc(ref, { days: holidayList.map(h => ({ date: h.date, name: h.name || '' })) });
+    await F.runTransaction(db, async tx => {
+      const snap = await tx.get(ref);
+      const days = ((snap.exists() && snap.data().days) || []).filter(d => !same(d, oldDay));
+      tx.update(ref, { days: [...days, newDay], by: u.displayName || u.email, at: F.serverTimestamp() });
+    });
     return true;
   } catch (e) {
     plan.error = 'Could not save the holiday: ' + e.message;
@@ -4215,13 +4470,18 @@ async function renderDashboard() {
       }
     } else if (dashTab === 'settings') {
       renderSettings();
+    } else if (dashTab === 'theme') {
+      renderTheme();
     } else if (dashTab === 'holidays') {
       renderHolidays();
     }
   }
 
   // Settings › Holidays: the shared list of days off. Summary, one toolbar (the add form),
-  // then a table per year. Each add/remove is saved straight away (planHoliday).
+  // then a table per year. Each add/remove is saved straight away (planHoliday); Edit turns a
+  // row into inputs, saved with planHolidayReplace. holEdit = the date of the row being edited
+  // (kept across the re-render a live snapshot triggers).
+  let holEdit = null;
   function renderHolidays() {
     planInit();
     planWatch();
@@ -4249,12 +4509,20 @@ async function renderDashboard() {
     const years = [...new Set(holidayList.map(h => h.date.slice(0, 4)))].sort().reverse();
     if (!years.length) view.insertAdjacentHTML('beforeend', note('No holidays yet.'));
     years.forEach((y, i) => {
-      const rows = holidayList.filter(h => h.date.startsWith(y)).map(h => `
+      const rows = holidayList.filter(h => h.date.startsWith(y)).map(h => canEdit && h.date === holEdit ? `
+        <tr class="parent editing">
+          <td colspan="2"><input type="date" class="hol-e-date" value="${esc(h.date)}" aria-label="Date"></td>
+          <td colspan="2"><input type="text" class="hol-name hol-e-name" value="${esc(h.name || '')}" maxlength="60"
+                 placeholder="Name" aria-label="Holiday name"></td>
+          <td class="hol-act"><button class="btn hol-save" data-date="${esc(h.date)}">Save</button>
+            <button class="btn hol-btn hol-cancel">Cancel</button></td>
+        </tr>` : `
         <tr class="parent${h.date < today ? ' past' : ''}">
           <td class="nowrap">${esc(fmtDate(h.date))}</td><td>${esc(dow(h.date))}</td>
           <td>${esc(h.name || '')}</td>
           <td>${weekend(h.date) ? '<span class="badge none">Weekend — not a work day anyway</span>' : ''}</td>
-          <td class="hol-act">${canEdit ? `<button class="btn hol-del" data-date="${esc(h.date)}">Remove</button>` : ''}</td>
+          <td class="hol-act">${canEdit ? `<button class="btn hol-btn hol-edit" data-date="${esc(h.date)}">Edit</button>
+            <button class="btn hol-btn hol-del" data-date="${esc(h.date)}">Remove</button>` : ''}</td>
         </tr>`).join('');
       view.insertAdjacentHTML('beforeend', `<h2 class="section-h${i === 0 ? ' flush' : ''}">${esc(y)}</h2>
         <table class="tasks hol-table"><thead><tr><th>Date</th><th>Day</th><th>Holiday</th><th></th><th></th></tr></thead>
@@ -4278,11 +4546,42 @@ async function renderDashboard() {
       b.disabled = true; plan.error = null;
       await planHoliday({ date: day.date, name: day.name || '' }, false);
     });
+    view.querySelectorAll('.hol-edit').forEach(b => b.onclick = () => {
+      holEdit = b.dataset.date; plan.error = null; renderHolidays();
+      const n = view.querySelector('.hol-e-name');
+      if (n) { n.focus(); n.select(); }
+    });
+    const cancel = view.querySelector('.hol-cancel');
+    if (cancel) cancel.onclick = () => { holEdit = null; plan.error = null; renderHolidays(); };
+    const save = view.querySelector('.hol-save');
+    if (save) {
+      const eDate = view.querySelector('.hol-e-date'), eName = view.querySelector('.hol-e-name');
+      const doSave = async () => {
+        const day = holidayList.find(h => h.date === save.dataset.date);
+        if (!day) { holEdit = null; return renderHolidays(); }   // removed by someone else meanwhile
+        if (!eDate.value) { eDate.focus(); return; }
+        const next = { date: eDate.value, name: eName.value.trim() };
+        if (next.date === day.date && next.name === (day.name || '')) { holEdit = null; return renderHolidays(); }
+        if (next.date !== day.date && HOLIDAYS.has(next.date)) {
+          plan.error = fmtDate(next.date) + ' is already on the list.'; return renderHolidays();
+        }
+        save.disabled = true; save.textContent = 'Saving…'; plan.error = null;
+        if (await planHolidayReplace({ date: day.date, name: day.name || '' }, next)) holEdit = null;
+        renderHolidays();
+      };
+      save.onclick = doSave;
+      [eDate, eName].forEach(el => el.onkeydown = ev => {
+        if (ev.key === 'Enter') doSave();
+        if (ev.key === 'Escape') cancel.onclick();
+      });
+    }
   }
 
-  // Settings: per-person graph colors. Choices persist to localStorage (see personColor)
-  // and take effect on any per-person chart the next time it's drawn.
+  // Settings: per-person graph colors. Choices are saved per person (see personColor) and take
+  // effect on any per-person chart the next time it's drawn. A preview chart above the list
+  // (sample hours, every person stacked on a few projects) recolors live as a color is picked.
   function renderSettings() {
+    destroyCharts();
     // Everyone we might color: known team + Unassigned, plus anyone seen in a chart this
     // session, plus anyone who already has a saved color.
     const people = [...new Set([...TEAM_MEMBERS, 'Unassigned', ..._seenPeople, ...Object.keys(personColorConfig)])];
@@ -4294,18 +4593,132 @@ async function renderDashboard() {
           <button class="reset-one"${custom ? '' : ' disabled'}>Reset</button>
         </div>`;
     }).join('');
-    view.innerHTML = `<div class="panel">
+    view.innerHTML = `<h2 class="section-h flush">Preview <span class="section-aside">sample hours — not real data</span></h2>
+      <div class="chart-box preview-box"><canvas id="chart"></canvas></div>
+      <h2 class="section-h">Colors</h2>
+      <div class="panel">
         <div class="color-list">${rows}</div>
         <div class="color-actions"><button class="btn back" id="reset-all">Reset all to defaults</button></div>
-        <p class="hint">Applies to the per-person stacked bar charts and the Unassigned bar on Team Capacity. Open a chart tab to see the change.</p>
+        <p class="hint">Applies to the per-person stacked bar charts and the Unassigned bar on Team Capacity.</p>
       </div>`;
+    // Sample data: a few configured project names, each split across everyone with made-up but
+    // stable hours (same numbers every render, so only the colors move as you pick).
+    const projects = (PROJECT_ROSTER.length ? PROJECT_ROSTER : ['Project A', 'Project B', 'Project C']).slice(0, 5);
+    const sample = (p, j) => r2(4 + ((p.length * 7 + j * 13 + p.charCodeAt(0)) % 23) * 0.75);
+    chart = new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: { labels: projects, datasets: people.map((p, i) => ({
+        label: p, data: projects.map((_, j) => sample(p, j + i)),
+        backgroundColor: personColor(p), borderColor: personColor(p), borderWidth: 0 })) },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { position: 'bottom' },
+                   tooltip: { callbacks: { label: c => `${c.dataset.label}: ${h2(c.parsed.y)} h` } } },
+        scales: { x: { stacked: true, title: { display: true, text: 'Project' } },
+                  y: { stacked: true, beginAtZero: true, title: { display: true, text: 'Hours logged' } } } },
+    });
+    const recolor = (name, color) => {
+      const ds = chart && chart.data.datasets.find(d => d.label === name);
+      // A full update(), not update('none'): 'none' redraws with Chart.js's cached element
+      // colors, so the bars kept their old color. Animation is off, so this is still instant.
+      if (ds) { ds.backgroundColor = ds.borderColor = color; chart.update(); }
+    };
     view.querySelectorAll('.color-row').forEach(row => {
       const name = row.dataset.person;
       const pick = row.querySelector('.color-pick'), reset = row.querySelector('.reset-one');
-      pick.oninput = () => { personColorConfig[name] = pick.value; savePersonColorConfig(); reset.disabled = false; };
-      reset.onclick = () => { delete personColorConfig[name]; savePersonColorConfig(); pick.value = personDefaultColor(name); reset.disabled = true; };
+      pick.oninput = () => { personColorConfig[name] = pick.value; savePersonColorConfig(); reset.disabled = false; recolor(name, pick.value); };
+      reset.onclick = () => { delete personColorConfig[name]; savePersonColorConfig(); pick.value = personDefaultColor(name); reset.disabled = true; recolor(name, pick.value); };
     });
     document.getElementById('reset-all').onclick = () => { personColorConfig = {}; savePersonColorConfig(); renderSettings(); };
+  }
+
+  // Settings › Theme: one card per theme, each painted in that theme's own colors — a miniature
+  // of the page (background, a sidebar with the active item, a panel with an estimated and a
+  // logged bar) — so it previews before it's picked. The inline colors are the theme's data, not
+  // chrome. Clicking one applies it at once and saves it for this person (setTheme). `msg`
+  // reports a save that didn't reach their account.
+  // The cards run in order of their surface color, so similar shades sit together: neutral
+  // greys/blacks first (darkest last), then tinted themes around the color wheel by hue
+  // (green → teal → blue → violet → pink → brown). Custom is always last. Read off `panel`,
+  // where a theme's tint shows most.
+  function themeOrderKey(t){
+    const [r, g, b] = [1, 3, 5].map(i => parseInt(t.surf.panel.slice(i, i + 2), 16) / 255);
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min, l = (max + min) / 2;
+    const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+    // Neutral: grouped first, lightest grey leading. 0.18, because dark colors read as more
+    // saturated than they look (Classic's blue-grey ≈ .15, Orchid's faint plum ≈ .21).
+    if (sat < 0.18) return [0, -l];
+    let h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+    return [1, (h + 240) % 360];      // start the wheel at green (120°) so warm browns land at the end
+  }
+  const byShade = (a, b) => { const x = themeOrderKey(a), y = themeOrderKey(b); return x[0] - y[0] || x[1] - y[1]; };
+  // One theme card, painted in that theme's own colors.
+  function themeCardHtml(t){
+    const on = t.id === theme, s = t.surf, k = themeTones(t);
+    const bar = (label, pair, w, n) => `<div class="th-row" style="color:${s.muted}">
+        <span class="th-l">${label}</span>
+        <span class="th-bar" style="background:${k.blkOff}"><i style="width:${w}%;background:${pair[0]}"></i></span>
+        <span class="th-n" style="color:${pair[1]}">${h2(n)}</span></div>`;
+    return `<div class="card theme-card${on ? ' on' : ''}" data-theme="${t.id}" role="button" tabindex="0"
+                 aria-pressed="${on}" style="background:${s.panel};border-color:${on ? '' : s.border};color:${s.text}">
+      <h3>${esc(t.name)}${on ? '<span class="th-cur">Current</span>' : ''}</h3>
+      <div class="th-mini" style="background:${s.bg};border-color:${s.border}">
+        <div class="th-side" style="background:${s.panel};border-color:${s.border}">
+          <i style="background:${t.est[0]}"></i><i style="background:${s.panel2}"></i>
+          <i style="background:${t.act[0]}"></i><i style="background:${s.panel2}"></i></div>
+        <div class="th-main" style="background:${s.panel2};border-color:${s.border}">
+          ${bar('Estimated', t.est, 72, 96)}${bar('Logged', t.act, 54, 71.5)}</div>
+      </div></div>`;
+  }
+  // Settings › Theme. Picking Custom opens its editor below the grid: one color picker per
+  // CUSTOM_FIELDS entry, applied live as it moves (updateCustomTheme) and saved for this person.
+  // "Start from" copies a preset's colors in as a starting point.
+  function renderTheme(msg) {
+    const ordered = THEMES.slice().sort(byShade);
+    const editing = theme === 'custom';
+    view.innerHTML = `<div class="grid">${ordered.map(themeCardHtml).join('')}${themeCardHtml(customThemeEntry(customTheme))}</div>
+      <p class="note" id="theme-msg"${msg ? '' : ' hidden'}>${esc(msg || '')}</p>
+      ${editing ? `<h2 class="section-h">Custom theme <span class="section-aside">changes apply as you pick · saved to your account</span></h2>
+        <div class="panel ct-panel">
+          <div class="ct-grid">${CUSTOM_FIELDS.map(f => `<label class="ct-row">
+              <input type="color" class="color-pick" data-k="${f.k}" value="${customTheme[f.k]}">
+              <span class="ct-text"><span class="ct-label">${esc(f.label)}</span><span class="ct-hint">${esc(f.hint)}</span></span>
+            </label>`).join('')}</div>
+          <div class="ct-actions">
+            <span class="ct-label">Start from</span>
+            <select id="ct-base">${ordered.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select>
+            <button class="btn ct-btn" id="ct-copy">Copy its colors</button>
+          </div>
+          <p class="hint">Keep the two accents easy to tell apart, and steer clear of red and yellow — on this dashboard
+            red means over budget and yellow marks pace.</p>
+        </div>` : ''}`;
+    view.querySelectorAll('.theme-card').forEach(c => {
+      const pick = async () => { const m = await setTheme(c.dataset.theme); renderTheme(m); };
+      c.onclick = pick;
+      c.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } };
+    });
+    if (!editing) return;
+    // Live edits repaint only the Custom card, never the whole tab — re-rendering would
+    // detach the color input whose picker is open.
+    const msgEl = document.getElementById('theme-msg');
+    const saved = m => { msgEl.hidden = !m; msgEl.textContent = m || ''; };
+    const repaintCard = () => {
+      const old = view.querySelector('.theme-card[data-theme="custom"]');
+      old.insertAdjacentHTML('afterend', themeCardHtml(customThemeEntry(customTheme)));
+      const card = old.nextElementSibling;
+      old.remove();
+      card.onclick = () => {};   // already the current theme
+    };
+    view.querySelectorAll('.ct-row .color-pick').forEach(inp => inp.oninput = () => {
+      updateCustomTheme({ [inp.dataset.k]: inp.value }, saved);
+      repaintCard();
+    });
+    document.getElementById('ct-copy').onclick = () => {
+      const t = THEMES.find(x => x.id === document.getElementById('ct-base').value);
+      if (!t) return;
+      updateCustomTheme(Object.assign({}, t.surf, { est: t.est[0], act: t.act[0] }), saved);
+      renderTheme();
+    };
   }
 
   wireSidebar(renderTab);
