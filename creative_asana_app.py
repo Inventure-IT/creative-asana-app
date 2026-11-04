@@ -1545,28 +1545,14 @@ PAGE = r"""<!DOCTYPE html>
      (see capSection), so a bucket's member list never stretches a project card. "Not this month"
      keeps natural heights. */
   .grid.cap-grid + .grid.cap-grid { margin-top:18px; }   /* bucket row, then project row */
-  /* Combined buckets run wide (two to a row) and put their member list beside the numbers
-     instead of under them, so the bucket row stays short. */
+  /* Combined buckets run two to a row; under the bar, their member list splits into two
+     columns so the wider card doesn't get taller. */
   .grid.bucket-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); }
-  /* (selectors carry .grid.cap-grid so they outrank the stacked bucket layout above) */
-  .grid.cap-grid.bucket-grid .grp-card { display:grid; grid-template-columns:auto minmax(0, 1fr);
-                                         grid-template-rows:auto auto 1fr auto; column-gap:22px; }
-  .grid.cap-grid.bucket-grid .grp-card > h3 { grid-column:1 / -1; grid-row:1; }
-  .grid.cap-grid.bucket-grid .grp-card > .stats { grid-column:1; grid-row:2; }
-  .grid.cap-grid.bucket-grid .grp-card > .cap-bar { grid-column:1; grid-row:3; align-self:start; margin-top:18px; }
-  /* Members in a column to the right of the numbers. */
-  .grid.cap-grid.bucket-grid .grp-card > .grp-members {
-    grid-column:2; grid-row:2 / span 2; align-self:start; margin-top:0; padding:0 0 0 16px;
-    border-top:0; border-left:1px solid var(--border); }
-  .grid.cap-grid.bucket-grid .grp-card > .go { grid-column:1 / -1; grid-row:4; }
+  .grid.cap-grid.bucket-grid .grp-card > .grp-members { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr));
+                                                         column-gap:24px; align-content:start; }
   .grid.cap-grid.bucket-grid .grp-row .grp-name { white-space:normal; }   /* wrap long names, don't cut them */
   @media (max-width:1100px) {
     .grid.bucket-grid { grid-template-columns:minmax(0, 1fr); }
-  }
-  @media (max-width:900px) {
-    .grid.cap-grid.bucket-grid .grp-card { display:flex; }
-    .grid.cap-grid.bucket-grid .grp-card > .grp-members { margin-top:16px; border-left:0; padding:6px 0 0;
-                                                          border-top:1px solid var(--border); }
   }
   .grid.cap-grid:not(.plan-out), .grid[data-drop="sort"] { align-items:stretch; }
   .grid.cap-grid.plan-out { align-items:start; }
