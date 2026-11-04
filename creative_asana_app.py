@@ -57,6 +57,8 @@ PROJECTS = [
     {"gid": "1219066223453162", "name": "The Recreational Group: Thatch", "kind": "Hourly"},
     {"gid": "1219254406444525", "name": "Slimothy the Slug", "kind": "Hourly"},
     {"gid": "1219099033687412", "name": "Transformed Testimony", "kind": "Hourly"},
+    {"gid": "1220217758251082", "name": "CMD: POC"},
+    {"gid": "1220217758251087", "name": "CMD: Features"},
 ]
 
 # Budget groups: several projects that share ONE combined monthly capacity.
@@ -73,6 +75,8 @@ GROUPS = [
         "1214228966572531",   # CMD: Pathologic
         "1214228966572526",   # CMD: Products
         "1216154609521581",   # NuNu
+        "1220217758251082",   # CMD: POC
+        "1220217758251087",   # CMD: Features
     ]},
     {"name": "Cohen's + Camellia Fest", "cap": 40, "gids": [
         "1214228966572546",   # Cohen's Retreat MSA
