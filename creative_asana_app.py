@@ -897,6 +897,29 @@ def assignee_project_tasks(d, name):
     return rows
 
 
+def carve_splits(d):
+    """[(carve-out name, its tasks)] for the name-matched CARVE_OUTS on project detail `d`, using
+    MSA Project Capacity's rule (carve_out_hits: a top-level task whose name contains `match`,
+    subtasks included). A task claimed by one carve-out isn't claimed again; whole-board
+    carve-outs (empty match) are the board itself and aren't split out."""
+    out, taken = [], set()
+    for c in CARVE_OUTS:
+        if c["source"] != d["gid"] or not c["match"]:
+            continue
+        hits = [t for t in carve_out_hits(c, d) if id(t) not in taken]
+        taken.update(id(t) for t in hits)
+        if hits:
+            out.append((c["name"], hits))
+    return out
+
+
+def breakdown_entry(label, e, a, tasks, board):
+    # `project` is what Team Capacity shows (a carve-out's own name, or the board); `board` is
+    # the Asana project it lives on, which per-project views (Bar Chart · Estimated) group by.
+    return {"project": label, "board": board, "estimated": round(e, 2), "actual": round(a, 2),
+            "remaining": round(e - a, 2), "tasks": tasks}
+
+
 def get_assignee_load(refresh=False):
     """Remaining hours (estimated - actual) per assignee across ALL projects, vs. the cap.
 
@@ -909,16 +932,34 @@ def get_assignee_load(refresh=False):
     details = list(PROJECT_POOL.map(lambda p: get_detail(p["gid"], refresh=refresh), projects))
     est, act, counts, breakdown = {}, {}, {}, {}
     for d in details:
+        splits = carve_splits(d)
+        claimed = {id(t) for _, ts in splits for t in ts}
         for name, e, a, cnt in zip(d["labels"], d["hours"], d["actual_hours"], d["counts"]):
             est[name] = est.get(name, 0) + e
             act[name] = act.get(name, 0) + a
             counts[name] = counts.get(name, 0) + cnt
-            if e or a:
-                breakdown.setdefault(name, []).append({
-                    "project": d["name"], "estimated": round(e, 2),
-                    "actual": round(a, 2), "remaining": round(e - a, 2),
-                    "tasks": assignee_project_tasks(d, name),
-                })
+            if not (e or a):
+                continue
+            # A carve-out (e.g. Support Tickets, Update Tuesday) is its own entry, apart from the
+            # board it lives on — as on MSA Project Capacity. Its share is what its task rows add
+            # up to; the board keeps the rest, so the person's totals are unchanged.
+            rows = breakdown.setdefault(name, [])
+            ce = ca = 0.0
+            for label, ts in splits:
+                trows = assignee_project_tasks({"tasks": ts}, name)
+                if not trows:
+                    continue
+                te = sum(r["estimated"] for r in trows)
+                ta = sum(r["actual"] for r in trows)
+                ce += te
+                ca += ta
+                rows.append(breakdown_entry(label, te, ta, trows, d["name"]))
+            rest = [t for t in d["tasks"] if id(t) not in claimed]
+            if splits and not assignee_project_tasks({"tasks": rest}, name) and abs(e - ce) < 0.005 \
+                    and abs(a - ca) < 0.005:
+                continue   # everything this person has on the board sits in its carve-outs
+            rows.append(breakdown_entry(d["name"], e - ce, a - ca,
+                                        assignee_project_tasks({"tasks": rest}, name), d["name"]))
     # Only the named team members (sorted by remaining), with Unassigned pinned far right.
     ordered = sorted((n for n in TEAM_MEMBERS if n in est),
                      key=lambda n: est[n] - act[n], reverse=True)
@@ -1080,11 +1121,21 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
     # On an unbillable board, only a carve-out's tasks (and their subtasks) are billable —
     # unless that carve-out is itself marked "billable": False.
     carved = set()
+    # {task/subtask gid: carve-out name} for every name-matched carve-out on this board, so an
+    # entry can say which carve-out it belongs to (Team Capacity · Logged shows e.g. Support
+    # Tickets as its own slice, apart from the rest of Internal IIT Backlog). A whole-board
+    # carve-out (empty match) IS the board, so it isn't tagged.
+    carve_of = {}
     for c in CARVE_OUTS:
-        if c["source"] == gid and c.get("billable", True):
-            for t in carve_out_hits(c, tree):
-                carved.add(t["gid"])
-                carved.update(s["gid"] for s in tree["subs"].get(t["gid"], []))
+        if c["source"] != gid:
+            continue
+        for t in carve_out_hits(c, tree):
+            items = [t["gid"]] + [s["gid"] for s in tree["subs"].get(t["gid"], [])]
+            if c.get("billable", True):
+                carved.update(items)
+            if c["match"]:
+                for g in items:
+                    carve_of.setdefault(g, c["name"])
     unbillable = gid in UNBILLABLE_GIDS
 
     # Collect entries, deduping by entry gid as a final guard against any double-pull.
@@ -1106,6 +1157,7 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
                 # Every logged entry counts the same, regardless of Asana's billable flag.
                 "minutes": e.get("duration_minutes") or 0,
                 "billable": not unbillable or tgid in carved,
+                "carve": carve_of.get(tgid),
             })
 
     # Per person: total minutes logged. All logged time counts toward project budgets.
@@ -1128,7 +1180,7 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
         "nentries": len(entries),
         "entries": [
             {"task": e["task"], "by": e["by"], "date": e["date"],
-             "hours": round(e["minutes"] / 60, 2), "billable": e["billable"]}
+             "hours": round(e["minutes"] / 60, 2), "billable": e["billable"], "carve": e["carve"]}
             for e in entries
         ],
         "updated": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"),
@@ -3202,6 +3254,10 @@ async function renderDashboard() {
   let loadError = null;      // the last load's failure, if any — shown instead of the tab
   let personStatsCache = {};   // Actual Hours per-person totals, keyed by 'start:end'
   let projPersonCache = {};    // per-project person split { gid: { person: hours } }, keyed by 'start:end'
+  // Team Capacity · Logged's slices { label: { person: hours } }, keyed by 'start:end': one per
+  // project, except a carve-out's time (e.g. Support Tickets) is its own slice, apart from the
+  // board it lives on. TEAM_CAPACITY_EXCLUDE projects are left out.
+  let teamSliceCache = {};
   let itemStatsCache = {};     // Actual Hours per-item (task) totals, keyed by 'start:end'
   let dailyStatsCache = {};    // Actual Hours per-person/per-day task rows, keyed by 'start:end'
   let personLoading = {};      // in-flight guard so the chart + summary don't double-fetch
@@ -3284,7 +3340,9 @@ async function renderDashboard() {
       if (estHideUnassigned && person === 'Unassigned') return;
       (projs || []).forEach(p => (p.tasks || []).forEach(t => {
         if (!statusOn(t.status || NO_STATUS)) return;
-        const a = agg[p.project] || (agg[p.project] = { hours: 0, ntasks: 0, persons: {} });
+        // Per board: a carve-out's entry (e.g. Support Tickets) folds back into its project here.
+        const key = p.board || p.project;
+        const a = agg[key] || (agg[key] = { hours: 0, ntasks: 0, persons: {} });
         // Remaining work on this task: what was estimated, less the time already tracked
         // against it. An over-run task contributes a negative amount, as on Team Capacity.
         const rem = (t.estimated || 0) - (t.actual || 0);
@@ -3621,7 +3679,7 @@ async function renderDashboard() {
     if (key !== dateStart + ':' + dateEnd) return;   // range changed while loading
     const agg = {}, unbill = {}, byGid = {}, items = {}, daily = {};
     // The same per-person totals minus TEAM_CAPACITY_EXCLUDE projects, for Team Capacity · Logged.
-    const teamAgg = {}, teamUnbill = {};
+    const teamAgg = {}, teamUnbill = {}, teamSlices = {};
     gids.forEach((g, idx) => {
       const d = details[idx], pm = byGid[g] = {};
       const forTeam = !teamCapacityExcluded(g, d.name || (loggedData.find(w => w.gid === g) || {}).name);
@@ -3639,8 +3697,13 @@ async function renderDashboard() {
           unbill[person] = (unbill[person] || 0) + e.hours;
           if (forTeam) teamUnbill[person] = (teamUnbill[person] || 0) + e.hours;
         }
+        // Team Capacity slice: the carve-out this entry belongs to (e.carve), else its board.
+        const slice = e.carve || d.name || g;
+        if (forTeam) { const sm = teamSlices[slice] || (teamSlices[slice] = {}); sm[person] = (sm[person] || 0) + e.hours; }
         const ikey = (d.name || '') + ' | ' + e.task + ' | ' + person;
-        const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', person: person, hours: 0, entries: 0 });
+        // `slice` lets Team Capacity's drill-in file the task under its carve-out; the Task List
+        // keeps grouping by `project` (the board).
+        const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', slice, person: person, hours: 0, entries: 0 });
         it.hours += e.hours;
         it.entries += 1;
         // Same rollup again, but keyed by person + day + task, so the Daily Log can show
@@ -3653,6 +3716,7 @@ async function renderDashboard() {
       });
     });
     projPersonCache[key] = byGid;
+    teamSliceCache[key] = teamSlices;
     personStatsCache[key] = Object.keys(agg)
       // `unbillable` is the share of `hours` logged to unbillable work (UNBILLABLE_GIDS).
       // `teamHours` / `teamUnbillable` are the same without TEAM_CAPACITY_EXCLUDE projects —
@@ -4108,9 +4172,9 @@ async function renderDashboard() {
     });
     // One donut per person under the bars: which projects they logged their hours against.
     const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
-    // Per-project split, minus TEAM_CAPACITY_EXCLUDE projects (as the bars above).
-    const pc = Object.fromEntries(Object.entries(projPersonCache[key] || {})
-      .filter(([gid]) => !teamCapacityExcluded(gid, nameOf[gid])));
+    // Per-slice split (a project, or a carve-out such as Support Tickets on its own), minus
+    // TEAM_CAPACITY_EXCLUDE projects — keyed by label, so nameOf[k] || k below is the label.
+    const pc = teamSliceCache[key] || {};
     // Exactly what the chart and donuts show: a total row per person, then their projects.
     document.getElementById('team-export').onclick = () => {
       const out = [];
@@ -4150,15 +4214,16 @@ async function renderDashboard() {
     destroyCharts();
     const key = dateStart + ':' + dateEnd;
     const nameOf = Object.fromEntries((loggedData || []).map(w => [w.gid, w.name]));
-    // Opened from Team Capacity, so TEAM_CAPACITY_EXCLUDE projects stay out here too.
-    const pc = Object.fromEntries(Object.entries(projPersonCache[key] || {})
-      .filter(([gid]) => !teamCapacityExcluded(gid, nameOf[gid])));
+    // Opened from Team Capacity, so the same slices (carve-outs apart from their board) and the
+    // same TEAM_CAPACITY_EXCLUDE filter apply here too.
+    const pc = teamSliceCache[key] || {};
     // Every task this person logged time to in the range, keyed by project — the same
     // per-item rollup the Items tab uses, so the numbers agree.
     const tasksByProject = {};
     (itemStatsCache[key] || []).forEach(it => {
       if (it.person !== person || !(it.hours > 0)) return;
-      (tasksByProject[it.project] || (tasksByProject[it.project] = [])).push(it);
+      const k = it.slice || it.project;   // file carve-out tasks under the carve-out's row
+      (tasksByProject[k] || (tasksByProject[k] = [])).push(it);
     });
     Object.values(tasksByProject).forEach(list =>
       list.sort((a, b) => b.hours - a.hours || a.task.localeCompare(b.task)));
@@ -4794,7 +4859,7 @@ async function renderDashboard() {
   // Loads the selected range's "Actual Hours" widgets (used on its own when the range changes).
   async function loadLogged(refresh) {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
-    personStatsCache = {}; projPersonCache = {}; itemStatsCache = {}; dailyStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
+    personStatsCache = {}; projPersonCache = {}; teamSliceCache = {}; itemStatsCache = {}; dailyStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
     try {
       const url = `/api/logged?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await getJson(url);

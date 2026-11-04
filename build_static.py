@@ -407,6 +407,19 @@ function assigneeProjectTasks(d, name){
   }
   return rows;
 }
+// [[carve-out name, its tasks]] for the name-matched CARVE_OUTS on project detail d — MSA Project
+// Capacity's rule (carveOutHits, subtasks included); a task is claimed once; whole-board
+// carve-outs aren't split. Mirrors carve_splits.
+function carveSplits(d){
+  const out = [], taken = new Set();
+  for (const c of CARVE_OUTS){
+    if (c.source !== d.gid || !c.match) continue;
+    const hits = carveOutHits(c, d).filter(t => !taken.has(t));
+    hits.forEach(t => taken.add(t));
+    if (hits.length) out.push([c.name, hits]);
+  }
+  return out;
+}
 async function getAssigneeLoad(refresh){
   await syncPortfolio(false);
   const excl = new Set(TEAM_CAPACITY_EXCLUDE);
@@ -414,10 +427,28 @@ async function getAssigneeLoad(refresh){
   const details = await mapAll(projects, p => getDetail(p.gid, refresh));
   const est = {}, act = {}, counts = {}, breakdown = {};
   for (const d of details){
+    const splits = carveSplits(d), claimed = new Set(splits.flatMap(([, ts]) => ts));
+    const rest = d.tasks.filter(t => !claimed.has(t));
     d.labels.forEach((name, i) => {
       const e = d.hours[i], aa = d.actual_hours[i], cnt = d.counts[i];
       est[name] = (est[name] || 0) + e; act[name] = (act[name] || 0) + aa; counts[name] = (counts[name] || 0) + cnt;
-      if (e || aa) (breakdown[name] = breakdown[name] || []).push({ project: d.name, estimated: round2(e), actual: round2(aa), remaining: round2(e - aa), tasks: assigneeProjectTasks(d, name) });
+      if (!(e || aa)) return;
+      // A carve-out (Support Tickets, Update Tuesday) is its own entry apart from its board, as
+      // on MSA Project Capacity; the board keeps the rest, so totals are unchanged. Mirrors
+      // get_assignee_load.
+      const rows = (breakdown[name] = breakdown[name] || []);
+      const entry = (label, ee, a, tasks) => ({ project: label, board: d.name, estimated: round2(ee), actual: round2(a), remaining: round2(ee - a), tasks });
+      let ce = 0, ca = 0;
+      for (const [label, ts] of splits){
+        const trows = assigneeProjectTasks({ tasks: ts }, name);
+        if (!trows.length) continue;
+        const te = sum(trows.map(r => r.estimated)), ta = sum(trows.map(r => r.actual));
+        ce += te; ca += ta;
+        rows.push(entry(label, te, ta, trows));
+      }
+      const restRows = assigneeProjectTasks({ tasks: rest }, name);
+      if (splits.length && !restRows.length && Math.abs(e - ce) < 0.005 && Math.abs(aa - ca) < 0.005) return;
+      rows.push(entry(d.name, e - ce, aa - ca, restRows));
     });
   }
   const ordered = TEAM_MEMBERS.filter(n => n in est).sort((x, y) => (est[y] - act[y]) - (est[x] - act[x]));
@@ -546,10 +577,15 @@ async function loggedDetail(gid, start, end, refresh){
   // On an unbillable board, only a carve-out's tasks (and their subtasks) are billable —
   // unless that carve-out is itself marked billable: false.
   const carved = new Set();
-  for (const c of CARVE_OUTS.filter(c => c.source === gid && c.billable !== false))
+  // { task/subtask gid: carve-out name } for name-matched carve-outs on this board, so an entry
+  // says which carve-out it belongs to (Team Capacity · Logged slices on it). A whole-board
+  // carve-out (empty match) is the board itself, so it isn't tagged. Mirrors logged_detail.
+  const carveOf = {};
+  for (const c of CARVE_OUTS.filter(c => c.source === gid))
     for (const t of carveOutHits(c, tree)){
-      carved.add(t.gid);
-      for (const s of tree.subs[t.gid] || []) carved.add(s.gid);
+      const items = [t.gid, ...(tree.subs[t.gid] || []).map(s => s.gid)];
+      if (c.billable !== false) items.forEach(g => carved.add(g));
+      if (c.match) items.forEach(g => { if (!(g in carveOf)) carveOf[g] = c.name; });
     }
   const unbillable = UNBILLABLE_GIDS.has(gid);
   const seen = new Set(), entries = [];
@@ -560,7 +596,7 @@ async function loggedDetail(gid, start, end, refresh){
       if (e.gid && seen.has(e.gid)) continue;
       if (e.gid) seen.add(e.gid);
       entries.push({ task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
-        minutes: e.duration_minutes || 0, billable: !unbillable || carved.has(g) });
+        minutes: e.duration_minutes || 0, billable: !unbillable || carved.has(g), carve: carveOf[g] || null });
     }
   const totals = {}, counts = {};
   for (const e of entries){
@@ -574,7 +610,7 @@ async function loggedDetail(gid, start, end, refresh){
     total_hours: round2(sum(Object.values(totals)) / 60),
     completed: Object.keys(completedDates).length,
     nentries: entries.length,
-    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable })), updated: nowStr() };
+    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable, carve: e.carve })), updated: nowStr() };
 }
 function loggedSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], kind: PROJECT_KINDS[d.gid], archived: ARCHIVED_NOW.has(d.gid), updated: d.updated }; }
 

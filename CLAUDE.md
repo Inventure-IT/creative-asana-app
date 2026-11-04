@@ -64,7 +64,13 @@ duplicate a project list or a team roster anywhere else.
 - `CARVE_OUTS` cut a budget out of another board by task name (e.g. Update Tuesday from
   Internal IIT Backlog): capacity = the matching open tasks' estimated hours, usage = hours
   logged to them and their subtasks. They add a card to MSA Project Capacity (and count in its
-  summary bar) via `/api/carveouts`; the source project still reports the tasks everywhere else.
+  summary bar) via `/api/carveouts`; the source project still reports the tasks everywhere else
+  — except **both Team Capacity views**, which show a name-matched carve-out as its own slice,
+  using the same `carve_out_hits` rule. Logged: `logged_detail` tags each entry `carve`, and
+  `loadPersonStats` builds `teamSliceCache` from it. Estimated: `carve_splits` /
+  `carveSplits` split `get_assignee_load`'s breakdown, the board keeping the rest, with each
+  entry carrying `board` so Bar Chart · Estimated still groups per project. Whole-board
+  carve-outs (empty match) aren't split.
 - `UNBILLABLE_GIDS` marks projects whose logged time is unbillable; a carve-out's tasks on
   such a board stay billable. Each logged entry carries `billable`, and Team Capacity · Logged
   stacks billable (solid) under unbillable (faded) per person.
