@@ -163,6 +163,11 @@ EST_FIELD = "Estimated time"             # stored in minutes
 EXCLUDE_SECTIONS = {"completed"}         # status columns excluded from hour totals (case-insensitive)
 DEFAULT_START = "2026-06-01"             # default date range (inclusive) for the "Hours logged" view
 DEFAULT_END = "2026-06-30"               #   entries with start <= entered_on <= end are counted
+# A load asks Asana only for open tasks plus those completed or modified within this many days
+# before the selected range starts (see fetch_tasks). Old finished work is never read unless an
+# older range asks for it. The slack covers time logged to a SUBTASK of an already-finished
+# task: that bumps the subtask's modified_at but not always the parent's.
+HISTORY_SLACK_DAYS = 30
 ASSIGNEE_HOURS_CAP = 128                 # estimated hours each assignee is expected to fill (all projects)
 # Team Capacity chart shows only these people (sorted by remaining), with Unassigned pinned far right.
 TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roach"]
@@ -313,8 +318,8 @@ _ASANA_HOST = urllib.parse.urlsplit(API).netloc
 # free), not connection count — so pace every call through a token bucket just under it rather
 # than letting 24 threads sprint into a 429 storm. A 429 halves the rate, so a free-tier token
 # settles down instead of thrashing.
-_RATE = [20.0]                    # requests/second = 1200/min
-_BUCKET = [20.0, time.time()]     # [tokens, last refill]
+_RATE = [24.0]                    # requests/second = 1440/min, just under the 1500/min paid limit
+_BUCKET = [24.0, time.time()]     # [tokens, last refill]
 _BUCKET_LOCK = threading.Lock()
 
 
@@ -565,19 +570,55 @@ def api_batch(paths):
 # One field set for both halves of the app. `num_subtasks` lets fetch_tree skip the subtask
 # call for a leaf task (most tasks are leaves), and `completed_at` is what the logged-hours
 # path needs — asking for it here means that path no longer re-fetches the same lists.
-TASK_FIELDS = ("name,assignee.name,completed,completed_at,actual_time_minutes,num_subtasks,"
+# `modified_at` gates the time-entry reads: logging time always bumps the item's own modified_at,
+# so an item untouched since a range started has no entries in that range (see is_touched).
+TASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,num_subtasks,"
                "custom_fields.name,custom_fields.number_value,"
                "memberships.section.name,memberships.project.gid")
 # A subtask carries its own memberships, so it gets its own status column when it has been
 # added to the project — never inherit the parent's section for it.
-SUBTASK_FIELDS = ("name,assignee.name,completed,completed_at,actual_time_minutes,"
+SUBTASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,"
                   "custom_fields.name,custom_fields.number_value,"
                   "memberships.section.name,memberships.project.gid")
 
 
-def fetch_tasks(gid):
-    """Return all tasks for a project (name + assignee + completed + estimated/actual time + section)."""
-    return api_pages(f"/projects/{gid}/tasks?opt_fields={TASK_FIELDS}&limit=100")
+def tree_since(start):
+    """The task-list cutoff for a range starting `start`: HISTORY_SLACK_DAYS before it."""
+    return (date.fromisoformat(start) - timedelta(days=HISTORY_SLACK_DAYS)).isoformat()
+
+
+def default_since():
+    """The cutoff for the page's default range (this month) — what the estimated side loads with."""
+    return tree_since(date.today().replace(day=1).isoformat())
+
+
+def touched_cutoff(start):
+    """Items whose modified_at is before this can't have time entries dated in a range starting
+    `start`: logging time bumps the item's own modified_at (verified on live data). Whether
+    deleting or re-dating an entry does is NOT verified — deleting / editing an entry dated in the
+    range is still caught (creating it touched the item), but re-dating an older entry INTO the
+    range relies on it. A day of slack covers modified_at being UTC while entered_on is the
+    logger's local date."""
+    return (date.fromisoformat(start) - timedelta(days=1)).isoformat()
+
+
+def is_touched(item, cutoff):
+    return (item.get("modified_at") or "9999") >= cutoff   # unknown -> read it, to be safe
+
+
+def fetch_tasks(gid, since):
+    """A project's tasks that are open, or completed / modified on or after `since` (YYYY-MM-DD).
+
+    Two filtered reads instead of the whole history: most of a board is long-finished work that
+    no view needs. completed_since keeps every open task (the estimated side) and recent
+    completions; modified_since adds older finished tasks that were touched since — e.g. time
+    logged after the task was checked off, which bumps modified_at. Run side by side."""
+    q = f"opt_fields={TASK_FIELDS}&limit=100"
+    ts = f"{since}T00:00:00Z"
+    touched = LEAF_POOL.submit(api_pages, f"/tasks?project={gid}&modified_since={ts}&{q}")
+    tasks = api_pages(f"/projects/{gid}/tasks?completed_since={ts}&{q}")
+    have = {t["gid"] for t in tasks}
+    return tasks + [t for t in touched.result() if t["gid"] not in have]
 
 
 def subtasks_path(task_gid):
@@ -646,8 +687,14 @@ def _tree_lock(gid):
         return lk
 
 
-def fetch_tree(gid, refresh=False):
-    """Every task and subtask of one project, fetched once and shared by both halves of the app.
+def fetch_tree(gid, refresh=False, since=None):
+    """A project's tasks (see fetch_tasks) and their subtasks, fetched once and shared by both
+    halves of the app.
+
+    `since` is the history the caller needs (tree_since of its range start). None = any cached
+    tree will do — the estimated side only needs open tasks — fetching with default_since() if
+    nothing is cached. A cached tree serves any caller needing no deeper history; an older range
+    fetches a deeper one, reusing the subtask lists already read for parents it knows.
 
     The estimated and logged-hours paths need the same two lists; they used to fetch them
     separately, so every project's tasks were pulled twice and every parent's subtasks twice.
@@ -661,7 +708,8 @@ def fetch_tree(gid, refresh=False):
     def usable():
         with CACHE_LOCK:
             e = CACHE["tree"].get(gid)
-        if e and (not refresh or time.time() - e["at"] < REFRESH_SHARE_WINDOW):
+        if e and (since is None or e["since"] <= since) \
+                and (not refresh or time.time() - e["at"] < REFRESH_SHARE_WINDOW):
             return e
         return None
 
@@ -672,11 +720,16 @@ def fetch_tree(gid, refresh=False):
         hit = usable()          # another thread may have fetched it while we waited
         if hit:
             return hit
-        tasks = fetch_tasks(gid)
+        want = since or default_since()
+        with CACHE_LOCK:
+            prev = None if refresh else CACHE["tree"].get(gid)
+        known = prev["subs"] if prev else {}
+        tasks = fetch_tasks(gid, want)
         parents = [t["gid"] for t in tasks if (t.get("num_subtasks") or 0) > 0]
-        by_path = api_batch(subtasks_path(g) for g in parents)
-        subs = {g: by_path[subtasks_path(g)] for g in parents}
-        entry = {"tasks": tasks, "subs": subs, "at": time.time()}
+        need = [g for g in parents if g not in known]
+        by_path = api_batch(subtasks_path(g) for g in need)
+        subs = {g: known[g] if g in known else by_path[subtasks_path(g)] for g in parents}
+        entry = {"tasks": tasks, "subs": subs, "at": time.time(), "since": want}
         with CACHE_LOCK:
             CACHE["tree"][gid] = entry
         return entry
@@ -751,6 +804,7 @@ def build_task(t, gid, children):
         if not done:
             sub_min += m
         subs.append({
+            "gid": s["gid"],
             "name": s.get("name", "(untitled)"),
             "assignee": (s.get("assignee") or {}).get("name") or "Unassigned",
             "hours": round(m / 60, 2),
@@ -876,7 +930,7 @@ def assignee_project_tasks(d, name):
     for t in d["tasks"]:
         if t["assignee"] == name:
             rows.append({
-                "name": t["name"], "type": "task", "status": t["section"],
+                "gid": t["gid"], "name": t["name"], "type": "task", "status": t["section"],
                 "estimated": t["hours"], "actual": t["actual"],
                 "remaining": round(t["hours"] - t["actual"] - sub_burn(t, name), 2),
                 "context": "", "done": False,   # completed parents never reach here
@@ -884,7 +938,7 @@ def assignee_project_tasks(d, name):
         for s in t["subtasks"]:
             if s["assignee"] == name:
                 rows.append({
-                    "name": s["name"], "type": "subtask", "status": s["section"],
+                    "gid": s["gid"], "name": s["name"], "type": "subtask", "status": s["section"],
                     "estimated": s["hours"], "actual": s["actual"],
                     # zero when it has no estimate of its own AND the parent row above is
                     # this person's, i.e. its hours were burned down against that estimate
@@ -1094,8 +1148,9 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
     per-item time-entry lookups — the task and subtask lists come from the estimated side's
     fetch (or vice versa, whichever got there first).
     """
-    tree = fetch_tree(gid, refresh=refresh)
+    tree = fetch_tree(gid, refresh=refresh, since=tree_since(start))
     tasks = tree["tasks"]
+    touched = touched_cutoff(start)
 
     # Tasks/subtasks completed within the date range (by completed_at), deduped by gid.
     completed_dates = {}
@@ -1105,7 +1160,8 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
             if start <= day <= end:
                 completed_dates[item["gid"]] = day
 
-    # Only query time entries for items that actually have logged time.
+    # Only query time entries for items that have logged time AND were modified since the range
+    # began — an item untouched since then can't have entries in it (see is_touched).
     # Dedupe by task gid: a subtask added directly to the project would otherwise be
     # reached twice (project task list + parent's subtasks) and double-counted.
     # {gid: (name, tracked minutes)} — the minutes are what the entry cache validates against.
@@ -1113,7 +1169,7 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
     for item in list(tasks) + [s for subs in tree["subs"].values() for s in subs]:
         note_completed(item)
         minutes = item.get("actual_time_minutes") or 0
-        if minutes > 0:
+        if minutes > 0 and is_touched(item, touched):
             cand_by_gid[item["gid"]] = (item.get("name", "(untitled)"), minutes)
     # Only tasks whose tracked total moved are read from Asana; the rest come from cache.
     by_gid = entries_for_tasks({g: m for g, (_, m) in cand_by_gid.items()}, refresh=refresh,
@@ -1151,6 +1207,7 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
             if egid:
                 seen.add(egid)
             entries.append({
+                "tgid": tgid,   # the task/subtask the time was logged to (for its Asana link)
                 "task": name,
                 "by": (e.get("created_by") or {}).get("name") or "Unknown",
                 "date": entered,
@@ -1179,7 +1236,7 @@ def logged_detail(gid, start=DEFAULT_START, end=DEFAULT_END, refresh=False):
         "completed": len(completed_dates),
         "nentries": len(entries),
         "entries": [
-            {"task": e["task"], "by": e["by"], "date": e["date"],
+            {"tgid": e["tgid"], "task": e["task"], "by": e["by"], "date": e["date"],
              "hours": round(e["minutes"] / 60, 2), "billable": e["billable"], "carve": e["carve"]}
             for e in entries
         ],
@@ -1258,8 +1315,9 @@ def carve_out_summary(c, start, end, refresh=False):
     Asana calls of its own.
     """
     gid = c["source"]
-    tree = fetch_tree(gid, refresh=refresh)
+    tree = fetch_tree(gid, refresh=refresh, since=tree_since(start))
     hits = carve_out_hits(c, tree)
+    touched = touched_cutoff(start)
     done = lambda x: bool(x.get("completed")) or is_excluded(x, gid)
     subs_of = lambda t: tree["subs"].get(t["gid"], [])
 
@@ -1271,7 +1329,11 @@ def carve_out_summary(c, start, end, refresh=False):
         for s in subs_of(t):
             owner[s["gid"]] = t["gid"]
     minutes = {i["gid"]: i.get("actual_time_minutes") or 0 for t in hits for i in [t] + subs_of(t)}
-    by_gid = entries_for_tasks({g: m for g, m in minutes.items() if m > 0}, refresh=refresh)
+    # Entries are read only for items touched since the range began (is_touched); an untouched
+    # item has nothing in or after the range, so ALL its time is "before the range" (below).
+    read = {i["gid"] for t in hits for i in [t] + subs_of(t) if is_touched(i, touched)}
+    by_gid = entries_for_tasks({g: m for g, m in minutes.items() if m > 0 and g in read},
+                               refresh=refresh)
     # What each entry row names: the task, or "task › subtask" for time logged to a subtask.
     label = {}
     for t in hits:
@@ -1299,7 +1361,7 @@ def carve_out_summary(c, start, end, refresh=False):
             nentries += 1
             task_min[owner[item_gid]] = task_min.get(owner[item_gid], 0) + m
             people[by] = people.get(by, 0) + m
-            rows_out.append({"gid": egid, "date": entered, "by": by,
+            rows_out.append({"gid": egid, "tgid": item_gid, "date": entered, "by": by,
                              "task": label.get(item_gid, ""), "hours": round(m / 60, 2)})
     rows_out.sort(key=lambda r: (r["date"], r["by"]), reverse=True)
 
@@ -1319,6 +1381,8 @@ def carve_out_summary(c, start, end, refresh=False):
     est = sum(task_est.values())
     # Work logged to those items before the range already burned part of their estimate.
     prior_seen, prior_min = set(), 0
+    # An item whose entries weren't read logged everything before the range: its tracked total.
+    prior_min += sum(minutes.get(g, 0) for g in covered if g not in by_gid)
     for item_gid, rows in by_gid.items():
         if item_gid not in covered:
             continue
@@ -1337,6 +1401,7 @@ def carve_out_summary(c, start, end, refresh=False):
         if g not in task_est:
             continue
         tasks.append({
+            "gid": g,
             "name": t.get("name", "(untitled)"),
             "assignee": (t.get("assignee") or {}).get("name") or "Unassigned",
             "section": section_name(t, gid),
@@ -1516,6 +1581,14 @@ PAGE = r"""<!DOCTYPE html>
   .nav-item:hover { background:var(--panel2); color:var(--text); }
   .nav-item.active { background:var(--blue); color:#10141a; font-weight:600; }
   .nav-sec.act .nav-item.active { background:var(--green); }
+  /* Full-screen cover while the Refresh button's reload re-reads Asana (renderDashboard). */
+  .refresh-cover { position:fixed; inset:0; z-index:1000; background:var(--bg);
+                   display:flex; align-items:center; justify-content:center; }
+  /* iPhone-style issue count (Time Audit): red pill pinned to the item's right edge. */
+  .nav-item:has(.nav-badge) { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .nav-badge { min-width:20px; height:20px; padding:0 6px; border-radius:10px; background:var(--red);
+               color:var(--text); font-size:11px; font-weight:700; line-height:20px; text-align:center;
+               font-variant-numeric:tabular-nums; flex-shrink:0; }
   .content { flex:1; min-width:0; }
   .content .head { margin-bottom:4px; }
   .content h1 { font-size:20px; margin:0; }
@@ -1754,6 +1827,9 @@ PAGE = r"""<!DOCTYPE html>
   /* A time entry's own note keeps the line breaks the person typed. */
   table.tasks td.entry-note { white-space:pre-wrap; color:var(--muted); }
   table.tasks td.nowrap { white-space:nowrap; }
+  /* Task names link out to Asana; they read as text until hovered. */
+  a.tlink { color:inherit; text-decoration:none; }
+  a.tlink:hover { color:var(--blue); text-decoration:underline; }
   table.tasks tr.parent td { font-weight:600; }
   table.tasks tr.sub td { font-weight:400; color:var(--muted); }
   /* Daily Log: the date cell spans its day's rows and carries that day's total. A rule
@@ -2107,6 +2183,13 @@ async function getJson(url){
   return j;
 }
 function esc(s){ return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+// A task/subtask name that opens the task in Asana (new tab). Plain escaped text when there's no
+// gid; the gid is digits-only, so it is safe inside the href.
+function taskLink(gid, name){
+  const g = String(gid || '').replace(/\D/g, '');
+  return g ? `<a class="tlink" href="https://app.asana.com/0/0/${g}" target="_blank" rel="noopener" title="Open in Asana">${esc(name)}</a>`
+           : esc(name);
+}
 function h2(x){ return Number(x || 0).toFixed(2); }   // always two decimals: 40.00, 40.50, 40.75
 // One phrasing for every loading / empty / nothing-matches state on every tab.
 function note(text){ return `<p class="note">${esc(text)}</p>`; }
@@ -2416,6 +2499,13 @@ const teamCapacityExcluded = (gid, name) =>
 
 // Which dashboard tab is active; remembered across renders/drill-ins.
 let dashTab = 'team';   // Team Capacity is the default tab
+// Last Time Audit issue count, so a rebuilt sidebar (detail pages) keeps the nav badge.
+let auditBadgeCount = 0;
+function navBadge(k){
+  if (k !== 'audit' || !auditBadgeCount) return '';
+  return `<span class="nav-badge" title="${plural(auditBadgeCount, 'issue')} to review">` +
+         `${auditBadgeCount > 99 ? '99+' : auditBadgeCount}</span>`;
+}
 // Estimated-hours Bar Chart filters, remembered across renders/tab switches.
 let estStatusFilter = null;    // Set of enabled status columns; null = show all statuses
 let estHideUnassigned = false; // when true, drop the Unassigned assignee from the chart
@@ -2439,6 +2529,7 @@ let dailyFilterPerson = null;
 // Display name behind the PAT (/api/me), so a filter can default to "you". Stays null if the
 // lookup fails, which just means the filters open on everyone.
 let currentUser = null;
+let meKnown = false;   // /api/me has answered (or failed), so currentUser is final
 // Whether Daily Log has already applied its "you" default. Set once the tab first has data,
 // and by the dropdown, so a deliberate choice is never overwritten later in the session.
 let dailyFilterInit = false;
@@ -2542,6 +2633,8 @@ const TABS = {
     sub:'Every task worked on in the selected range, grouped by project.' },
   actualdaily: { label:'Daily Log', title:'Daily Log · Logged',
     sub:'Day by day, what each person logged their time to in the selected range.' },
+  audit: { label:'Time Audit', title:'Time Audit · Logged',
+    sub:'Open tasks and subtasks that have logged more time than was estimated (all time, not just this range), and time entries in the selected range that are not a multiple of 0.25 h.' },
   settings: { label:'Graph Colors', title:'Graph Colors',
     sub:'Pick a color for each person and each project — saved to your account, so it follows you to any browser. People color the stacked bars; projects color the Team Capacity rings.' },
   theme: { label:'Theme', title:'Theme',
@@ -2553,7 +2646,7 @@ const TABS = {
 // section's accent — 'est' = blue, 'act' = green, omitted for neutral (Settings).
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tone: 'est', tabs: ['team', 'estproj', 'estimated'] },
-  { title: 'Actual Hours', tone: 'act', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily'] },
+  { title: 'Actual Hours', tone: 'act', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily', 'audit'] },
   { title: 'Settings', tabs: ['settings', 'theme', 'holidays'] },
 ];
 
@@ -2565,7 +2658,7 @@ function sidebarHtml() {
       ${NAV_SECTIONS.map(sec =>
         `<div class="nav-sec${sec.tone ? ' ' + sec.tone : ''}">` +
           `<div class="nav-section">${sec.title}</div><div class="nav-group">` +
-          sec.tabs.map(k => `<a href="#" class="nav-item${k === dashTab ? ' active' : ''}" data-tab="${k}">${TABS[k].label}</a>`).join('') +
+          sec.tabs.map(k => `<a href="#" class="nav-item${k === dashTab ? ' active' : ''}" data-tab="${k}">${TABS[k].label}${navBadge(k)}</a>`).join('') +
         '</div></div>'
       ).join('')}
     </nav>`;
@@ -2745,7 +2838,26 @@ function showSignout(who){
   b.textContent = 'Sign out'; b.title = who ? ('Signed in as ' + who) : ''; b.onclick = doLogout; b.style.display = 'block';
 }
 function hideSignout(){ const b = document.getElementById('signout-fab'); if (b) b.style.display = 'none'; }
+// The last load's data, kept in this browser so the dashboard opens instantly on it while a
+// fresh load runs (renderDashboard). Per browser, never shared; cleared on sign-out.
+const SNAP_KEY = 'dashSnapshot.v1';
+const SNAP_MAX_AGE = 7 * 864e5;   // older than a week isn't worth showing, even briefly
+// A browser reload (F5, Ctrl+R, the toolbar button, or the Refresh button, which just reloads)
+// is a full refresh: renderDashboard re-reads Asana behind a cover. Read once per document and
+// consumed by the first dashboard render, so hash navigation back to it doesn't re-trigger it.
+let pageReloaded = (() => {
+  try { const n = performance.getEntriesByType('navigation')[0]; return !!n && n.type === 'reload'; }
+  catch (e) { return false; }
+})();
+function readSnapshot(){
+  try {
+    const s = JSON.parse(localStorage.getItem(SNAP_KEY) || 'null');
+    return s && s.v === 1 && Date.now() - s.at < SNAP_MAX_AGE ? s : null;
+  } catch (e) { return null; }
+}
+function dropSnapshot(){ try { localStorage.removeItem(SNAP_KEY); } catch (e) {} }
 function doLogout(){
+  dropSnapshot();
   if (window.__dropToken) window.__dropToken();
   if (plan.fb) plan.fb.A.signOut(plan.fb.auth);
   destroyCharts();
@@ -3230,6 +3342,19 @@ async function renderDashboard() {
   let teamSliceCache = {};
   let itemStatsCache = {};     // Actual Hours per-item (task) totals, keyed by 'start:end'
   let dailyStatsCache = {};    // Actual Hours per-person/per-day task rows, keyed by 'start:end'
+  // Time Audit: time entries whose length isn't a multiple of 15 minutes, keyed by 'start:end'.
+  let oddEntryCache = {};
+  // Time Audit: every active project's estimated detail (/api/project/<gid>, cached server-side,
+  // so no Asana calls). Range-independent; dropped on Refresh.
+  let auditDetails = null, auditLoading = false;
+  let auditUnestimated = false;   // also list over-runs on tasks that carry no estimate
+  let auditPerson = null;         // Assignee filter (null = everyone)
+  // Saved-snapshot bookkeeping (see saveSnapshot). freshEst / freshLogged turn true as each half
+  // of a live load lands; loggedGen bumps whenever loggedData is replaced, so a per-person load
+  // started on the old data can't overwrite the new.
+  let freshEst = false, freshLogged = false, loggedGen = 0;
+  let loading = false;      // a load is in flight (the header says so)
+  let savedAt = null;       // when the snapshot on screen was saved (null = live data)
   let personLoading = {};      // in-flight guard so the chart + summary don't double-fetch
   // A planning change (sign-in, a drag, someone else's move) redraws MSA Project Capacity from
   // the cached data — no Asana calls.
@@ -3634,20 +3759,23 @@ async function renderDashboard() {
   async function loadPersonStats(key) {
     if (personLoading[key] || personStatsCache[key]) return;   // already loading / loaded
     personLoading[key] = true;
+    const gen = loggedGen;   // fresh logged data landing mid-flight makes this result stale
     const gids = loggedData.filter(w => w.hours > 0).map(w => w.gid);
     let details;
     try {
       details = await Promise.all(gids.map(g =>
         fetch(`/api/logged/${g}?start=${dateStart}&end=${dateEnd}`).then(r => r.json())));
     } catch (e) {
+      if (gen !== loggedGen) return;
       const el = document.getElementById('person-loading');
       if (el) el.innerHTML = fmtErr(e);
       delete personLoading[key];
       return;
     }
+    if (gen !== loggedGen) return;
     delete personLoading[key];
     if (key !== dateStart + ':' + dateEnd) return;   // range changed while loading
-    const agg = {}, unbill = {}, byGid = {}, items = {}, daily = {};
+    const agg = {}, unbill = {}, byGid = {}, items = {}, daily = {}, odd = [];
     // The same per-person totals minus TEAM_CAPACITY_EXCLUDE projects, for Team Capacity · Logged.
     const teamAgg = {}, teamUnbill = {}, teamSlices = {};
     gids.forEach((g, idx) => {
@@ -3663,6 +3791,10 @@ async function renderDashboard() {
       // project + task + person so identically named tasks / multiple loggers stay separate.
       (d.entries || []).forEach(e => {
         const person = e.by || 'Unknown';
+        // Hours arrive rounded to 2 decimals, which still pins the whole minute exactly.
+        const minutes = Math.round(e.hours * 60);
+        if (minutes % 15) odd.push({ person, date: e.date || '', tgid: e.tgid, task: e.task,
+                                     project: d.name || '', hours: e.hours, minutes });
         if (e.billable === false) {
           unbill[person] = (unbill[person] || 0) + e.hours;
           if (forTeam) teamUnbill[person] = (teamUnbill[person] || 0) + e.hours;
@@ -3673,14 +3805,14 @@ async function renderDashboard() {
         const ikey = (d.name || '') + ' | ' + e.task + ' | ' + person;
         // `slice` lets Team Capacity's drill-in file the task under its carve-out; the Task List
         // keeps grouping by `project` (the board).
-        const it = items[ikey] || (items[ikey] = { task: e.task, project: d.name || '', slice, person: person, hours: 0, entries: 0 });
+        const it = items[ikey] || (items[ikey] = { tgid: e.tgid, task: e.task, project: d.name || '', slice, person: person, hours: 0, entries: 0 });
         it.hours += e.hours;
         it.entries += 1;
         // Same rollup again, but keyed by person + day + task, so the Daily Log can show
         // one row per task worked on that day and total each day's logged hours.
         const dkey = person + ' | ' + (e.date || '') + ' | ' + (d.name || '') + ' | ' + e.task;
         const dr = daily[dkey] || (daily[dkey] =
-          { person: person, date: e.date || '', task: e.task, project: d.name || '', hours: 0, entries: 0 });
+          { person: person, date: e.date || '', tgid: e.tgid, task: e.task, project: d.name || '', hours: 0, entries: 0 });
         dr.hours += e.hours;
         dr.entries += 1;
       });
@@ -3700,6 +3832,8 @@ async function renderDashboard() {
       .sort((a, b) => a.project.localeCompare(b.project)
         || b.hours - a.hours
         || a.task.localeCompare(b.task));
+    oddEntryCache[key] = odd.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)
+      || a.person.localeCompare(b.person) || a.task.localeCompare(b.task));   // newest first
     dailyStatsCache[key] = Object.values(daily)
       // Person (A→Z), then day (oldest first — the tab flips this when newest-first is on),
       // then heaviest task first within the day.
@@ -3712,6 +3846,9 @@ async function renderDashboard() {
     else if (dashTab === 'actualitems') renderActualItems();
     else if (dashTab === 'actualdaily') renderActualDaily();
     else if (dashTab === 'teamactual') renderTeamActual();
+    else if (dashTab === 'audit') renderAudit();
+    updateAuditBadge();
+    saveSnapshot();
   }
 
   // Actual Hours › Items: every task worked on in the selected range, with its logged
@@ -3761,7 +3898,7 @@ async function renderDashboard() {
       const list = byProject[proj];
       const pTot = list.reduce((a, it) => a + it.hours, 0);
       const body = list.map(it =>
-        `<tr><td>${esc(it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.hours)}</tr>`).join('');
+        `<tr><td>${taskLink(it.tgid, it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.hours)}</tr>`).join('');
       // Heading carries the project total, matching how the Daily Log heads its sections.
       // The heading carries the project total, so the table needs no total row.
       return `<h2 class="section-h${i ? '' : ' flush'}">${esc(proj)} · ${h2(pTot)} h</h2>
@@ -3775,6 +3912,138 @@ async function renderDashboard() {
     wireRangeSel();
     const sel = document.getElementById('item-assignee');
     if (sel) sel.onchange = () => { itemFilterPerson = sel.value || null; renderActualItems(); };
+  }
+
+  // Time Audit: fetch every active project's estimated detail (served from the server's cache,
+  // which /api/projects just filled), then re-render / refresh the nav badge.
+  // force: re-read even when details are held (fresh data replacing the saved snapshot's).
+  async function loadAudit(force) {
+    if (auditLoading || (auditDetails && !force) || !estData) return;
+    auditLoading = true;
+    const gids = estData.filter(w => !isArchived(w)).map(w => w.gid);
+    let details;
+    try {
+      details = await Promise.all(gids.map(g => getJson('/api/project/' + g)));
+    } catch (e) {
+      auditLoading = false;
+      if (dashTab === 'audit') { view.innerHTML = rangePicker() + fmtErr(e); wireRangeSel(); }
+      return;
+    }
+    auditLoading = false;
+    auditDetails = details;
+    updateAuditBadge();
+    saveSnapshot();
+    if (dashTab === 'audit') renderAudit();
+  }
+
+  // Open tasks / subtasks whose logged time exceeds their estimate, from the project details.
+  // A task's remaining is its estimate less its own time AND the time on its unestimated
+  // subtasks (that work is covered by the parent's estimate, as on Team Capacity). A subtask
+  // with an estimate of its own is its own budget; an unestimated one never shows by itself.
+  function auditOverruns() {
+    const rows = [];
+    (auditDetails || []).forEach(d => (d.tasks || []).forEach(t => {
+      const burn = (t.subtasks || []).filter(s => !s.hours).reduce((a, s) => a + s.actual, 0);
+      const act = r2(t.actual + burn), rem = r2(t.hours - act);
+      if (rem < 0 && (t.hours > 0 || auditUnestimated))
+        rows.push({ gid: t.gid, name: t.name, context: '', project: d.name, assignee: t.assignee,
+                    status: t.section, est: t.hours, act, rem });
+      (t.subtasks || []).forEach(s => {
+        const srem = r2(s.hours - s.actual);
+        if (s.hours > 0 && !s.done && srem < 0)
+          rows.push({ gid: s.gid, name: s.name, context: `subtask of "${t.name}"`, project: d.name,
+                      assignee: s.assignee, status: s.section, est: s.hours, act: s.actual, rem: srem });
+      });
+    }));
+    return rows.sort((a, b) => a.rem - b.rem || a.name.localeCompare(b.name));   // worst first
+  }
+
+  // iPhone-style count on the Time Audit nav item: every issue the tab lists (over-estimate
+  // items + off-quarter entries in the selected range), ignoring the Assignee filter. Hidden at
+  // zero, and until both halves have loaded so it never shows a partial count.
+  function updateAuditBadge() {
+    const odd = oddEntryCache[dateStart + ':' + dateEnd];
+    const loggedReady = loggedData && (odd || !loggedData.some(w => w.hours > 0));
+    auditBadgeCount = auditDetails && loggedReady ? auditOverruns().length + (odd || []).length : 0;
+    const a = document.querySelector('.nav-item[data-tab="audit"]');
+    if (!a) return;
+    const old = a.querySelector('.nav-badge');
+    if (old) old.remove();
+    a.insertAdjacentHTML('beforeend', navBadge('audit'));
+  }
+
+  // Actual Hours › Time Audit: two hygiene lists for the PM — work that has run past its
+  // estimate (needs re-estimating or a conversation), and time entries that aren't in
+  // quarter-hour increments (need correcting before billing).
+  function renderAudit() {
+    if (!estData || !loggedData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
+    const key = dateStart + ':' + dateEnd, odd = oddEntryCache[key];
+    const hasLogged = loggedData.some(w => w.hours > 0);
+    if (!auditDetails || (hasLogged && !odd)) {
+      view.innerHTML = rangePicker() + note(LOADING);
+      wireRangeSel();
+      loadAudit();
+      if (hasLogged) loadPersonStats(key);
+      return;
+    }
+    const allOver = auditOverruns(), allOdd = odd || [];
+    const people = [...new Set(allOver.map(r => r.assignee).concat(allOdd.map(r => r.person)))]
+                     .sort((a, b) => a.localeCompare(b));
+    if (auditPerson && !people.includes(auditPerson)) auditPerson = null;
+    const over = auditPerson ? allOver.filter(r => r.assignee === auditPerson) : allOver;
+    const offq = auditPerson ? allOdd.filter(r => r.person === auditPerson) : allOdd;
+    const overHours = r2(over.reduce((a, r) => a - r.rem, 0));
+    const offHours = r2(offq.reduce((a, r) => a + r.hours, 0));
+
+    const summary = summaryBar([
+      { n: over.length, l: 'Over estimate', neg: over.length > 0 },
+      { n: h2(overHours) + ' h', l: 'Logged past estimate', neg: overHours > 0 },
+      { n: offq.length, l: 'Off-quarter entries', neg: offq.length > 0 },
+      { n: h2(offHours) + ' h', l: 'In off-quarter entries' },
+    ]);
+    const picker = rangePicker(`<span class="tb-group"><span class="tb-label">Assignee</span>
+      <select id="audit-assignee">
+        <option value="">All assignees</option>
+        ${people.map(p => `<option value="${esc(p)}"${p === auditPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
+      </select></span>
+      <span class="tb-sep"></span>
+      <span class="tb-group"><span class="tb-label">Over estimate</span>
+      <label class="chk"><input type="checkbox" id="audit-unest" ${auditUnestimated ? 'checked' : ''}>Include unestimated tasks</label></span>
+      <span class="tb-sep"></span>${exportGroup('audit-csv')}`);
+
+    const who = auditPerson ? ` for ${auditPerson}` : '';
+    const overTable = over.length ? `<table class="tasks">
+        <thead><tr><th>Task</th><th>Project</th><th>Assignee</th><th>Status</th>
+          <th class="hours">Estimated</th><th class="hours">Logged</th><th class="hours">Remaining</th></tr></thead>
+        <tbody>${over.map(r => `<tr><td>${taskLink(r.gid, r.name)}${r.context ? ` <span class="muted">(${esc(r.context)})</span>` : ''}</td>
+          <td>${esc(r.project)}</td><td>${esc(r.assignee)}</td>
+          <td>${r.status ? esc(r.status) : `<span class="badge none">${NO_STATUS}</span>`}</td>
+          <td class="hours">${h2(r.est)} h</td><td class="hours">${h2(r.act)} h</td>
+          <td class="hours neg">${h2(r.rem)} h</td></tr>`).join('')}</tbody>
+      </table>` : note(`No open tasks are over their estimate${who}.`);
+    const offTable = !hasLogged ? note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`)
+      : offq.length ? `<table class="tasks">
+        <thead><tr><th>Date</th><th>Task</th><th>Project</th><th>Logged by</th>
+          <th class="hours">Minutes</th><th class="hours">Hours</th></tr></thead>
+        <tbody>${offq.map(r => `<tr><td>${esc(r.date)}</td><td>${taskLink(r.tgid, r.task)}</td>
+          <td>${esc(r.project)}</td><td>${esc(r.person)}</td>
+          <td class="hours">${r.minutes}</td><td class="hours">${h2(r.hours)} h</td></tr>`).join('')}</tbody>
+      </table>` : note(`Every time entry${who} in ${rangeLabel(dateStart, dateEnd)} is a multiple of 0.25 h.`);
+
+    view.innerHTML = summary + picker +
+      `<h2 class="section-h flush">Over estimate · ${plural(over.length, 'item')} · ${h2(overHours)} h over</h2>` + overTable +
+      `<h2 class="section-h">Not in 0.25 h increments · ${plural(offq.length, 'entry', 'entries')}</h2>` + offTable;
+    wireRangeSel();
+    updateAuditBadge();
+    const sel = document.getElementById('audit-assignee');
+    if (sel) sel.onchange = () => { auditPerson = sel.value || null; renderAudit(); };
+    const ue = document.getElementById('audit-unest');
+    if (ue) ue.onchange = () => { auditUnestimated = ue.checked; renderAudit(); };
+    const csv = document.getElementById('audit-csv');
+    if (csv) csv.onclick = () => downloadCsv(`time-audit_${dateStart}_${dateEnd}.csv`,
+      ['Issue', 'Task', 'Parent', 'Project', 'Person', 'Status', 'Date', 'Estimated', 'Logged', 'Remaining', 'Minutes'],
+      over.map(r => ['Over estimate', r.name, r.context, r.project, r.assignee, r.status, '', h2(r.est), h2(r.act), h2(r.rem), ''])
+        .concat(offq.map(r => ['Not quarter-hour', r.task, '', r.project, r.person, '', r.date, '', h2(r.hours), '', r.minutes])));
   }
 
   // Actual Hours › Daily Log: for each person, a day-by-day list of everything they logged
@@ -3798,7 +4067,8 @@ async function renderDashboard() {
     const people = [...new Set(allRows.map(r => r.person))].sort((a, b) => a.localeCompare(b));
     // First time this tab has data: open on whoever is signed in, so you land on your own log.
     // If the PAT owner logged nothing in this range (or /api/me failed), stay on all assignees.
-    if (!dailyFilterInit) {
+    // Waits for /api/me (meKnown): a render from the saved snapshot can come before it answers.
+    if (!dailyFilterInit && meKnown) {
       if (currentUser && people.includes(currentUser)) dailyFilterPerson = currentUser;
       dailyFilterInit = true;
     }
@@ -3846,7 +4116,7 @@ async function renderDashboard() {
           `<span class="day-tot">${h2(dTot)} h</span></td>`;
         return list.map((r, i) =>
           `<tr class="${i ? '' : 'day-start'}">${i ? '' : dayCell}` +
-          `<td>${esc(r.task)}</td><td>${esc(r.project)}</td>${hoursCells(r.hours)}</tr>`).join('');
+          `<td>${taskLink(r.tgid, r.task)}</td><td>${esc(r.project)}</td>${hoursCells(r.hours)}</tr>`).join('');
       }).join('');
       return `<h2 class="section-h${pi ? '' : ' flush'}">${esc(person)} · ${h2(pTot)} h</h2>
         <table class="tasks daylog">
@@ -3926,6 +4196,12 @@ async function renderDashboard() {
           : '') +
         '<span class="tb-sep"></span>' + exportGroup('team-export') +
       '</div>';
+    // What each person can still work this month: TEAM_DAILY_HOURS × the work days left after
+    // today (workdayProgress counts today as used, the same reading Team Capacity · Logged's
+    // pace line takes). Drawn as the amber line — remaining hours above it won't fit this month.
+    const [mStart, mEnd] = monthRange();
+    const wpm = workdayProgress(mStart, mEnd);
+    const leftCap = TEAM_DAILY_HOURS * wpm.left;
     // Headline stats: what the team still has on its plate versus what it can absorb.
     const totRem = d.hours.reduce((a, h) => a + h, 0);
     const headroom = r2(d.cap * d.labels.length - totRem);
@@ -3934,6 +4210,8 @@ async function renderDashboard() {
       { n: d.labels.length, l: 'People' },
       { n: h2(d.labels.length ? totRem / d.labels.length : 0) + ' h', l: 'Avg per person' },
       { n: h2(headroom) + ' h', l: headroom < 0 ? 'Over team capacity' : 'Team headroom', neg: headroom < 0 },
+      { n: wpm.left, l: 'Work days left' },
+      { n: h2(leftCap) + ' h', l: 'Workable per person' },
     ], 'est');
     view.innerHTML = summary + toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
     view.querySelectorAll('.team-status').forEach(box => box.onchange = () => {
@@ -3974,10 +4252,17 @@ async function renderDashboard() {
                        ticks: { callback: (v, i) => [d.labels[i], h2(d.hours[i]) + ' h'] } },
                   y: { min: 0, suggestedMax: Math.max(d.cap * 1.1, ...barHours, 1),
                        title: { display: true, text: 'Remaining hours' }, ticks: { callback: v => h2(v) } } },
-        plugins: { legend: { display: false }, capLine: { value: d.cap },
+        plugins: { legend: { display: false },
+          capLine: { value: d.cap, pace: leftCap,
+            paceLabel: `${h2(leftCap)} h workable · ${plural(wpm.left, 'work day')} left` },
           tooltip: { callbacks: {
             label: ctx => `Remaining: ${h2(d.hours[ctx.dataIndex])} h of ${h2(d.cap)} (${(d.hours[ctx.dataIndex] / d.cap * 100).toFixed(0)}%)`,
-            afterLabel: ctx => `Est ${h2(ctx.dataset._est[ctx.dataIndex])} − actual ${h2(ctx.dataset._act[ctx.dataIndex])} · ${plural(ctx.dataset._counts[ctx.dataIndex], 'item')}` } } } }
+            afterLabel: ctx => {
+              const h = d.hours[ctx.dataIndex];
+              return [`Est ${h2(ctx.dataset._est[ctx.dataIndex])} − actual ${h2(ctx.dataset._act[ctx.dataIndex])} · ${plural(ctx.dataset._counts[ctx.dataIndex], 'item')}`,
+                      `Workable this month ${h2(leftCap)} h · ` +
+                      (h > leftCap ? `${h2(h - leftCap)} h over` : `${h2(leftCap - h)} h free`)];
+            } } } } }
     });
     // One donut per assignee under the bars: which projects their remaining hours sit in.
     // Projects already fully burned down (remaining ≤ 0) drop out, so the rings only show
@@ -4024,7 +4309,7 @@ async function renderDashboard() {
           const cls = t.type === 'subtask' ? 'sub-name lvl2' : 'lvl1';
           // A done row is finished work whose hours already came off the parent's remaining;
           // it says so in the status cell instead of its (now moot) column.
-          return `<tr class="sub${t.done ? ' done' : ''}"><td class="${cls}">${esc(t.name)}${ctx}</td>` +
+          return `<tr class="sub${t.done ? ' done' : ''}"><td class="${cls}">${taskLink(t.gid, t.name)}${ctx}</td>` +
             `<td>${t.done ? '<span class="badge done">Completed</span>'
                           : t.status ? `<span class="badge">${esc(t.status)}</span>`
                                      : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
@@ -4218,7 +4503,7 @@ async function renderDashboard() {
       let out = `<tr class="parent"><td>${esc(r.project)}</td>${cell(r.hours)}` +
         `<td class="hours">${tasks.reduce((a, t) => a + (t.entries || 0), 0)}</td></tr>`;
       out += tasks.length
-        ? tasks.map(t => `<tr class="sub"><td class="sub-name lvl2">${esc(t.task)}</td>` +
+        ? tasks.map(t => `<tr class="sub"><td class="sub-name lvl2">${taskLink(t.tgid, t.task)}</td>` +
             `${cell(t.hours)}<td class="hours">${t.entries || 0}</td></tr>`).join('')
         : `<tr class="sub"><td class="sub-name lvl2" colspan="3">No task-level entries.</td></tr>`;
       return out;
@@ -4252,7 +4537,10 @@ async function renderDashboard() {
     else if (dashTab === 'team') u = teamData && teamData.updated;
     else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
     else u = loggedData && loggedData[0] && loggedData[0].updated;
-    el.textContent = u ? ('Updated ' + u) : '';
+    // While a load runs over saved data, say so — the numbers on screen may be a little old.
+    const fresh = ['team', 'estimated', 'estproj'].includes(dashTab) ? freshEst : freshLogged;
+    const pending = loading && savedAt && !fresh;
+    el.textContent = u ? ('Updated ' + u + (pending ? ' · checking Asana for changes…' : '')) : '';
   }
 
   // Shared capacity overrides (plan.caps) replace the configured caps on the loaded rows, so
@@ -4315,6 +4603,7 @@ async function renderDashboard() {
     if (teamData) teamData.cap = personTarget();   // live: follows holiday edits
     destroyCharts();   // leaving any chart tab
     estDrillGroup = null; actualDrillGroup = null;   // switching tabs collapses any drilled-in bucket
+    updateAuditBadge();   // e.g. clears while a newly picked range loads
     document.querySelectorAll('.nav-item').forEach(a =>
       a.classList.toggle('active', a.dataset.tab === dashTab));
     setUpdatedLabel();
@@ -4337,6 +4626,8 @@ async function renderDashboard() {
       renderActualItems();
     } else if (dashTab === 'actualdaily') {
       renderActualDaily();
+    } else if (dashTab === 'audit') {
+      renderAudit();
     } else if (dashTab === 'estimated') {
       if (!estData) view.innerHTML = loading;
       else {
@@ -4854,7 +5145,6 @@ async function renderDashboard() {
   // Loads the selected range's "Actual Hours" widgets (used on its own when the range changes).
   async function loadLogged(refresh) {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
-    personStatsCache = {}; projPersonCache = {}; teamSliceCache = {}; itemStatsCache = {}; dailyStatsCache = {}; personLoading = {};   // range/refresh changed — recompute per-person/per-item splits
     try {
       const url = `/api/logged?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
       const j = await getJson(url);
@@ -4863,10 +5153,17 @@ async function renderDashboard() {
       // are fetched after it rather than alongside — that way they cost no Asana calls.
       const c = await getJson(url.replace('/api/logged', '/api/carveouts'));
       if (s !== dateStart || e !== dateEnd) return;
-      loggedData = j; carveData = c;
+      // Swap in the fresh data and drop the per-person/per-item splits built from the old (the
+      // saved snapshot's, or the previous range's) only now, so they stay on screen until then.
+      loggedData = j; carveData = c; loggedGen++; freshLogged = true;
+      personStatsCache = {}; projPersonCache = {}; teamSliceCache = {}; itemStatsCache = {}; dailyStatsCache = {}; oddEntryCache = {}; personLoading = {};
     } catch (err) { loadError = err; view.innerHTML = fmtErr(err); return; }
+    // Time Audit nav badge: tally this range's time entries in the background, whatever tab is
+    // open. /api/logged/<gid> reads the entries /api/logged just cached — no Asana calls.
+    if (loggedData.some(w => w.hours > 0)) loadPersonStats(s + ':' + e);
+    updateAuditBadge();
     await mePromise;   // so Daily Log knows who "you" are before it picks its default assignee
-    if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual'].includes(dashTab)) renderTab();
+    if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual', 'audit'].includes(dashTab)) renderTab();
   }
 
   // Who owns the token, resolved once at startup and awaited before any render that could
@@ -4874,7 +5171,8 @@ async function renderDashboard() {
   // open on everyone — so it resolves to null instead of rejecting.
   const mePromise = fetch('/api/me').then(r => r.json())
     .then(j => { currentUser = (j && j.name) || null; })
-    .catch(() => { currentUser = null; });
+    .catch(() => { currentUser = null; })
+    .finally(() => { meKnown = true; });
 
   async function loadAll(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
@@ -4883,25 +5181,80 @@ async function renderDashboard() {
     // half lands — logged hours (most of the Asana calls) keep loading behind them, and the
     // Actual Hours tabs show "Loading…" until loadLogged() paints them.
     loadError = null;
+    loading = true; setUpdatedLabel();
     const loggedDone = loadLogged(refresh);
     try {
       const [e, grp] = await Promise.all([
         getJson('/api/projects' + q),
         groupsConfig ? Promise.resolve(groupsConfig) : getJson('/api/groups'),
       ]);
-      estData = e; groupsConfig = grp;
       // Team load derives from the per-project detail that /api/projects just (re)built,
       // so it reads the warm cache — no refresh flag, no duplicate Asana pulls.
-      teamData = await getJson('/api/assignees');
+      const t = await getJson('/api/assignees');
+      estData = e; groupsConfig = grp; teamData = t; freshEst = true;
     } catch (err) { loadError = err; }
     // A failed load shows its error rather than rendering half-loaded data.
     if (loadError) view.innerHTML = fmtErr(loadError); else renderTab();
+    // Time Audit (and its nav badge): re-read the project details in the background, whatever
+    // tab is open (served from the cache /api/projects just filled — no Asana calls).
+    if (!loadError) loadAudit(true);
     await loggedDone;
+    loading = false; setUpdatedLabel();
+    saveSnapshot();
     btn.disabled = false; btn.textContent = 'Refresh';
   }
-  btn.onclick = () => loadAll(true);
-  renderTab();        // paint sidebar + active tab immediately (shows "Loading…")
-  loadAll(false);     // navigation = cached
+
+  // Save what's loaded so the next visit opens on it instantly. Only once both halves are fresh
+  // (never re-save the snapshot we opened on), and only for the default range — the one a fresh
+  // visit starts on. Large pieces are dropped first if the browser's storage is full.
+  function saveSnapshot() {
+    if (!freshEst || !freshLogged || loadError) return;
+    const [s, e] = monthRange();
+    if (dateStart !== s || dateEnd !== e) return;
+    const key = s + ':' + e;
+    const snap = { v: 1, at: Date.now(), start: s, end: e, estData, groupsConfig, teamData, loggedData, carveData,
+      stats: personStatsCache[key] ? { person: personStatsCache[key], projPerson: projPersonCache[key],
+        teamSlice: teamSliceCache[key], item: itemStatsCache[key], daily: dailyStatsCache[key],
+        odd: oddEntryCache[key] } : null,
+      auditDetails };
+    for (const drop of [[], ['auditDetails'], ['auditDetails', 'stats']]) {
+      drop.forEach(k => { snap[k] = null; });
+      try { localStorage.setItem(SNAP_KEY, JSON.stringify(snap)); return; } catch (err) { /* full: shrink */ }
+    }
+  }
+
+  // A reloaded page (see pageReloaded) skips the saved snapshot and hides behind a full-screen
+  // cover until a full re-read of Asana has landed, so nothing old is on screen during a refresh.
+  const refreshing = pageReloaded;
+  pageReloaded = false;
+  if (refreshing) {
+    const cover = document.createElement('div');
+    cover.id = 'refresh-cover'; cover.className = 'refresh-cover';
+    cover.innerHTML = note('Refreshing from Asana…');
+    document.body.appendChild(cover);
+  }
+
+  // Open on the saved snapshot, if there is one: every tab paints straight away from it, and
+  // loadAll swaps the fresh data in as each half lands.
+  const snap = refreshing ? null : readSnapshot();
+  if (snap) {
+    estData = snap.estData; groupsConfig = snap.groupsConfig; teamData = snap.teamData;
+    auditDetails = snap.auditDetails || null;
+    if (snap.start === dateStart && snap.end === dateEnd) {
+      loggedData = snap.loggedData; carveData = snap.carveData;
+      const key = dateStart + ':' + dateEnd, st = snap.stats;
+      if (st) {
+        personStatsCache[key] = st.person; projPersonCache[key] = st.projPerson;
+        teamSliceCache[key] = st.teamSlice; itemStatsCache[key] = st.item;
+        dailyStatsCache[key] = st.daily; oddEntryCache[key] = st.odd || [];
+      }
+    }
+    savedAt = snap.at;
+  }
+  btn.onclick = () => location.reload();   // same as F5: a full refresh (pageReloaded)
+  renderTab();        // paint sidebar + active tab immediately (saved data, or "Loading…")
+  // navigation = cached; a reload from the Refresh button re-reads Asana, then lifts the cover
+  loadAll(refreshing).finally(() => { const c = document.getElementById('refresh-cover'); if (c) c.remove(); });
 }
 
 async function renderDetail(gid) {
@@ -5006,7 +5359,7 @@ async function renderDetail(gid) {
       totEst += s.hours; totAct += s.actual || 0; items++;
       // A subtask's own status column when it has one (never the parent's); otherwise the
       // cell falls back to stating what the row is.
-      return `<tr class="sub${s.done ? ' done' : ''}"><td class="sub-name">${esc(s.name)}${context}</td>` +
+      return `<tr class="sub${s.done ? ' done' : ''}"><td class="sub-name">${taskLink(s.gid, s.name)}${context}</td>` +
         `<td>${s.done ? '<span class="badge done">Completed</span>'
                       : s.section ? `<span class="badge">${esc(s.section)}</span>`
                                   : '<span class="badge none">Subtask</span>'}</td>` +
@@ -5018,7 +5371,7 @@ async function renderDetail(gid) {
     // 1. Tasks owned by this assignee, with only THEIR subtasks nested underneath.
     all.filter(t => t.assignee === assignee).forEach(t => {
       totEst += t.hours; totAct += t.actual || 0; items++;
-      rows += `<tr class="parent"><td>${esc(t.name)}</td>` +
+      rows += `<tr class="parent"><td>${taskLink(t.gid, t.name)}</td>` +
         `<td>${t.section ? `<span class="badge">${esc(t.section)}</span>`
                          : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
         `<td class="hours">${h2(t.hours)} h</td>` +
@@ -5121,7 +5474,7 @@ async function renderLoggedDetail(gid) {
     const total = rows_.reduce((a, e) => a + e.hours, 0);
     let rows = '';
     rows_.forEach(e => {
-      rows += `<tr><td>${esc(e.date)}</td><td>${esc(e.task)}</td>` +
+      rows += `<tr><td>${esc(e.date)}</td><td>${taskLink(e.tgid, e.task)}</td>` +
         `<td class="hours">${h2(e.hours)} h</td></tr>`;
     });
     if (!rows_.length) rows = '<tr><td colspan="3" class="muted">No entries.</td></tr>';
@@ -5312,7 +5665,7 @@ async function renderCarveDetail(name) {
     ]) + `<div class="cap-wide">${capBar(used, cap)}</div>`;
     const tasks = w.tasks || [], people = w.people || [];
     const taskRows = tasks.map(t =>
-      `<tr class="parent"><td>${esc(t.name)}</td>` +
+      `<tr class="parent"><td>${taskLink(t.gid, t.name)}</td>` +
       `<td>${t.done ? '<span class="badge done">Completed</span>'
                     : t.section ? `<span class="badge">${esc(t.section)}</span>`
                                 : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
@@ -5348,7 +5701,7 @@ async function renderCarveDetail(name) {
        <table class="tasks" id="carve-entries">
          <thead><tr><th>Date</th><th>Logged by</th><th>Task</th><th class="hours">Hours</th><th>Note</th></tr></thead>
          <tbody>${entries.map(e =>
-           `<tr class="parent"><td class="nowrap">${esc(e.date)}</td><td>${esc(e.by)}</td><td>${esc(e.task)}</td>` +
+           `<tr class="parent"><td class="nowrap">${esc(e.date)}</td><td>${esc(e.by)}</td><td>${taskLink(e.tgid, e.task)}</td>` +
            `<td class="hours">${h2(e.hours)} h</td>` +
            `<td class="entry-note" data-gid="${esc(e.gid || '')}">${LOADING}</td></tr>`).join('')}</tbody>
        </table>`);
@@ -5401,6 +5754,8 @@ async function renderCarveDetail(name) {
 
 function route() {
   destroyCharts();
+  // A reload on a detail page is just that page's load; don't save the full refresh for later.
+  if (/^#\/(logged|p|grp|carve)\//.test(location.hash)) pageReloaded = false;
   let m = location.hash.match(/^#\/logged\/(\d+)/);
   if (m) return renderLoggedDetail(m[1]);
   m = location.hash.match(/^#\/p\/(\d+)/);

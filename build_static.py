@@ -53,6 +53,9 @@ const GROUPS = __GROUPS__;
 const CARVE_OUTS = __CARVEOUTS__;
 const UNBILLABLE_GIDS = new Set(__UNBILLABLE__);
 const DEF_START = __DEFSTART__, DEF_END = __DEFEND__;
+// Mirrors HISTORY_SLACK_DAYS: a load reads open tasks plus those completed / modified within this
+// many days before the selected range starts (see fetchTasks).
+const HISTORY_SLACK_DAYS = __SLACK__;
 // "Not this month" planning (see FIREBASE_CONFIG in creative_asana_app.py). The UI script reads
 // these, so the local app's boot script injects them too.
 const FIREBASE_CONFIG = __FIREBASE__;
@@ -124,7 +127,7 @@ let MAX_ACTIVE = 24;
 // The real ceiling is Asana's per-token rate limit (1500 requests/minute on paid plans, 150 on
 // free), not concurrency — so pace requests with a token bucket just under it and let
 // concurrency float. Both halve on a 429, so a free-tier token settles instead of thrashing.
-let RATE_PER_SEC = 20;                 // 1200/min, comfortably under the paid-plan limit
+let RATE_PER_SEC = 24;                 // 1440/min, just under the 1500/min paid-plan limit
 let _tokens = RATE_PER_SEC, _lastFill = Date.now();
 async function _takeToken(){
   for (;;){
@@ -291,28 +294,59 @@ function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).tri
 // One field set for both halves of the app (mirrors TASK_FIELDS / SUBTASK_FIELDS): num_subtasks
 // lets fetchTree skip the subtask call for a leaf task, and completed_at is what the
 // logged-hours layer needs, so it no longer re-fetches these same lists.
-const TASK_FIELDS = 'name,assignee.name,completed,completed_at,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+// modified_at gates the time-entry reads (see isTouched).
+const TASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
 // A subtask carries its own memberships, so it gets its own status column when it has been
 // added to the project — never inherit the parent's section for it.
-const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
-function fetchTasks(gid){ return asanaGet(`/projects/${gid}/tasks?opt_fields=${TASK_FIELDS}&limit=100`); }
+const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+const _shiftDay = (iso, days) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + days);
+                                   return d.toISOString().slice(0, 10); };
+// Mirrors tree_since / default_since / touched_cutoff / is_touched.
+const treeSince = start => _shiftDay(start, -HISTORY_SLACK_DAYS);
+function defaultSince(){ const n = new Date();
+  return treeSince(`${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`); }
+const touchedCutoff = start => _shiftDay(start, -1);
+const isTouched = (it, cutoff) => (it.modified_at || '9999') >= cutoff;   // unknown -> read it
+// Mirrors fetch_tasks: open tasks + those completed or modified on/after `since`, not the
+// board's whole history. Both reads run side by side.
+async function fetchTasks(gid, since){
+  const q = `opt_fields=${TASK_FIELDS}&limit=100`, ts = `${since}T00:00:00Z`;
+  const [tasks, touched] = await Promise.all([
+    asanaGet(`/projects/${gid}/tasks?completed_since=${ts}&${q}`),
+    asanaGet(`/tasks?project=${gid}&modified_since=${ts}&${q}`)]);
+  const have = new Set(tasks.map(t => t.gid));
+  return tasks.concat(touched.filter(t => !have.has(t.gid)));
+}
 const subtasksPath = g => `/tasks/${g}/subtasks?opt_fields=${SUBTASK_FIELDS}&limit=100`;
 const entriesPath = g => `/tasks/${g}/time_tracking_entries?opt_fields=duration_minutes,entered_on,created_by.name&limit=100`;
 
-// Every task and subtask of one project, fetched once and shared by the estimated and
+// A project's tasks (fetchTasks) and their subtasks, fetched once and shared by the estimated and
 // logged-hours layers (mirrors fetch_tree). The in-flight promise is cached, not just the
-// result, so the two concurrent startup requests share one fetch instead of racing.
-const _trees = {};
-function fetchTree(gid, refresh){
-  if (!refresh && _trees[gid]) return _trees[gid];
-  return (_trees[gid] = (async () => {
-    const tasks = await fetchTasks(gid);
+// result, so the two concurrent startup requests share one fetch instead of racing — on Refresh
+// too, within REFRESH_SHARE_MS. `since` = the history the caller needs; undefined = any cached
+// tree will do. A deeper fetch (an older range) reuses the subtask lists already read.
+const _trees = {};   // gid -> { since, at, p }
+const REFRESH_SHARE_MS = 30000;
+function fetchTree(gid, refresh, since){
+  const have = _trees[gid];
+  if (have && (!since || have.since <= since) && (!refresh || Date.now() - have.at < REFRESH_SHARE_MS))
+    return have.p;
+  const want = since || defaultSince(), prev = !refresh && have ? have.p : null;
+  const p = (async () => {
+    const tasks = await fetchTasks(gid, want);
     const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
-    const byPath = await asanaBatch(parents.map(subtasksPath));
+    let known = {};
+    if (prev) { try { known = (await prev).subs; } catch (e) { /* re-read below */ } }
+    const need = parents.filter(g => !(g in known));
+    const byPath = await asanaBatch(need.map(subtasksPath));
     const subs = {};
-    parents.forEach(g => { subs[g] = byPath[subtasksPath(g)]; });
+    parents.forEach(g => { subs[g] = g in known ? known[g] : byPath[subtasksPath(g)]; });
     return { tasks, subs };
-  })());
+  })();
+  _trees[gid] = { since: want, at: Date.now(), p };
+  // A failed fetch mustn't stick: the next caller retries.
+  p.catch(() => { if (_trees[gid] && _trees[gid].p === p) delete _trees[gid]; });
+  return p;
 }
 
 // Mirrors build_task. A completed subtask (checked off or in an excluded column) that carried
@@ -326,7 +360,7 @@ function buildTask(t, gid, children){
     const m = taskMinutes(s);
     const done = !!s.completed || isExcluded(s, gid);
     if (done && m) continue;
-    subs.push({ name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
+    subs.push({ gid: s.gid, name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
       hours: round2(m / 60), actual: round2(actualMinutes(s) / 60),
       // the subtask's OWN status column; '' when it isn't a member of the project
       section: sectionName(s, gid), done });
@@ -394,11 +428,11 @@ function assigneeProjectTasks(d, name){
   const rows = [];
   for (const t of d.tasks){
     if (t.assignee === name)
-      rows.push({ name: t.name, type: 'task', status: t.section, estimated: t.hours, actual: t.actual,
+      rows.push({ gid: t.gid, name: t.name, type: 'task', status: t.section, estimated: t.hours, actual: t.actual,
         remaining: round2(t.hours - t.actual - subBurn(t, name)), context: '', done: false });
     for (const s of t.subtasks){
       if (s.assignee === name)
-        rows.push({ name: s.name, type: 'subtask', status: s.section, estimated: s.hours, actual: s.actual,
+        rows.push({ gid: s.gid, name: s.name, type: 'subtask', status: s.section, estimated: s.hours, actual: s.actual,
           // zero when it has no estimate of its own AND the parent row above is this person's
           remaining: (!s.hours && t.assignee === name) ? 0 : round2(s.hours - s.actual),
           context: t.assignee === name ? '' : `under "${t.name}" · ${t.assignee}`,
@@ -556,8 +590,8 @@ async function entriesForTasks(minutesByGid, refresh, project){
 async function loggedDetail(gid, start, end, refresh){
   // Shares the estimated side's project tree, so the only calls left here are the per-item
   // time-entry lookups.
-  const tree = await fetchTree(gid, refresh);
-  const tasks = tree.tasks;
+  const tree = await fetchTree(gid, refresh, treeSince(start));
+  const tasks = tree.tasks, touched = touchedCutoff(start);
   // Tasks/subtasks completed within the date range (by completed_at), deduped by gid.
   const completedDates = {};
   const noteCompleted = it => {
@@ -569,7 +603,8 @@ async function loggedDetail(gid, start, end, refresh){
   for (const it of [...tasks, ...Object.values(tree.subs).flat()]){
     noteCompleted(it);
     const minutes = it.actual_time_minutes || 0;
-    if (minutes > 0) cand[it.gid] = [it.name || '(untitled)', minutes];
+    // Untouched since the range began -> no entries in it (mirrors logged_detail).
+    if (minutes > 0 && isTouched(it, touched)) cand[it.gid] = [it.name || '(untitled)', minutes];
   }
   // Only tasks whose tracked total moved are read from Asana; the rest come from cache.
   const byGid = await entriesForTasks(Object.fromEntries(
@@ -595,7 +630,7 @@ async function loggedDetail(gid, start, end, refresh){
       if (!entered || entered < start || entered > end) continue;
       if (e.gid && seen.has(e.gid)) continue;
       if (e.gid) seen.add(e.gid);
-      entries.push({ task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
+      entries.push({ tgid: g, task: name, by: (e.created_by || {}).name || 'Unknown', date: entered,
         minutes: e.duration_minutes || 0, billable: !unbillable || carved.has(g), carve: carveOf[g] || null });
     }
   const totals = {}, counts = {};
@@ -610,7 +645,7 @@ async function loggedDetail(gid, start, end, refresh){
     total_hours: round2(sum(Object.values(totals)) / 60),
     completed: Object.keys(completedDates).length,
     nentries: entries.length,
-    entries: entries.map(e => ({ task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable, carve: e.carve })), updated: nowStr() };
+    entries: entries.map(e => ({ tgid: e.tgid, task: e.task, by: e.by, date: e.date, hours: round2(e.minutes / 60), billable: e.billable, carve: e.carve })), updated: nowStr() };
 }
 function loggedSummaryFromDetail(d){ return { gid: d.gid, name: d.name, start: d.start, end: d.end, hours: d.total_hours, completed: d.completed, nentries: d.nentries, cap: PROJECT_CAPS[d.gid], kind: PROJECT_KINDS[d.gid], archived: ARCHIVED_NOW.has(d.gid), updated: d.updated }; }
 
@@ -644,19 +679,24 @@ async function carveOutSummary(c, start, end){
   // Mirrors carve_out_summary: capacity = estimates of every matching task still open OR worked
   // on in the range, less time logged to those same items before the range; usage = range hours.
   const gid = c.source;
-  const tree = await fetchTree(gid, false);
-  const hits = carveOutHits(c, tree);
+  const tree = await fetchTree(gid, false, treeSince(start));
+  const hits = carveOutHits(c, tree), touched = touchedCutoff(start);
   const done = x => !!x.completed || isExcluded(x, gid);
   const subsOf = t => tree.subs[t.gid] || [];
   // Logged time counts whether or not the task has since been finished. A subtask's time is
   // credited to its parent's row, so the task table adds up to the card.
-  const owner = {}, minutes = {};
+  // Entries are read only for items touched since the range began; an untouched item's whole
+  // tracked total is "before the range" (mirrors carve_out_summary).
+  const owner = {}, minutes = {}, toRead = {};
   for (const t of hits)
     for (const it of [t, ...subsOf(t)]){
       owner[it.gid] = t.gid;
-      if ((it.actual_time_minutes || 0) > 0) minutes[it.gid] = it.actual_time_minutes;
+      if ((it.actual_time_minutes || 0) > 0){
+        minutes[it.gid] = it.actual_time_minutes;
+        if (isTouched(it, touched)) toRead[it.gid] = it.actual_time_minutes;
+      }
     }
-  const byGid = await entriesForTasks(minutes, false);
+  const byGid = await entriesForTasks(toRead, false);
   // What each entry row names: the task, or "task › subtask" for time logged to a subtask.
   const label = {};
   for (const t of hits){
@@ -677,7 +717,7 @@ async function carveOutSummary(c, start, end){
       logged += m; nentries++;
       taskMin[owner[g]] = (taskMin[owner[g]] || 0) + m;
       people[by] = (people[by] || 0) + m;
-      rowsOut.push({ gid: e.gid, date: entered, by, task: label[g] || '', hours: round2(m / 60) });
+      rowsOut.push({ gid: e.gid, tgid: g, date: entered, by, task: label[g] || '', hours: round2(m / 60) });
     }
   rowsOut.sort((x, y) => y.date.localeCompare(x.date) || y.by.localeCompare(x.by));
   // Which tasks bring their estimate into the range: open ones, plus any worked on in it. Such a
@@ -695,7 +735,8 @@ async function carveOutSummary(c, start, end){
   const est = sum(Object.values(taskEst));
   // Work logged to those items before the range already burned part of their estimate.
   const priorSeen = new Set();
-  let priorMin = 0;
+  // An item whose entries weren't read logged everything before the range: its tracked total.
+  let priorMin = sum([...covered].filter(g => !(g in byGid)).map(g => minutes[g] || 0));
   for (const [g, rows] of Object.entries(byGid)){
     if (!covered.has(g)) continue;
     for (const e of rows || []){
@@ -707,7 +748,7 @@ async function carveOutSummary(c, start, end){
   }
   // One row per task that brought its estimate in (open, or worked on in the range).
   const tasks = hits.filter(t => t.gid in taskEst).map(t => ({
-    name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
+    gid: t.gid, name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
     section: sectionName(t, gid), done: done(t),
     estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
@@ -803,6 +844,7 @@ def build():
                .replace('__UNBILLABLE__', UNBILLABLE)
                .replace('__DEFSTART__', DEF_START)
                .replace('__DEFEND__', DEF_END)
+               .replace('__SLACK__', str(a.HISTORY_SLACK_DAYS))
                .replace('__FIREBASE__', FIREBASE)
                .replace('__PLANDOMAIN__', PLAN_DOMAIN))
 

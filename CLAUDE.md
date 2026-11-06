@@ -243,7 +243,7 @@ existing `capLinePlugin` / `capMarksPlugin` and are enabled per-chart through
   (`/api/logged  48 Asana calls`) — use it to check a change actually reduced requests.
 - **The binding constraint is Asana's per-token rate limit** (1500 requests/minute on paid
   plans, 150 on free), not connections or thread count. Every call passes a token bucket
-  (`_take_token`, 20/sec ≈ 1200/min) that halves itself on a 429. So the only way to make a load
+  (`_take_token`, 24/sec ≈ 1440/min) that halves itself on a 429. So the only way to make a load
   meaningfully faster is to **make fewer calls** — raising concurrency past the limit just
   earns 429s.
 - **Fetch a project's tasks once.** `fetch_tree(gid)` returns `{tasks, subs}` and is shared by
@@ -252,6 +252,21 @@ existing `capLinePlugin` / `capMarksPlugin` and are enabled per-chart through
   range-independent, so changing the date range costs no API calls. A task with
   `num_subtasks == 0` is never queried for subtasks. `TASK_FIELDS` / `SUBTASK_FIELDS` are the
   union both paths need — add a field there rather than making a second request for it.
+- **Don't read history no view needs.** `fetch_tasks` / `fetchTasks` ask for open tasks plus those
+  completed *or modified* since `tree_since(range start)` (`HISTORY_SLACK_DAYS`, 30, before it) —
+  two filtered reads, not the whole board. `fetch_tree(gid, since=…)` serves any caller needing no
+  deeper history; an older range fetches deeper, reusing known subtask lists. The estimated side
+  passes no `since` (open tasks are all it needs). Time entries are read only for items whose
+  `modified_at` is on/after `touched_cutoff(start)` (`is_touched` / `isTouched`): logging time
+  always bumps the item's *own* modified_at (verified against live data), so an untouched item has
+  nothing in the range — and a carve-out counts its whole tracked total as "before the range".
+  Subtask activity does **not** reliably bump the parent, which is what the 30-day slack covers.
+- **Startup paints from a saved snapshot.** After a load where both halves are fresh, for the
+  default (this-month) range, `saveSnapshot()` writes the loaded data (plus the per-person splits
+  and Time Audit details) to `localStorage` `dashSnapshot.v1`; `renderDashboard` opens on it and
+  `loadAll` swaps fresh data in as each half lands (`freshEst` / `freshLogged`; `loggedGen` stops
+  a per-person load started on old data from overwriting new). Cleared on sign-out. Anything new
+  loaded at startup that a tab needs to paint should be added to the snapshot.
 - `/api/me` is the PAT owner's display name, used to default the Daily Log's assignee filter to
   "you". Anything that defaults to the signed-in user should read `currentUser`.
 
