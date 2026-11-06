@@ -243,15 +243,18 @@ existing `capLinePlugin` / `capMarksPlugin` and are enabled per-chart through
   (`/api/logged  48 Asana calls`) — use it to check a change actually reduced requests.
 - **The binding constraint is Asana's per-token rate limit** (1500 requests/minute on paid
   plans, 150 on free), not connections or thread count. Every call passes a token bucket
-  (`_take_token`, 24/sec ≈ 1440/min) that halves itself on a 429. So the only way to make a load
+  (`_take_token`: a 300-call burst, then 20/sec ≈ 1200/min — burst + a minute at the rate = 1500) that halves itself and stops bursting on a 429. So the only way to make a load
   meaningfully faster is to **make fewer calls** — raising concurrency past the limit just
   earns 429s.
 - **Fetch a project's tasks once.** `fetch_tree(gid)` returns `{tasks, subs}` and is shared by
   the estimated and logged-hours paths (single-flighted per project, so the two concurrent
   startup requests can't duplicate it); `entries_for_task(gid)` caches time entries, which are
-  range-independent, so changing the date range costs no API calls. A task with
-  `num_subtasks == 0` is never queried for subtasks. `TASK_FIELDS` / `SUBTASK_FIELDS` are the
-  union both paths need — add a field there rather than making a second request for it.
+  range-independent, so changing the date range costs no API calls. **Subtasks come nested in
+  the task-list read** (`TREE_FIELDS` = `TASK_FIELDS` + `subtasks.<SUBTASK_FIELDS>`), so a tree
+  costs only its task-list pages; only a task whose nested list is shorter than its
+  `num_subtasks` falls back to a `/subtasks` read. `TASK_FIELDS` / `SUBTASK_FIELDS` are the
+  union both paths need — add a field there (it flows into `TREE_FIELDS`) rather than making a
+  second request for it.
 - **Don't read history no view needs.** `fetch_tasks` / `fetchTasks` ask for open tasks plus those
   completed *or modified* since `tree_since(range start)` (`HISTORY_SLACK_DAYS`, 30, before it) —
   two filtered reads, not the whole board. `fetch_tree(gid, since=…)` serves any caller needing no

@@ -125,14 +125,17 @@ function nowStr(){ const d = new Date(), p = n => String(n).padStart(2, '0');
 // wide and halve on the first 429 — being conservative up front just makes every load slow.
 let MAX_ACTIVE = 24;
 // The real ceiling is Asana's per-token rate limit (1500 requests/minute on paid plans, 150 on
-// free), not concurrency — so pace requests with a token bucket just under it and let
-// concurrency float. Both halve on a 429, so a free-tier token settles instead of thrashing.
-let RATE_PER_SEC = 24;                 // 1440/min, just under the 1500/min paid-plan limit
-let _tokens = RATE_PER_SEC, _lastFill = Date.now();
+// free), not concurrency — so pace requests with a token bucket and let concurrency float.
+// Mirrors _RATE / _BURST: a load is a few hundred calls, inside one minute's allowance, so up to
+// BURST go out back to back, refilling at RATE_PER_SEC; BURST + 60 × RATE = 1500. A 429 halves
+// the rate and concurrency and ends bursting, so a free-tier token settles instead of thrashing.
+let RATE_PER_SEC = 20;                 // steady 1200/min
+let BURST = 300;                       // bucket size — starts full
+let _tokens = BURST, _lastFill = Date.now();
 async function _takeToken(){
   for (;;){
     const now = Date.now();
-    _tokens = Math.min(RATE_PER_SEC, _tokens + (now - _lastFill) / 1000 * RATE_PER_SEC);
+    _tokens = Math.min(BURST, _tokens + (now - _lastFill) / 1000 * RATE_PER_SEC);
     _lastFill = now;
     if (_tokens >= 1){ _tokens -= 1; return; }
     await new Promise(s => setTimeout(s, Math.ceil((1 - _tokens) / RATE_PER_SEC * 1000)));
@@ -142,6 +145,7 @@ let _throttled = false;
 function backOff(){
   MAX_ACTIVE = Math.max(4, Math.floor(MAX_ACTIVE / 2));
   RATE_PER_SEC = Math.max(2, RATE_PER_SEC / 2);
+  BURST = RATE_PER_SEC; _tokens = Math.min(_tokens, BURST);   // no more bursts this session
   if (!_throttled){
     _throttled = true;
     console.warn('Asana rate-limited this token (429) — pacing reduced to ' + RATE_PER_SEC
@@ -149,9 +153,10 @@ function backOff(){
   }
 }
 let _active = 0; const _waiters = [];
+let _asanaCalls = 0;   // every Asana request passes _gate; the /api shim logs the count per route
 function _gate(fn){
   return new Promise((resolve, reject) => {
-    const run = () => { _active++;
+    const run = () => { _active++; _asanaCalls++;
       _takeToken().then(fn).then(resolve, reject)
         .finally(() => { _active--; const n = _waiters.shift(); if (n) n(); }); };
     if (_active < MAX_ACTIVE) run(); else _waiters.push(run);
@@ -299,6 +304,9 @@ const TASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,actua
 // A subtask carries its own memberships, so it gets its own status column when it has been
 // added to the project — never inherit the parent's section for it.
 const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+// Mirrors TREE_FIELDS: each task carries its subtasks nested, so a project's tree comes back in
+// its task-list pages instead of one extra call per task with subtasks.
+const TREE_FIELDS = TASK_FIELDS + ',' + SUBTASK_FIELDS.split(',').map(f => 'subtasks.' + f).join(',');
 const _shiftDay = (iso, days) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + days);
                                    return d.toISOString().slice(0, 10); };
 // Mirrors tree_since / default_since / touched_cutoff / is_touched.
@@ -310,7 +318,7 @@ const isTouched = (it, cutoff) => (it.modified_at || '9999') >= cutoff;   // unk
 // Mirrors fetch_tasks: open tasks + those completed or modified on/after `since`, not the
 // board's whole history. Both reads run side by side.
 async function fetchTasks(gid, since){
-  const q = `opt_fields=${TASK_FIELDS}&limit=100`, ts = `${since}T00:00:00Z`;
+  const q = `opt_fields=${TREE_FIELDS}&limit=100`, ts = `${since}T00:00:00Z`;
   const [tasks, touched] = await Promise.all([
     asanaGet(`/projects/${gid}/tasks?completed_since=${ts}&${q}`),
     asanaGet(`/tasks?project=${gid}&modified_since=${ts}&${q}`)]);
@@ -334,13 +342,21 @@ function fetchTree(gid, refresh, since){
   const want = since || defaultSince(), prev = !refresh && have ? have.p : null;
   const p = (async () => {
     const tasks = await fetchTasks(gid, want);
-    const parents = tasks.filter(t => (t.num_subtasks || 0) > 0).map(t => t.gid);
     let known = {};
     if (prev) { try { known = (await prev).subs; } catch (e) { /* re-read below */ } }
-    const need = parents.filter(g => !(g in known));
+    // Subtasks arrive nested (TREE_FIELDS); a nested list shorter than num_subtasks (or missing)
+    // falls back to the per-parent read — mirrors fetch_tree.
+    const subs = {}, need = [];
+    for (const t of tasks){
+      const nested = t.subtasks, n = t.num_subtasks || 0;
+      delete t.subtasks;
+      if (!n) continue;
+      if (Array.isArray(nested) && nested.length >= n) subs[t.gid] = nested;
+      else if (t.gid in known) subs[t.gid] = known[t.gid];
+      else need.push(t.gid);
+    }
     const byPath = await asanaBatch(need.map(subtasksPath));
-    const subs = {};
-    parents.forEach(g => { subs[g] = g in known ? known[g] : byPath[subtasksPath(g)]; });
+    need.forEach(g => { subs[g] = byPath[subtasksPath(g)]; });
     return { tasks, subs };
   })();
   _trees[gid] = { since: want, at: Date.now(), p };
@@ -800,8 +816,16 @@ window.fetch = async (input, init) => {
   const url = typeof input === 'string' ? input : (input && input.url) || '';
   const p = url.replace(location.origin, '');
   if (p.startsWith('/api/')){
-    try { return new Response(JSON.stringify(await handleApi(p)), { status: 200, headers: { 'Content-Type': 'application/json' } }); }
-    catch (err) { return new Response(JSON.stringify({ error: String(err && err.message || err) }), { status: 502, headers: { 'Content-Type': 'application/json' } }); }
+    // "[dash]" timing line per top-level route (the per-project ones are summed by the UI).
+    // Calls are counted globally, so routes running side by side share the count.
+    const t0 = performance.now(), c0 = _asanaCalls, route = p.split('?')[0];
+    const log = ok => { if (!/\/\d+$/.test(route)) console.info(`[dash] ${(performance.now() / 1000).toFixed(2)}s  ` +
+      `api ${route}${p.includes('refresh=1') ? ' (refresh)' : ''} — ${((performance.now() - t0) / 1000).toFixed(2)}s, ` +
+      `${_asanaCalls - c0} Asana calls meanwhile${ok ? '' : ', FAILED'}`); };
+    try { const body = JSON.stringify(await handleApi(p)); log(true);
+          return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } }); }
+    catch (err) { log(false);
+                  return new Response(JSON.stringify({ error: String(err && err.message || err) }), { status: 502, headers: { 'Content-Type': 'application/json' } }); }
   }
   return _realFetch(input, init);
 };

@@ -315,11 +315,14 @@ _ASANA_HOST = urllib.parse.urlsplit(API).netloc
 
 
 # The real ceiling is Asana's per-token rate limit (1500 requests/minute on paid plans, 150 on
-# free), not connection count — so pace every call through a token bucket just under it rather
-# than letting 24 threads sprint into a 429 storm. A 429 halves the rate, so a free-tier token
-# settles down instead of thrashing.
-_RATE = [24.0]                    # requests/second = 1440/min, just under the 1500/min paid limit
-_BUCKET = [24.0, time.time()]     # [tokens, last refill]
+# free), not connection count — so pace every call through a token bucket. A whole load is now a
+# few hundred calls, well inside one minute's allowance, so the bucket holds a BURST that lets a
+# load go out as fast as the pools allow, refilling at RATE. BURST + 60 × RATE = 1500, so even
+# a burst followed by a full minute at the steady rate stays inside any rolling minute. A 429
+# halves the rate and drops the burst to it, so a free-tier token settles instead of thrashing.
+_RATE = [20.0]                    # steady requests/second (1200/min)
+_BURST = [300.0]                  # bucket size: calls that can go out back to back
+_BUCKET = [300.0, time.time()]    # [tokens, last refill] — starts full
 _BUCKET_LOCK = threading.Lock()
 
 
@@ -328,7 +331,7 @@ def _take_token():
         with _BUCKET_LOCK:
             now = time.time()
             rate = _RATE[0]
-            _BUCKET[0] = min(rate, _BUCKET[0] + (now - _BUCKET[1]) * rate)
+            _BUCKET[0] = min(_BURST[0], _BUCKET[0] + (now - _BUCKET[1]) * rate)
             _BUCKET[1] = now
             if _BUCKET[0] >= 1:
                 _BUCKET[0] -= 1
@@ -341,6 +344,8 @@ def _rate_back_off():
     with _BUCKET_LOCK:
         if _RATE[0] > 2:
             _RATE[0] = max(2.0, _RATE[0] / 2)
+            _BURST[0] = _RATE[0]                       # no more bursts this session
+            _BUCKET[0] = min(_BUCKET[0], _BURST[0])
             print(f"WARNING: Asana rate-limited this token (429) — pacing reduced to "
                   f"{_RATE[0]:.0f} requests/sec.")
 
@@ -580,6 +585,9 @@ TASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,actual_tim
 SUBTASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,"
                   "custom_fields.name,custom_fields.number_value,"
                   "memberships.section.name,memberships.project.gid")
+# The task-list read asks for each task's subtasks nested inside it, so a project's whole tree
+# comes back in its task-list pages instead of one extra call per task that has subtasks.
+TREE_FIELDS = TASK_FIELDS + "," + ",".join("subtasks." + f for f in SUBTASK_FIELDS.split(","))
 
 
 def tree_since(start):
@@ -612,8 +620,11 @@ def fetch_tasks(gid, since):
     Two filtered reads instead of the whole history: most of a board is long-finished work that
     no view needs. completed_since keeps every open task (the estimated side) and recent
     completions; modified_since adds older finished tasks that were touched since — e.g. time
-    logged after the task was checked off, which bumps modified_at. Run side by side."""
-    q = f"opt_fields={TASK_FIELDS}&limit=100"
+    logged after the task was checked off, which bumps modified_at. Run side by side.
+
+    Each task carries its subtasks nested (TREE_FIELDS), so fetch_tree needs no per-parent
+    subtask call; verified identical to /tasks/{gid}/subtasks on live data."""
+    q = f"opt_fields={TREE_FIELDS}&limit=100"
     ts = f"{since}T00:00:00Z"
     touched = LEAF_POOL.submit(api_pages, f"/tasks?project={gid}&modified_since={ts}&{q}")
     tasks = api_pages(f"/projects/{gid}/tasks?completed_since={ts}&{q}")
@@ -725,10 +736,23 @@ def fetch_tree(gid, refresh=False, since=None):
             prev = None if refresh else CACHE["tree"].get(gid)
         known = prev["subs"] if prev else {}
         tasks = fetch_tasks(gid, want)
-        parents = [t["gid"] for t in tasks if (t.get("num_subtasks") or 0) > 0]
-        need = [g for g in parents if g not in known]
+        # Subtasks arrive nested in each task (TREE_FIELDS). A nested list shorter than the
+        # task's num_subtasks (or missing) falls back to the per-parent read, so it can cost a
+        # call but never drop a subtask.
+        subs, need = {}, []
+        for t in tasks:
+            nested = t.pop("subtasks", None)
+            n = t.get("num_subtasks") or 0
+            if not n:
+                continue
+            if nested is not None and len(nested) >= n:
+                subs[t["gid"]] = nested
+            elif t["gid"] in known:
+                subs[t["gid"]] = known[t["gid"]]
+            else:
+                need.append(t["gid"])
         by_path = api_batch(subtasks_path(g) for g in need)
-        subs = {g: known[g] if g in known else by_path[subtasks_path(g)] for g in parents}
+        subs.update({g: by_path[subtasks_path(g)] for g in need})
         entry = {"tasks": tasks, "subs": subs, "at": time.time(), "since": want}
         with CACHE_LOCK:
             CACHE["tree"][gid] = entry
@@ -2170,6 +2194,15 @@ const capMarksPlugin = {
 };
 Chart.register(capMarksPlugin);
 
+// Load timing for troubleshooting: one "[dash]" console line per step, stamped with seconds since
+// the page started loading, so a slow open can be copied out of DevTools (filter on [dash]).
+function dbg(msg){ try { console.info(`[dash] ${(performance.now() / 1000).toFixed(2)}s  ${msg}`); } catch (e) {} }
+async function timed(label, p){
+  const t = performance.now();
+  try { return await p; }
+  finally { dbg(`${label} — ${((performance.now() - t) / 1000).toFixed(2)}s`); }
+}
+dbg('page script started');
 function fmtErr(e){ return '<p class="note">Error: '+esc(String(e && e.message || e))+'</p>'; }
 // fetch() + JSON that fails loudly: a non-2xx status or an {"error": …} body (e.g. Asana
 // rejecting the token) throws, so a failed load shows an error instead of being rendered as data.
@@ -2930,10 +2963,10 @@ function renderLogin(err, step){
 async function afterGoogle(u){
   loginCard('<p class="sub">Signing in…</p>');
   let tok;
-  try { tok = await savedPat(u); }
+  try { tok = await timed('sign-in: read saved Asana token (Firestore)', savedPat(u)); }
   catch (e) { return renderLogin('Could not read your saved token: ' + e.message, 'token'); }
   if (!tok) return renderLogin(null, 'token');
-  try { loginStart(await useToken(tok)); }
+  try { loginStart(await timed('sign-in: Asana accepts the token', useToken(tok))); }
   catch (e) { renderLogin('Your saved Asana token no longer works — paste a new one.', 'token'); }
 }
 async function googleSignIn(){
@@ -2953,8 +2986,9 @@ async function googleSignIn(){
 }
 async function bootAuth(){
   loginCard('<p class="sub">Signing in…</p>');
-  await planInit();
-  const u = plan.fb ? await authUser() : null;
+  await timed('sign-in: load Google sign-in code', planInit());
+  const u = plan.fb ? await timed('sign-in: restore Google session', authUser()) : null;
+  dbg(u ? 'sign-in: Google session found' : 'sign-in: no Google session (login screen)');
   if (u && onDomain(u)) return afterGoogle(u);
   if (u) { await plan.fb.A.signOut(plan.fb.auth); return renderLogin(`Use your ${DOMAIN_TEXT} Google account.`); }
   // A token-only sign-in from an earlier visit (GitHub Pages) still works.
@@ -3763,8 +3797,8 @@ async function renderDashboard() {
     const gids = loggedData.filter(w => w.hours > 0).map(w => w.gid);
     let details;
     try {
-      details = await Promise.all(gids.map(g =>
-        fetch(`/api/logged/${g}?start=${dateStart}&end=${dateEnd}`).then(r => r.json())));
+      details = await timed(`data: per-person splits (${gids.length} projects)`, Promise.all(gids.map(g =>
+        fetch(`/api/logged/${g}?start=${dateStart}&end=${dateEnd}`).then(r => r.json()))));
     } catch (e) {
       if (gen !== loggedGen) return;
       const el = document.getElementById('person-loading');
@@ -3923,7 +3957,8 @@ async function renderDashboard() {
     const gids = estData.filter(w => !isArchived(w)).map(w => w.gid);
     let details;
     try {
-      details = await Promise.all(gids.map(g => getJson('/api/project/' + g)));
+      details = await timed(`data: Time Audit details (${gids.length} projects)`,
+                            Promise.all(gids.map(g => getJson('/api/project/' + g))));
     } catch (e) {
       auditLoading = false;
       if (dashTab === 'audit') { view.innerHTML = rangePicker() + fmtErr(e); wireRangeSel(); }
@@ -5147,11 +5182,11 @@ async function renderDashboard() {
     const s = dateStart, e = dateEnd;   // capture so a fast re-pick doesn't paint stale data
     try {
       const url = `/api/logged?start=${s}&end=${e}` + (refresh ? '&refresh=1' : '');
-      const j = await getJson(url);
+      const j = await timed(`data: logged hours ${s}…${e}`, getJson(url));
       if (s !== dateStart || e !== dateEnd) return;   // a newer range was picked mid-flight
       // Carve-outs read the project trees and time entries /api/logged just loaded, so they
       // are fetched after it rather than alongside — that way they cost no Asana calls.
-      const c = await getJson(url.replace('/api/logged', '/api/carveouts'));
+      const c = await timed('data: carve-outs', getJson(url.replace('/api/logged', '/api/carveouts')));
       if (s !== dateStart || e !== dateEnd) return;
       // Swap in the fresh data and drop the per-person/per-item splits built from the old (the
       // saved snapshot's, or the previous range's) only now, so they stay on screen until then.
@@ -5182,15 +5217,17 @@ async function renderDashboard() {
     // Actual Hours tabs show "Loading…" until loadLogged() paints them.
     loadError = null;
     loading = true; setUpdatedLabel();
+    const t0 = performance.now();
+    dbg(`data: load started${refresh ? ' (full refresh)' : ''}`);
     const loggedDone = loadLogged(refresh);
     try {
       const [e, grp] = await Promise.all([
-        getJson('/api/projects' + q),
+        timed('data: projects (estimated)', getJson('/api/projects' + q)),
         groupsConfig ? Promise.resolve(groupsConfig) : getJson('/api/groups'),
       ]);
       // Team load derives from the per-project detail that /api/projects just (re)built,
       // so it reads the warm cache — no refresh flag, no duplicate Asana pulls.
-      const t = await getJson('/api/assignees');
+      const t = await timed('data: team load', getJson('/api/assignees'));
       estData = e; groupsConfig = grp; teamData = t; freshEst = true;
     } catch (err) { loadError = err; }
     // A failed load shows its error rather than rendering half-loaded data.
@@ -5199,6 +5236,8 @@ async function renderDashboard() {
     // tab is open (served from the cache /api/projects just filled — no Asana calls).
     if (!loadError) loadAudit(true);
     await loggedDone;
+    dbg(`data: ${loadError ? 'load FAILED: ' + (loadError.message || loadError) : 'load complete'} — ` +
+        `${((performance.now() - t0) / 1000).toFixed(2)}s`);
     loading = false; setUpdatedLabel();
     saveSnapshot();
     btn.disabled = false; btn.textContent = 'Refresh';
@@ -5252,7 +5291,11 @@ async function renderDashboard() {
     savedAt = snap.at;
   }
   btn.onclick = () => location.reload();   // same as F5: a full refresh (pageReloaded)
+  dbg('dashboard: ' + (refreshing ? 'page reload → full refresh behind the cover'
+    : snap ? `opened on saved data from ${Math.round((Date.now() - snap.at) / 60000)} min ago`
+    : 'no saved data — showing Loading…'));
   renderTab();        // paint sidebar + active tab immediately (saved data, or "Loading…")
+  dbg('dashboard: first paint');
   // navigation = cached; a reload from the Refresh button re-reads Asana, then lifts the cover
   loadAll(refreshing).finally(() => { const c = document.getElementById('refresh-cover'); if (c) c.remove(); });
 }
