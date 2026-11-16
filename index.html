@@ -276,6 +276,9 @@
   }
   .grid.cap-grid:not(.plan-out), .grid[data-drop="sort"] { align-items:stretch; }
   .grid.cap-grid.plan-out { align-items:start; }
+  /* A lone bucket shares the project cards' grid; spanning two rows lets two rows of project
+     cards sit beside it, instead of one row stretched to the bucket's member-list height. */
+  .grid.cap-grid:not(.bucket-grid):not(.plan-out) > .grp-card { grid-row:span 2; }
   .grid.cap-grid .grp-card { display:flex; flex-direction:column; }
   .grid.cap-grid .grp-card .go { margin-top:auto; padding-top:14px; }
   /* A project (or bucket) that has spent its whole monthly budget: gold tint, so "no hours
@@ -409,20 +412,21 @@ const EST_FIELD = "Estimated time";
 const EXCLUDE_SECTIONS = new Set(["completed"]);
 const ASSIGNEE_HOURS_CAP = 128;
 const TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roach"];
-const PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA"}, {"gid": "1216989200658405", "name": "My Pest Solutions SEO"}, {"gid": "1214228966572508", "name": "Firebird MSA"}, {"gid": "1214228966572503", "name": "Myrick Marine"}, {"gid": "1214229029715234", "name": "Savannah Bee Company", "cap": 40, "kind": "Support"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic", "cap": 5}, {"gid": "1214228966572541", "name": "DocSmith.md MSA", "cap": 24}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2027"}, {"gid": "1214755322546416", "name": "Project Twilight"}, {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"}, {"gid": "1214228966572573", "name": "Autotask Reporting"}, {"gid": "1214228966572568", "name": "Brain Dump"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}, {"gid": "1216154609521581", "name": "NuNu"}, {"gid": "1216640931651593", "name": "Ross Wood Website Redesign"}, {"gid": "1216208009045309", "name": "Marsh and Main"}, {"gid": "1217239377209835", "name": "Sales"}, {"gid": "1217194342869306", "name": "St. Patrick's Day"}, {"gid": "1219066223453162", "name": "The Recreational Group: Thatch", "kind": "Hourly"}, {"gid": "1219254406444525", "name": "Slimothy the Slug", "kind": "Hourly"}, {"gid": "1219099033687412", "name": "Transformed Testimony", "kind": "Hourly"}, {"gid": "1220217758251082", "name": "CMD: POC"}, {"gid": "1220217758251087", "name": "CMD: Features"}];
+const PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40}, {"gid": "1216989200658405", "name": "My Pest Solutions SEO"}, {"gid": "1214228966572508", "name": "Firebird MSA"}, {"gid": "1214228966572503", "name": "Myrick Marine"}, {"gid": "1214229029715234", "name": "Savannah Bee Company", "cap": 40, "kind": "Support"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic", "cap": 5}, {"gid": "1214228966572541", "name": "DocSmith.md MSA", "cap": 24}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2027"}, {"gid": "1214755322546416", "name": "Project Twilight"}, {"gid": "1214228966572578", "name": "Claude: Discovery and Engineering"}, {"gid": "1214228966572573", "name": "Autotask Reporting"}, {"gid": "1214228966572568", "name": "Brain Dump"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}, {"gid": "1216154609521581", "name": "NuNu"}, {"gid": "1216640931651593", "name": "Ross Wood Website Redesign"}, {"gid": "1216208009045309", "name": "Marsh and Main"}, {"gid": "1217239377209835", "name": "Sales"}, {"gid": "1217194342869306", "name": "St. Patrick's Day"}, {"gid": "1219066223453162", "name": "The Recreational Group: Thatch", "kind": "Hourly"}, {"gid": "1219254406444525", "name": "Slimothy the Slug", "kind": "Hourly"}, {"gid": "1219099033687412", "name": "Transformed Testimony", "kind": "Hourly"}, {"gid": "1220217758251082", "name": "CMD: POC"}, {"gid": "1220217758251087", "name": "CMD: Features"}];
 // The Estimated Hours views aggregate over this subset (see EXCLUDE_ESTIMATED in
 // creative_asana_app.py); Actual Hours keeps every project.
-const EST_PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA"}, {"gid": "1216989200658405", "name": "My Pest Solutions SEO"}, {"gid": "1214229029715234", "name": "Savannah Bee Company", "cap": 40, "kind": "Support"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic", "cap": 5}, {"gid": "1214228966572541", "name": "DocSmith.md MSA", "cap": 24}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2027"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}, {"gid": "1216154609521581", "name": "NuNu"}, {"gid": "1216208009045309", "name": "Marsh and Main"}, {"gid": "1217239377209835", "name": "Sales"}, {"gid": "1217194342869306", "name": "St. Patrick's Day"}, {"gid": "1219066223453162", "name": "The Recreational Group: Thatch", "kind": "Hourly"}, {"gid": "1219254406444525", "name": "Slimothy the Slug", "kind": "Hourly"}, {"gid": "1219099033687412", "name": "Transformed Testimony", "kind": "Hourly"}, {"gid": "1220217758251082", "name": "CMD: POC"}, {"gid": "1220217758251087", "name": "CMD: Features"}];
+const EST_PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70}, {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38}, {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40}, {"gid": "1216989200658405", "name": "My Pest Solutions SEO"}, {"gid": "1214229029715234", "name": "Savannah Bee Company", "cap": 40, "kind": "Support"}, {"gid": "1214228966572536", "name": "CMD: Concierge Clinics"}, {"gid": "1214228966572531", "name": "CMD: Pathologic"}, {"gid": "1214228966572526", "name": "CMD: Products"}, {"gid": "1214228966572521", "name": "Georgia Skin & Cancer Clinic", "cap": 5}, {"gid": "1214228966572541", "name": "DocSmith.md MSA", "cap": 24}, {"gid": "1214228966572551", "name": "Savannah Camellia Fest 2027"}, {"gid": "1214228966572563", "name": "Internal IIT Backlog"}, {"gid": "1216154609521581", "name": "NuNu"}, {"gid": "1216208009045309", "name": "Marsh and Main"}, {"gid": "1217239377209835", "name": "Sales"}, {"gid": "1217194342869306", "name": "St. Patrick's Day"}, {"gid": "1219066223453162", "name": "The Recreational Group: Thatch", "kind": "Hourly"}, {"gid": "1219254406444525", "name": "Slimothy the Slug", "kind": "Hourly"}, {"gid": "1219099033687412", "name": "Transformed Testimony", "kind": "Hourly"}, {"gid": "1220217758251082", "name": "CMD: POC"}, {"gid": "1220217758251087", "name": "CMD: Features"}];
 // Archived project gids (see ARCHIVED_GIDS in creative_asana_app.py). The UI script reads
 // this, so the local app's boot script injects it too.
 const ARCHIVED_GIDS = ["1214228966572503", "1214228966572508", "1214228966572568", "1214228966572573", "1214228966572578", "1214755322546416", "1216640931651593"];
-const GROUPS = [{"name": "CMD", "cap": 244, "gids": ["1214228966572536", "1214228966572531", "1214228966572526", "1216154609521581", "1220217758251082", "1220217758251087"]}, {"name": "Cohen's + Camellia Fest", "cap": 40, "gids": ["1214228966572546", "1214228966572551"]}, {"name": "Support Tickets", "cap": 40, "kind": "Support", "gids": ["1214229029715234"], "carves": ["Support Tickets"]}];
-const CARVE_OUTS = [{"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday", "billable": false, "kind": "Hourly"}, {"name": "Support Tickets", "source": "1214228966572563", "match": "Support Tickets", "kind": "Support"}, {"name": "The Recreational Group: Thatch", "source": "1219066223453162", "match": "", "kind": "Hourly"}, {"name": "Slimothy the Slug", "source": "1219254406444525", "match": "", "kind": "Hourly"}, {"name": "Transformed Testimony", "source": "1219099033687412", "match": "", "kind": "Hourly"}];
+const GROUPS = [{"name": "CMD", "cap": 244, "gids": ["1214228966572536", "1214228966572531", "1214228966572526", "1216154609521581", "1220217758251082", "1220217758251087"]}, {"name": "Support Tickets", "cap": 40, "kind": "Support", "gids": ["1214229029715234"], "carves": ["Support Tickets"]}];
+const CARVE_OUTS = [{"name": "Savannah Camellia Fest 2027", "source": "1214228966572551", "match": "", "budget": 120}, {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday", "billable": false, "kind": "Hourly"}, {"name": "Support Tickets", "source": "1214228966572563", "match": "Support Tickets", "kind": "Support"}, {"name": "The Recreational Group: Thatch", "source": "1219066223453162", "match": "", "kind": "Hourly"}, {"name": "Slimothy the Slug", "source": "1219254406444525", "match": "", "kind": "Hourly"}, {"name": "Transformed Testimony", "source": "1219099033687412", "match": "", "kind": "Hourly"}];
 const UNBILLABLE_GIDS = new Set(["1214228966572563"]);
 const DEF_START = "2026-06-01", DEF_END = "2026-06-30";
 // Mirrors HISTORY_SLACK_DAYS: a load reads open tasks plus those completed / modified within this
 // many days before the selected range starts (see fetchTasks).
 const HISTORY_SLACK_DAYS = 30;
+const BUDGET_HISTORY = "2000-01-01";   // mirrors BUDGET_HISTORY: a lifetime-budget carve-out reads all
 // "Not this month" planning (see FIREBASE_CONFIG in creative_asana_app.py). The UI script reads
 // these, so the local app's boot script injects them too.
 const FIREBASE_CONFIG = {"apiKey": "AIzaSyBkzlPD3VdRN6t3cUbAy2XiPUeu--MiImc", "authDomain": "calm-seeker-473214-q2.firebaseapp.com", "projectId": "calm-seeker-473214-q2", "storageBucket": "calm-seeker-473214-q2.firebasestorage.app", "messagingSenderId": "681192461133", "appId": "1:681192461133:web:065b6403c9eb29ee3c9d04"};
@@ -1062,7 +1066,9 @@ async function carveOutSummary(c, start, end){
   // Mirrors carve_out_summary: capacity = estimates of every matching task still open OR worked
   // on in the range, less time logged to those same items before the range; usage = range hours.
   const gid = c.source;
-  const tree = await fetchTree(gid, false, treeSince(start));
+  // A fixed lifetime budget needs every hour ever logged: whole history (mirrors carve_out_summary).
+  const budget = c.budget ?? null;
+  const tree = await fetchTree(gid, false, budget != null ? BUDGET_HISTORY : treeSince(start));
   const hits = carveOutHits(c, tree), touched = touchedCutoff(start);
   const done = x => !!x.completed || isExcluded(x, gid);
   const subsOf = t => tree.subs[t.gid] || [];
@@ -1106,7 +1112,8 @@ async function carveOutSummary(c, start, end){
   // Which tasks bring their estimate into the range: open ones, plus any worked on in it. Such a
   // task brings ALL its subtasks, finished ones too, so remaining = estimated − actual, as in
   // Asana (mirrors carve_out_summary).
-  const taskEst = {}, covered = new Set();
+  const taskEst = {};
+  let covered = new Set();
   let openN = 0;
   for (const t of hits){
     if (done(t) && ![t, ...subsOf(t)].some(i => worked.has(i.gid))) continue;
@@ -1116,6 +1123,8 @@ async function carveOutSummary(c, start, end){
     taskEst[t.gid] = sum(keep.map(taskMinutes)) / 60;
   }
   const est = sum(Object.values(taskEst));
+  // A lifetime budget is burned by everything ever logged to the board, finished work too.
+  if (budget != null) covered = new Set(hits.flatMap(t => [t, ...subsOf(t)].map(i => i.gid)));
   // Work logged to those items before the range already burned part of their estimate.
   const priorSeen = new Set();
   // An item whose entries weren't read logged everything before the range: its tracked total.
@@ -1136,7 +1145,7 @@ async function carveOutSummary(c, start, end){
     estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
   return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null,
-    cap: round2(Math.max(est - priorMin / 60, 0)), estimated: round2(est), prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
+    cap: round2(Math.max((budget != null ? budget : est) - priorMin / 60, 0)), estimated: round2(est), budget, prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes
     updated: nowStr() };
@@ -2083,10 +2092,12 @@ function carveCard(w) {
   c.querySelector('.stat .l').textContent = 'Capacity';
   // Capacity is the estimate less time already logged before the range. Show that sum in the
   // bar's footer (right-aligned), so every card keeps the same shape.
+  // A fixed lifetime budget ("budget") counts down instead: total less everything logged before.
   const lab = c.querySelector('.cap-bar .lab');
+  const base = w.budget != null ? `${h2(w.budget)} total` : `${h2(w.estimated)} est`;
   if (lab) lab.insertAdjacentHTML('beforeend', w.prior > 0
-    ? `<span class="lab-r">${h2(w.estimated)} est − ${h2(w.prior)} before ${fmtDate(dateStart).replace(/, \d{4}$/, '')}</span>`
-    : `<span class="lab-r">${h2(w.estimated)} est</span>`);
+    ? `<span class="lab-r">${base} − ${h2(w.prior)} before ${fmtDate(dateStart).replace(/, \d{4}$/, '')}</span>`
+    : `<span class="lab-r">${base}</span>`);
   c.onclick = () => { location.hash = '#/carve/' + encodeURIComponent(w.name); };
   return c;
 }
@@ -5017,7 +5028,8 @@ async function renderCarveDetail(name) {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:w.name}]);
     const used = Number(w.hours || 0), cap = Number(w.cap || 0), left = r2(cap - used);
     view.innerHTML = summaryBar([
-      // Capacity = the tasks' estimates less what was logged to them before the range.
+      // Capacity = the tasks' estimates (or a fixed lifetime budget) less what was logged before the range.
+      ...(w.budget != null ? [{ n: h2(w.budget) + ' h', l: 'Total budget' }] : []),
       { n: h2(w.estimated ?? cap) + ' h', l: 'Estimated hours' },
       ...(w.prior > 0 ? [{ n: h2(w.prior) + ' h', l: 'Logged before ' + fmtDate(dateStart) }] : []),
       { n: h2(cap) + ' h', l: 'Capacity' },

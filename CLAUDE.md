@@ -70,7 +70,10 @@ duplicate a project list or a team roster anywhere else.
   `loadPersonStats` builds `teamSliceCache` from it. Estimated: `carve_splits` /
   `carveSplits` split `get_assignee_load`'s breakdown, the board keeping the rest, with each
   entry carrying `board` so Bar Chart · Estimated still groups per project. Whole-board
-  carve-outs (empty match) aren't split.
+  carve-outs (empty match) aren't split. A carve-out's optional `budget` is a fixed **lifetime**
+  hour budget in place of the estimates (e.g. Savannah Camellia Fest 2027, 120 h total): capacity
+  = `budget` − every hour logged before the range, so it counts down month to month; it reads the
+  board's whole history (`BUDGET_HISTORY`).
 - `UNBILLABLE_GIDS` marks projects whose logged time is unbillable; a carve-out's tasks on
   such a board stay billable. Each logged entry carries `billable`, and Team Capacity · Logged
   stacks billable (solid) under unbillable (faded) per person.

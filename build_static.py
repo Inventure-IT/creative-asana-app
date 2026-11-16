@@ -56,6 +56,7 @@ const DEF_START = __DEFSTART__, DEF_END = __DEFEND__;
 // Mirrors HISTORY_SLACK_DAYS: a load reads open tasks plus those completed / modified within this
 // many days before the selected range starts (see fetchTasks).
 const HISTORY_SLACK_DAYS = __SLACK__;
+const BUDGET_HISTORY = __BUDGETHIST__;   // mirrors BUDGET_HISTORY: a lifetime-budget carve-out reads all
 // "Not this month" planning (see FIREBASE_CONFIG in creative_asana_app.py). The UI script reads
 // these, so the local app's boot script injects them too.
 const FIREBASE_CONFIG = __FIREBASE__;
@@ -695,7 +696,9 @@ async function carveOutSummary(c, start, end){
   // Mirrors carve_out_summary: capacity = estimates of every matching task still open OR worked
   // on in the range, less time logged to those same items before the range; usage = range hours.
   const gid = c.source;
-  const tree = await fetchTree(gid, false, treeSince(start));
+  // A fixed lifetime budget needs every hour ever logged: whole history (mirrors carve_out_summary).
+  const budget = c.budget ?? null;
+  const tree = await fetchTree(gid, false, budget != null ? BUDGET_HISTORY : treeSince(start));
   const hits = carveOutHits(c, tree), touched = touchedCutoff(start);
   const done = x => !!x.completed || isExcluded(x, gid);
   const subsOf = t => tree.subs[t.gid] || [];
@@ -739,7 +742,8 @@ async function carveOutSummary(c, start, end){
   // Which tasks bring their estimate into the range: open ones, plus any worked on in it. Such a
   // task brings ALL its subtasks, finished ones too, so remaining = estimated − actual, as in
   // Asana (mirrors carve_out_summary).
-  const taskEst = {}, covered = new Set();
+  const taskEst = {};
+  let covered = new Set();
   let openN = 0;
   for (const t of hits){
     if (done(t) && ![t, ...subsOf(t)].some(i => worked.has(i.gid))) continue;
@@ -749,6 +753,8 @@ async function carveOutSummary(c, start, end){
     taskEst[t.gid] = sum(keep.map(taskMinutes)) / 60;
   }
   const est = sum(Object.values(taskEst));
+  // A lifetime budget is burned by everything ever logged to the board, finished work too.
+  if (budget != null) covered = new Set(hits.flatMap(t => [t, ...subsOf(t)].map(i => i.gid)));
   // Work logged to those items before the range already burned part of their estimate.
   const priorSeen = new Set();
   // An item whose entries weren't read logged everything before the range: its tracked total.
@@ -769,7 +775,7 @@ async function carveOutSummary(c, start, end){
     estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
   return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null,
-    cap: round2(Math.max(est - priorMin / 60, 0)), estimated: round2(est), prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
+    cap: round2(Math.max((budget != null ? budget : est) - priorMin / 60, 0)), estimated: round2(est), budget, prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes
     updated: nowStr() };
@@ -869,6 +875,7 @@ def build():
                .replace('__DEFSTART__', DEF_START)
                .replace('__DEFEND__', DEF_END)
                .replace('__SLACK__', str(a.HISTORY_SLACK_DAYS))
+               .replace('__BUDGETHIST__', json.dumps(a.BUDGET_HISTORY))
                .replace('__FIREBASE__', FIREBASE)
                .replace('__PLANDOMAIN__', PLAN_DOMAIN))
 

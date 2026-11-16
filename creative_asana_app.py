@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PROJECTS = [
     {"gid": "1214228966572515", "name": "Georgia Grown Market MSA", "cap": 70},
     {"gid": "1214228966572497", "name": "Mid Eastern MSA", "cap": 38},
-    {"gid": "1214228966572546", "name": "Cohen's Retreat MSA"},
+    {"gid": "1214228966572546", "name": "Cohen's Retreat MSA", "cap": 40},
     {"gid": "1216989200658405", "name": "My Pest Solutions SEO"},
     {"gid": "1214228966572508", "name": "Firebird MSA"},
     {"gid": "1214228966572503", "name": "Myrick Marine"},
@@ -79,10 +79,6 @@ GROUPS = [
         "1220217758251082",   # CMD: POC
         "1220217758251087",   # CMD: Features
     ]},
-    {"name": "Cohen's + Camellia Fest", "cap": 40, "gids": [
-        "1214228966572546",   # Cohen's Retreat MSA
-        "1214228966572551",   # Savannah Camellia Fest 2027
-    ]},
     {"name": "Support Tickets", "cap": 40, "kind": "Support", "gids": [
         "1214229029715234",   # Savannah Bee Company
     ], "carves": ["Support Tickets"]},   # + Support Tickets tasks on Internal IIT Backlog
@@ -95,7 +91,13 @@ GROUPS = [
 # still reports the same tasks everywhere else — a carve-out only adds the card. An optional
 # "kind" tags the card, as on PROJECTS. A carve-out named in a GROUPS entry's "carves" rolls
 # into that group's card instead of getting its own.
+# An optional "budget" replaces the estimate with a fixed LIFETIME hour budget (not monthly): the
+# card's capacity for a range is then `budget` less every hour ever logged before the range
+# starts, so it counts down month by month. Such a carve-out reads its board's whole history.
 CARVE_OUTS = [
+    {"name": "Savannah Camellia Fest 2027", "source": "1214228966572551", "match": "",
+     "budget": 120},   # 120 h total for the whole engagement
+
     {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday",   # Internal IIT Backlog
      "billable": False, "kind": "Hourly"},
     {"name": "Support Tickets", "source": "1214228966572563", "match": "Support Tickets",   # Internal IIT Backlog
@@ -168,6 +170,7 @@ DEFAULT_END = "2026-06-30"               #   entries with start <= entered_on <=
 # older range asks for it. The slack covers time logged to a SUBTASK of an already-finished
 # task: that bumps the subtask's modified_at but not always the parent's.
 HISTORY_SLACK_DAYS = 30
+BUDGET_HISTORY = "2000-01-01"            # tree cutoff for a lifetime-budget carve-out: everything
 ASSIGNEE_HOURS_CAP = 128                 # estimated hours each assignee is expected to fill (all projects)
 # Team Capacity chart shows only these people (sorted by remaining), with Unassigned pinned far right.
 TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roach"]
@@ -1339,7 +1342,9 @@ def carve_out_summary(c, start, end, refresh=False):
     Asana calls of its own.
     """
     gid = c["source"]
-    tree = fetch_tree(gid, refresh=refresh, since=tree_since(start))
+    budget = c.get("budget")   # a fixed lifetime budget needs every hour ever logged: whole history
+    tree = fetch_tree(gid, refresh=refresh,
+                      since=BUDGET_HISTORY if budget is not None else tree_since(start))
     hits = carve_out_hits(c, tree)
     touched = touched_cutoff(start)
     done = lambda x: bool(x.get("completed")) or is_excluded(x, gid)
@@ -1403,6 +1408,9 @@ def carve_out_summary(c, start, end, refresh=False):
         covered.update(i["gid"] for i in keep)
         task_est[t["gid"]] = sum(task_minutes(i) for i in keep) / 60
     est = sum(task_est.values())
+    if budget is not None:
+        # A lifetime budget is burned by everything ever logged to the board, finished work too.
+        covered = {i["gid"] for t in hits for i in [t] + subs_of(t)}
     # Work logged to those items before the range already burned part of their estimate.
     prior_seen, prior_min = set(), 0
     # An item whose entries weren't read logged everything before the range: its tracked total.
@@ -1440,8 +1448,9 @@ def carve_out_summary(c, start, end, refresh=False):
         "source_name": PROJECT_NAMES.get(gid, gid),
         "match": c["match"],
         "kind": c.get("kind"),
-        "cap": round(max(est - prior_min / 60, 0), 2),   # never below zero
+        "cap": round(max((est if budget is None else budget) - prior_min / 60, 0), 2),   # never below zero
         "estimated": round(est, 2),
+        "budget": budget,   # fixed lifetime hours, or None (capacity comes from the estimates)
         "prior": round(prior_min / 60, 2),
         "ntasks": open_n,
         "hours": round(logged / 60, 2),
@@ -1772,6 +1781,9 @@ PAGE = r"""<!DOCTYPE html>
   }
   .grid.cap-grid:not(.plan-out), .grid[data-drop="sort"] { align-items:stretch; }
   .grid.cap-grid.plan-out { align-items:start; }
+  /* A lone bucket shares the project cards' grid; spanning two rows lets two rows of project
+     cards sit beside it, instead of one row stretched to the bucket's member-list height. */
+  .grid.cap-grid:not(.bucket-grid):not(.plan-out) > .grp-card { grid-row:span 2; }
   .grid.cap-grid .grp-card { display:flex; flex-direction:column; }
   .grid.cap-grid .grp-card .go { margin-top:auto; padding-top:14px; }
   /* A project (or bucket) that has spent its whole monthly budget: gold tint, so "no hours
@@ -2762,10 +2774,12 @@ function carveCard(w) {
   c.querySelector('.stat .l').textContent = 'Capacity';
   // Capacity is the estimate less time already logged before the range. Show that sum in the
   // bar's footer (right-aligned), so every card keeps the same shape.
+  // A fixed lifetime budget ("budget") counts down instead: total less everything logged before.
   const lab = c.querySelector('.cap-bar .lab');
+  const base = w.budget != null ? `${h2(w.budget)} total` : `${h2(w.estimated)} est`;
   if (lab) lab.insertAdjacentHTML('beforeend', w.prior > 0
-    ? `<span class="lab-r">${h2(w.estimated)} est − ${h2(w.prior)} before ${fmtDate(dateStart).replace(/, \d{4}$/, '')}</span>`
-    : `<span class="lab-r">${h2(w.estimated)} est</span>`);
+    ? `<span class="lab-r">${base} − ${h2(w.prior)} before ${fmtDate(dateStart).replace(/, \d{4}$/, '')}</span>`
+    : `<span class="lab-r">${base}</span>`);
   c.onclick = () => { location.hash = '#/carve/' + encodeURIComponent(w.name); };
   return c;
 }
@@ -5696,7 +5710,8 @@ async function renderCarveDetail(name) {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:w.name}]);
     const used = Number(w.hours || 0), cap = Number(w.cap || 0), left = r2(cap - used);
     view.innerHTML = summaryBar([
-      // Capacity = the tasks' estimates less what was logged to them before the range.
+      // Capacity = the tasks' estimates (or a fixed lifetime budget) less what was logged before the range.
+      ...(w.budget != null ? [{ n: h2(w.budget) + ' h', l: 'Total budget' }] : []),
       { n: h2(w.estimated ?? cap) + ' h', l: 'Estimated hours' },
       ...(w.prior > 0 ? [{ n: h2(w.prior) + ' h', l: 'Logged before ' + fmtDate(dateStart) }] : []),
       { n: h2(cap) + ' h', l: 'Capacity' },
