@@ -71,14 +71,16 @@ duplicate a project list or a team roster anywhere else.
   `carveSplits` split `get_assignee_load`'s breakdown, the board keeping the rest, with each
   entry carrying `board` so Bar Chart · Estimated still groups per project. Whole-board
   carve-outs (empty match) aren't split. A carve-out's optional `budget` is a fixed **lifetime**
-  hour budget in place of the estimates (e.g. Savannah Camellia Fest 2027, 120 h total): capacity
+  hour budget in place of the estimates (none use one right now): capacity
   = `budget` − every hour logged before the range, so it counts down month to month; it reads the
-  board's whole history (`BUDGET_HISTORY`).
+  board's whole history (`BUDGET_HISTORY`). A carve-out with `"capacity": "due"` (Savannah Camellia Fest 2027,
+  kind `Estimate`) instead gets its capacity on MSA Project Capacity from the estimated hours of its
+  open tasks due in the range (`dueCarve`, using `dueTaskRows` on `auditDetails`).
 - `UNBILLABLE_GIDS` marks projects whose logged time is unbillable; a carve-out's tasks on
   such a board stay billable. Each logged entry carries `billable`, and Team Capacity · Logged
   stacks billable (solid) under unbillable (faded) per person.
-- `ARCHIVED_GIDS` is the set of archived project gids. They still appear on the card/list
-  tabs (Project Cards, MSA Project Capacity), but under an **Archived projects** section
+- `ARCHIVED_GIDS` is the set of archived project gids. They still appear on MSA Project
+  Capacity, but under an **Archived projects** section
   below the active work and outside the summary stats — the UI splits them off via the
   injected `ARCHIVED_GIDS` / `isArchived()`. They are excluded from the aggregate estimated
   views: `EST_PROJECTS` is `PROJECTS` minus that set, and `get_assignee_load` /
@@ -106,16 +108,33 @@ as a fallback.
 The dashboard is **dark-mode only** and must read as one system. Do not introduce a second
 visual language for a new tab.
 
+### Design references
+
+- **[shadcn/ui](https://ui.shadcn.com)** is the reference for how components should look and
+  behave: cards, tabs, inputs, selects, badges, buttons, settings layouts, spacing and type scale.
+  Borrow its patterns (quiet borders, generous padding, muted secondary text, one accent per
+  state) and translate them into this file's CSS variables. Don't install it — it's a React/Tailwind
+  library and this app stays zero-install (see Don'ts); copy the look, not the code.
+- **Icons are [Lucide](https://lucide.dev)** (the set shadcn/ui uses, ISC license). They're inlined:
+  paste an icon's inner SVG into the `ICONS` map and draw it with `icon(name, cls?)` — 24×24,
+  `stroke = currentColor`, sized by `.ic` (16 px). No icon font, sprite or CDN. Use them sparingly
+  and consistently: one per nav item (`TABS[key].icon`), one per Settings section, and only where an
+  icon makes a control faster to recognise — never as decoration in tables or numbers. No emoji.
+
 ### The page skeleton every tab follows
 
 In order, top to bottom — do not reorder, and do not skip a step:
 
-1. `<h1>` page title (from `TABS[key].title`) + Refresh button, then the one-line `sub`.
-   Every tab has both. Titles are qualified (`Team Capacity · Estimated` vs `· Logged`)
+1. `<h1>` page title (from `TABS[key].title`) + Refresh button. **No explanatory `sub` text** —
+   by request the pages carry no info/help paragraphs (they cluttered every tab); let titles,
+   axis labels and chart lines speak. Titles are qualified (`Team Capacity · Estimated` vs `· Logged`)
    because several tabs share a short sidebar label.
 2. A `summaryBar([...])` of headline stats — the numbers a PM should get without scrolling.
-3. **One** `.toolbar`. Never stack two. Range-based tabs call `rangePicker(extra)` and pass
-   their own controls in as `extra`; each control group starts with a `<span class="tb-label">`.
+   (Exception: Team Capacity · Estimated has no summary bar, by request.)
+3. **One** `.toolbar`. Never stack two. Tabs call `rangePicker(extra)` with their own controls
+   (it returns nothing when there are none); each control group starts with a `<span class="tb-label">`.
+   The **date range itself lives in the sidebar** (`rangePanel()`, under the nav on every page),
+   shared by all tabs: the dashboard wires it in `wireRangeSel`, a detail page in `wireSidebar`.
 4. The chart (`.chart-box`) and/or the tables, with `.section-h` headings (`.flush` on the
    first one, which has no chart above it to sit under).
 
@@ -178,15 +197,17 @@ Chart data colors come from helpers, never literals:
   (seeded into `_personColors`); real people get their color from the Graph Colors tab.
 - `capColor(hours, cap)` — Team Capacity · **Logged**: green within `CAP_TOLERANCE` (15 h) of
   target, red outside it. Red means "needs attention" (over *or* under booked), not merely "over".
-- `capColorEst(hours)` — Team Capacity · **Estimated**: green above `CAP_GREEN_MIN` (80 h)
-  remaining, red at or below it (that person has room and needs work assigned).
+- `capColorEst(hours, workable)` — Team Capacity · **Estimated**: green when remaining hours reach
+  the amber "workable" line (`TEAM_DAILY_HOURS` × work days left this month), red below it (that
+  person will run out of work and needs more assigned).
 
 ### Layout & components
 
 - Every page is `.layout` = sticky `.sidebar` + `.content`. Detail pages keep the same
   sidebar so nav never jumps.
-- Nav is data-driven: add a tab to `TABS` (label + title, optional `sub`) and list its key
-  in the right `NAV_SECTIONS` group ("Estimated Hours" / "Actual Hours" / "Settings").
+- Nav is data-driven: add a tab to `TABS` (icon + label + title) and list its key
+  in the right `NAV_SECTIONS` group ("Estimated Hours" / "Actual Hours"). Settings is one tab whose
+  sections (Theme, Graph colors, Holidays) are listed in `SETTINGS_SECTIONS` and draw into `settingsRoot()` under a segmented tab bar.
   Don't hand-write nav markup.
 - Card grids are `.grid` with `.card`; reuse `estCard` / `loggedCard` / `capCard` / `groupCard`
   rather than writing new card HTML. Stats inside a card are `.stats > .stat > .n` + `.l`
@@ -211,7 +232,7 @@ Chart data colors come from helpers, never literals:
   column are `NO_STATUS` (`No status`), rendered as a `<span class="badge none">`.
 - People axes are titled `Assignee` on estimated charts and `Logged by` on actual ones;
   value axes are `Remaining hours`, `Estimated hours`, or `Hours logged`.
-- Date ranges render through `rangeLabel()` / `rangePicker()`; don't roll a new date UI.
+- Date ranges render through `rangeLabel()` and are picked in the sidebar's `rangePanel()`; don't roll a new date UI.
 
 ### Charts
 
@@ -297,7 +318,13 @@ section is shared too (not per month): doc `layout/capacity` = `{ order: [card i
 every render (configured value kept as `cfgCap`), so every tab's budgets agree. **Holidays** (Settings › Holidays) live in doc `settings/holidays` = `{ days: [{ date, name }] }`,
 edited by anyone signed in (atomic `arrayUnion`/`arrayRemove` to add or remove; an edit is a
 `runTransaction` swap in `planHolidayReplace`); `DEFAULT_HOLIDAYS` is only the
-starting list until that doc exists. `setHolidays()` refills the `HOLIDAYS` set `workdayProgress` reads. The `plan` object and
+starting list until that doc exists. `setHolidays()` refills the `HOLIDAYS` set `workdayProgress` reads. **Gantt plan** (Estimated Hours ›
+Gantt) lives in doc `settings/gantt` = `{ headings: { <hid>: { project, name, start, end, tasks: { <task
+gid>: { start, end, name } } } }, loose: { <task gid>: { start, end } } }`, merged field-by-field through
+`ganttApply()` (optimistic, rolled back on a failed write). The Gantt lists every open estimated task
+from `auditDetails` (Team Capacity · Estimated's projects) on its own; the doc holds only headings and
+dragged dates, and an undragged task gets `ganttAutoSpan()` (remaining hours at `TEAM_DAILY_HOURS`/day,
+back from its Asana due date). It never writes to Asana. The `plan` object and
 `plan*` helpers hold the state; a change re-renders from cached data (never re-hits Asana).
 - Don't add light-mode styling or a third accent color without a reason that survives the
   blue/green semantics above.

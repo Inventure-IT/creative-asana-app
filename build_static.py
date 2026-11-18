@@ -301,10 +301,10 @@ function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).tri
 // lets fetchTree skip the subtask call for a leaf task, and completed_at is what the
 // logged-hours layer needs, so it no longer re-fetches these same lists.
 // modified_at gates the time-entry reads (see isTouched).
-const TASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+const TASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
 // A subtask carries its own memberships, so it gets its own status column when it has been
 // added to the project — never inherit the parent's section for it.
-const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
 // Mirrors TREE_FIELDS: each task carries its subtasks nested, so a project's tree comes back in
 // its task-list pages instead of one extra call per task with subtasks.
 const TREE_FIELDS = TASK_FIELDS + ',' + SUBTASK_FIELDS.split(',').map(f => 'subtasks.' + f).join(',');
@@ -380,10 +380,10 @@ function buildTask(t, gid, children){
     subs.push({ gid: s.gid, name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
       hours: round2(m / 60), actual: round2(actualMinutes(s) / 60),
       // the subtask's OWN status column; '' when it isn't a member of the project
-      section: sectionName(s, gid), done });
+      section: sectionName(s, gid), due: s.due_on || '', done });
   }
   return { gid: t.gid, name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
-    hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: sectionName(t, gid), subtasks: subs };
+    hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: sectionName(t, gid), due: t.due_on || '', subtasks: subs };
 }
 
 async function projectDetail(gid, refresh){
@@ -446,14 +446,15 @@ function assigneeProjectTasks(d, name){
   for (const t of d.tasks){
     if (t.assignee === name)
       rows.push({ gid: t.gid, name: t.name, type: 'task', status: t.section, estimated: t.hours, actual: t.actual,
-        remaining: round2(t.hours - t.actual - subBurn(t, name)), context: '', done: false });
+        remaining: round2(t.hours - t.actual - subBurn(t, name)), context: '', done: false, due: t.due || '' });
     for (const s of t.subtasks){
       if (s.assignee === name)
         rows.push({ gid: s.gid, name: s.name, type: 'subtask', status: s.section, estimated: s.hours, actual: s.actual,
           // zero when it has no estimate of its own AND the parent row above is this person's
           remaining: (!s.hours && t.assignee === name) ? 0 : round2(s.hours - s.actual),
           context: t.assignee === name ? '' : `under "${t.name}" · ${t.assignee}`,
-          done: s.done });   // finished work, kept on the list but greyed out
+          done: s.done,   // finished work, kept on the list but greyed out
+          due: s.due || t.due || '' });   // own due date, else the parent's
     }
   }
   return rows;
@@ -774,7 +775,7 @@ async function carveOutSummary(c, start, end){
     section: sectionName(t, gid), done: done(t),
     estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
-  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null,
+  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null, capacity_mode: c.capacity || null,
     cap: round2(Math.max((budget != null ? budget : est) - priorMin / 60, 0)), estimated: round2(est), budget, prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes

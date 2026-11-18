@@ -95,8 +95,11 @@ GROUPS = [
 # card's capacity for a range is then `budget` less every hour ever logged before the range
 # starts, so it counts down month by month. Such a carve-out reads its board's whole history.
 CARVE_OUTS = [
+    # "capacity": "due" — MSA Project Capacity sets this card's capacity to the estimated hours of
+    # its open tasks due in the selected date range (the page's due-date rule), and lists it under
+    # the "Estimate" section.
     {"name": "Savannah Camellia Fest 2027", "source": "1214228966572551", "match": "",
-     "budget": 120},   # 120 h total for the whole engagement
+     "kind": "Estimate", "capacity": "due"},
 
     {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday",   # Internal IIT Backlog
      "billable": False, "kind": "Hourly"},
@@ -121,8 +124,7 @@ UNBILLABLE_GIDS = {
 }
 
 # Archived projects: dormant or internal work that shouldn't shape the headline numbers.
-# They are still reported everywhere, just separately — the card/list tabs (Project Cards,
-# MSA Project Capacity) put them under their own "Archived projects" section, below the
+# They are still reported everywhere, just separately — MSA Project Capacity puts them under their own "Archived projects" section, below the
 # active work, and they are left out of the summary stats above it. They ARE excluded from
 # the aggregate estimated views (Team Capacity · Estimated and Bar Chart · Estimated), where
 # a dormant project would distort per-person load and there is no section to put it in.
@@ -580,12 +582,12 @@ def api_batch(paths):
 # path needs — asking for it here means that path no longer re-fetches the same lists.
 # `modified_at` gates the time-entry reads: logging time always bumps the item's own modified_at,
 # so an item untouched since a range started has no entries in that range (see is_touched).
-TASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,num_subtasks,"
+TASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,num_subtasks,"
                "custom_fields.name,custom_fields.number_value,"
                "memberships.section.name,memberships.project.gid")
 # A subtask carries its own memberships, so it gets its own status column when it has been
 # added to the project — never inherit the parent's section for it.
-SUBTASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,actual_time_minutes,"
+SUBTASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,"
                   "custom_fields.name,custom_fields.number_value,"
                   "memberships.section.name,memberships.project.gid")
 # The task-list read asks for each task's subtasks nested inside it, so a project's whole tree
@@ -838,6 +840,7 @@ def build_task(t, gid, children):
             "actual": round(actual_minutes(s) / 60, 2),
             # the subtask's OWN status column; '' when it isn't a member of the project
             "section": section_name(s, gid),
+            "due": s.get("due_on") or "",     # YYYY-MM-DD, '' when unset
             "done": done,
         })
     return {
@@ -847,6 +850,7 @@ def build_task(t, gid, children):
         "hours": round(parent_min / 60, 2),   # parent's own estimate (attributed to parent assignee)
         "actual": round(actual_minutes(t) / 60, 2),   # parent's own tracked time
         "section": section_name(t, gid),
+        "due": t.get("due_on") or "",         # YYYY-MM-DD, '' when unset
         "subtasks": subs,                     # each subtask attributed to its own assignee
     }
 
@@ -961,6 +965,7 @@ def assignee_project_tasks(d, name):
                 "estimated": t["hours"], "actual": t["actual"],
                 "remaining": round(t["hours"] - t["actual"] - sub_burn(t, name), 2),
                 "context": "", "done": False,   # completed parents never reach here
+                "due": t.get("due", ""),
             })
         for s in t["subtasks"]:
             if s["assignee"] == name:
@@ -972,6 +977,8 @@ def assignee_project_tasks(d, name):
                     "remaining": 0.0 if (not s["hours"] and t["assignee"] == name)
                                  else round(s["hours"] - s["actual"], 2),
                     "done": s["done"],   # finished work, kept on the list but greyed out
+                    # its own due date, else the parent's (the Team Capacity due-date filter)
+                    "due": s.get("due") or t.get("due", ""),
                     # note the parent when this subtask lives under someone else's task
                     "context": "" if t["assignee"] == name else f'under "{t["name"]}" · {t["assignee"]}',
                 })
@@ -1448,6 +1455,7 @@ def carve_out_summary(c, start, end, refresh=False):
         "source_name": PROJECT_NAMES.get(gid, gid),
         "match": c["match"],
         "kind": c.get("kind"),
+        "capacity_mode": c.get("capacity"),   # "due" = the page uses the estimates due in range
         "cap": round(max((est if budget is None else budget) - prior_min / 60, 0), 2),   # never below zero
         "estimated": round(est, 2),
         "budget": budget,   # fixed lifetime hours, or None (capacity comes from the estimates)
@@ -1560,6 +1568,119 @@ PAGE = r"""<!DOCTYPE html>
   .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; display:flex; gap:12px;
                  justify-content:space-between; font-variant-numeric:tabular-nums; }
   .cap-bar .lab-r { color:var(--faint); white-space:nowrap; }
+  /* Capacity card with a projection: each block fills continuously — green = logged, striped
+     blue = estimated work due in the range still to burn (red stripes once that runs past the
+     capacity). The headline reads the projected total. */
+  .cap-bar.proj .blk { display:flex; overflow:hidden; }
+  .cap-bar.proj .blk b { display:block; height:100%; }
+  .cap-bar.proj .blk .u { background:var(--green); }
+  .cap-bar.proj.over .blk .u { background:var(--red); }
+  .cap-bar.proj .blk .e, .cap-bar.proj .sw.e {
+    background:repeating-linear-gradient(135deg, var(--blue) 0 3px, var(--blue-d) 3px 6px); }
+  .cap-bar.proj.p-over .blk .e, .cap-bar.proj.p-over .sw.e {
+    background:repeating-linear-gradient(135deg, var(--red) 0 3px, var(--panel2) 3px 6px); }
+  .cap-bar .proj-head { display:flex; justify-content:flex-end; align-items:baseline; gap:12px;
+                        margin-bottom:6px; font-size:11px; font-variant-numeric:tabular-nums; }
+  .cap-bar .proj-v { color:var(--muted); white-space:nowrap; }
+  .cap-bar .proj-v b { color:var(--blue); font-size:15px; font-weight:700; }
+  .cap-bar.p-over .proj-v, .cap-bar.p-over .proj-v b { color:var(--red); }
+  .cap-bar .proj-key { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
+  .cap-bar .sw { width:9px; height:9px; border-radius:2px; display:inline-block; }
+  .cap-bar .sw.u { background:var(--green); }
+  .cap-bar.proj .lab { justify-content:flex-start; flex-wrap:wrap; row-gap:3px; }
+  .cap-bar.proj .lab-r { margin-left:auto; }
+  /* Task lists of work due in a range (capacity detail pages, Team Capacity · Estimated). */
+  .due-late { color:var(--red); }
+  .nowrap { white-space:nowrap; }
+  /* Due-in-range task list (dueTable): urgency groups, two-line task cell, burn bar. */
+  table.due-tasks td { vertical-align:middle; }
+  table.due-tasks tr.dt-group td { padding:16px 10px 6px; border-bottom:1px solid var(--border); }
+  .dt-gt { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text); }
+  .dt-group.late .dt-gt { color:var(--red); }
+  .dt-gs { font-size:12px; color:var(--muted); margin-left:8px; font-variant-numeric:tabular-nums; }
+  .dt-task { min-width:220px; }
+  .dt-name { font-weight:500; line-height:1.35; }
+  .dt-name a { color:var(--text); text-decoration:none; }
+  .dt-name a:hover { color:var(--blue); text-decoration:underline; }
+  .dt-meta { font-size:12px; color:var(--faint); margin-top:2px; line-height:1.35; }
+  .dt-who { white-space:nowrap; }
+  .dt-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:1px; }
+  .dt-due { white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .dt-rel { font-size:12px; color:var(--faint); }
+  .dt-pill { display:inline-block; font-size:11px; padding:1px 7px; border-radius:9px; margin-top:2px;
+             background:var(--panel2); color:var(--muted); white-space:nowrap; }
+  .dt-pill.late { color:var(--red); }
+  .dt-pill.soon { color:var(--blue); }
+  .dt-status .badge { white-space:nowrap; }
+  .dt-prog { width:150px; white-space:nowrap; }
+  .dt-bar { height:6px; border-radius:3px; background:var(--blk-off); overflow:hidden; }
+  .dt-bar i { display:block; height:100%; background:var(--green); }
+  .dt-bar.over i { background:var(--red); }
+  .dt-hrs { font-size:12px; color:var(--muted); margin-top:4px; font-variant-numeric:tabular-nums; }
+  .dt-left { font-weight:700; color:var(--blue); white-space:nowrap; }
+  tr.unest .dt-name a, tr.unest .dt-left { color:var(--muted); }
+  .person-h { font-size:15px; margin:22px 0 8px; }
+  /* Gantt (Estimated Hours › Gantt): one scroller; the label column sticks left, the date
+     header sticks top. Bars take the project's color; the darker fill is time logged against
+     the estimate, and the small diamond on a task row is its Asana due date. */
+  .gantt { --g-label:460px; position:relative; overflow:auto; max-height:72vh; margin-top:10px;
+           border:1px solid var(--border); border-radius:10px; background:var(--bg); }
+  .g-row { display:flex; position:relative; z-index:1; min-height:36px; width:max-content; min-width:100%; }
+  .g-label { position:sticky; left:0; z-index:3; flex:0 0 var(--g-label); width:var(--g-label);
+             display:flex; align-items:center; gap:6px; padding:0 10px; box-sizing:border-box;
+             background:var(--panel); border-right:1px solid var(--border); border-bottom:1px solid var(--sep);
+             font-size:13px; min-width:0; }
+  .g-label.lvl1 { padding-left:30px; }
+  .g-label.lvl2 { padding-left:48px; }
+  .g-name { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .g-proj .g-name { font-weight:700; }
+  .g-head-row .g-name { font-weight:600; }
+  .g-proj.empty .g-name { color:var(--muted); font-weight:500; }
+  .g-name a { color:var(--text); text-decoration:none; }
+  .g-name a:hover { color:var(--blue); text-decoration:underline; }
+  .g-who { font-size:11px; color:var(--faint); white-space:nowrap; max-width:95px; overflow:hidden; text-overflow:ellipsis; }
+  .g-col { flex:0 0 52px; text-align:right; font-variant-numeric:tabular-nums; color:var(--muted); font-size:12px; }
+  .g-col.g-left { color:var(--blue); font-weight:600; }
+  .g-tog { background:none; border:0; color:var(--muted); width:14px; padding:0; cursor:pointer; font-size:12px; }
+  .g-act { background:var(--panel2); border:1px solid var(--border); color:var(--muted); border-radius:6px;
+           font-size:11px; padding:2px 7px; cursor:pointer; opacity:0; white-space:nowrap; }
+  .g-row:hover .g-act, .g-act:focus { opacity:1; }
+  .g-act:hover { color:var(--text); border-color:var(--border-h); }
+  .g-input { flex:1 1 auto; min-width:0; background:var(--panel2); color:var(--text);
+             border:1px solid var(--border); border-radius:6px; padding:5px 8px; font:inherit; font-size:13px; }
+  .g-track { position:relative; flex:0 0 auto; border-bottom:1px solid var(--sep); }
+  .g-task-row.gone .g-name, .g-task-row.gone .g-name a { color:var(--faint); }
+  .g-header { position:sticky; top:0; z-index:5; min-height:0; }
+  .g-header .g-label { z-index:6; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .g-scale { flex:0 0 auto; background:var(--panel); border-bottom:1px solid var(--border); }
+  .g-weeks { position:relative; height:22px; border-bottom:1px solid var(--sep); }
+  .g-wk { position:absolute; top:0; height:22px; line-height:22px; padding-left:6px; box-sizing:border-box;
+          font-size:11px; font-weight:600; color:var(--text); border-left:1px solid var(--sep); white-space:nowrap; overflow:hidden; }
+  .g-days { display:flex; height:22px; }
+  .g-dy { flex:0 0 auto; text-align:center; font-size:10px; line-height:22px; color:var(--muted);
+          font-variant-numeric:tabular-nums; }
+  .g-dy.off { color:var(--faint); }
+  .g-dy.today { color:var(--blue); font-weight:700; }
+  .g-body { position:relative; width:max-content; min-width:100%; }
+  .g-grid { position:absolute; top:0; bottom:0; left:var(--g-label); pointer-events:none; z-index:0; }
+  .g-off { position:absolute; top:0; bottom:0; background:var(--panel); opacity:.55; }
+  .g-now { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:var(--blue); opacity:.8; }
+  .g-sum { position:absolute; top:15px; height:6px; border-radius:3px; opacity:.55; }
+  .g-bar { position:absolute; top:7px; height:22px; border-radius:5px; overflow:hidden; box-sizing:border-box;
+           display:flex; align-items:center; user-select:none; touch-action:none; }
+  .g-bar.g-t { top:10px; height:16px; opacity:.72; }
+  .g-prog { position:absolute; left:0; top:0; bottom:0; background:var(--bg); opacity:.35; pointer-events:none; }
+  .g-txt { position:relative; padding:0 8px; font-size:11px; font-weight:700; color:var(--bg); white-space:nowrap; pointer-events:none; }
+  .g-due { position:absolute; top:13px; width:9px; height:9px; margin-left:-4.5px; transform:rotate(45deg);
+           background:var(--text); border:1px solid var(--bg); z-index:2; }
+  .g-editable .g-bar { cursor:grab; }
+  .g-editable .g-bar.dragging { cursor:grabbing; opacity:.9; box-shadow:0 0 0 2px var(--text); }
+  .g-hdl { position:absolute; top:0; bottom:0; width:8px; }
+  .g-hdl.l { left:0; } .g-hdl.r { right:0; }
+  .g-editable .g-hdl { cursor:ew-resize; }
+  .g-bar.g-t.nodue { opacity:.45; outline:1px dashed var(--text); outline-offset:-1px; }
+  .g-other .g-name { color:var(--muted); font-weight:500; font-style:italic; }
+  table.tasks tr.unest td { color:var(--muted); }
   /* Filter toolbar. Every tab that filters anything uses exactly one of these, directly
      under the stat strip, and it always opens with a bold .tb-label. It sits in its own
      panel so the controls read as one strip instead of floating on the page. */
@@ -1589,17 +1710,59 @@ PAGE = r"""<!DOCTYPE html>
   .toolbar .tb-sep { width:1px; align-self:stretch; background:var(--border); margin:2px 4px; }
   /* dashboard layout: left nav + content */
   .layout { display:flex; gap:24px; align-items:flex-start; }
-  .sidebar { flex:0 0 210px; position:sticky; top:32px; background:var(--panel); border-radius:12px;
-             padding:14px 12px; box-shadow:0 1px 3px rgba(0,0,0,.4); border:1px solid var(--border); }
-  .sidebar .brand { font-size:15px; font-weight:600; padding:6px 12px 14px; color:var(--text); }
+  /* Left column: one panel — brand, the shared date range, then the nav sections. */
+  .side-col { flex:0 0 236px; position:sticky; top:32px; max-height:calc(100vh - 48px); overflow-y:auto;
+              border-radius:12px; display:flex; flex-direction:column; gap:12px; }
+  /* Account card under the nav: who's signed in, and Sign out. */
+  .side-user { display:flex; align-items:center; gap:10px; padding:10px 10px 10px 12px; background:var(--panel);
+               border:1px solid var(--border); border-radius:12px; box-shadow:0 1px 3px rgba(0,0,0,.4); }
+  .su-av { flex:0 0 32px; width:32px; height:32px; border-radius:50%; display:grid; place-items:center;
+           background:var(--panel2); border:1px solid var(--border); color:var(--text); font-size:12px; font-weight:700; }
+  .su-t { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:1px; }
+  .su-t b { font-size:13px; font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .su-t small { font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .su-out { flex:0 0 auto; display:grid; place-items:center; width:30px; height:30px; border-radius:8px; cursor:pointer;
+            background:none; border:1px solid transparent; color:var(--muted); }
+  .su-out:hover { background:var(--panel2); border-color:var(--border); color:var(--text); }
+  .side-range { display:flex; flex-direction:column; gap:8px; padding:4px 8px 16px; margin-bottom:6px;
+                border-bottom:1px solid var(--border); }
+  .side-range-h { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+                  color:var(--faint); padding:0 4px 2px; }
+  .side-range-row { display:grid; grid-template-columns:38px minmax(0, 1fr); align-items:center; gap:8px;
+                    font-size:12px; color:var(--muted); padding-left:4px; }
+  .side-range-row input { width:100%; box-sizing:border-box; min-width:0; height:34px; }
+  .side-range input[type=date] { background:var(--panel2); color:var(--text); border:1px solid var(--border);
+                                 border-radius:8px; padding:0 10px; font-size:13px; cursor:pointer; font-family:inherit; }
+  .side-range input[type=date]:hover { border-color:var(--border-h); }
+  .side-range input[type=date]::-webkit-calendar-picker-indicator { filter:invert(.8); cursor:pointer; }
+  .side-range .btn { margin-top:4px; height:34px; width:100%; }
+  /* Settings: a segmented tab bar (shadcn Tabs) over the open section, which runs full width. */
+  .set-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+             margin-bottom:22px; }
+  .set-tabs { display:inline-flex; gap:4px; padding:4px; background:var(--panel); border:1px solid var(--border);
+              border-radius:10px; }
+  .set-tab { display:inline-flex; align-items:center; gap:8px; padding:7px 14px; border-radius:7px; border:1px solid transparent;
+             background:none; color:var(--muted); font:inherit; font-size:13px; font-weight:500; cursor:pointer; white-space:nowrap; }
+  .set-tab:hover { color:var(--text); }
+  .set-tab.on { background:var(--panel2); border-color:var(--border); color:var(--text); box-shadow:0 1px 2px rgba(0,0,0,.35); }
+  .set-tab.on .ic { color:var(--blue); }
+  .set-scope { font-size:11px; font-weight:600; padding:4px 10px; border-radius:999px; white-space:nowrap;
+               background:var(--panel); border:1px solid var(--border); color:var(--muted); }
+  .set-scope.shared { color:var(--green); }
+  .set-body > .section-h:first-child, .set-body > .summary-bar:first-child { margin-top:0; }
+  .sidebar { background:var(--panel); border-radius:12px;
+             padding:16px 12px 12px; box-shadow:0 1px 3px rgba(0,0,0,.4); border:1px solid var(--border); }
+  .sidebar .brand { font-size:15px; font-weight:700; padding:2px 12px 16px; color:var(--text); }
   /* Sidebar sections carry the same blue = estimated / green = logged semantics as the rest
      of the app, so the two halves of the nav are told apart at a glance: a colored dot and
      heading, a colored rail down the group, and an active item in that section's accent.
      A hairline between sections stops the eight items reading as one flat list. */
-  .nav-sec + .nav-sec { margin-top:12px; padding-top:2px; border-top:1px solid var(--border); }
+  .nav-sec + .nav-sec { margin-top:10px; padding-top:4px; border-top:1px solid var(--border); }
+  .nav-sec.plain { padding-top:10px; }
+  .nav-sec.plain .nav-group { border-left-color:transparent; }
   .nav-section { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
                  color:var(--faint); padding:14px 12px 6px; }
-  .nav-sec:first-child .nav-section { padding-top:4px; }
+  .side-range + .nav-sec .nav-section { padding-top:10px; }
   .nav-section::before { content:''; display:inline-block; width:6px; height:6px; border-radius:50%;
                          margin-right:6px; vertical-align:middle; background:var(--faint); }
   .nav-sec.est .nav-section { color:var(--blue); }
@@ -1609,7 +1772,9 @@ PAGE = r"""<!DOCTYPE html>
   .nav-group { border-left:2px solid var(--border); padding-left:7px; margin-left:3px; }
   .nav-sec.est .nav-group { border-left-color:var(--blue); }
   .nav-sec.act .nav-group { border-left-color:var(--green); }
-  .nav-item { display:block; padding:10px 12px; margin-bottom:4px; border-radius:8px;
+  .ic { width:16px; height:16px; flex:0 0 auto; fill:none; stroke:currentColor; stroke-width:2;
+        stroke-linecap:round; stroke-linejoin:round; }
+  .nav-item { display:flex; align-items:center; gap:10px; padding:8px 12px; margin-bottom:2px; border-radius:8px;
               font-size:14px; color:var(--muted); text-decoration:none; cursor:pointer; }
   .nav-item:hover { background:var(--panel2); color:var(--text); }
   .nav-item.active { background:var(--blue); color:#10141a; font-weight:600; }
@@ -1617,11 +1782,20 @@ PAGE = r"""<!DOCTYPE html>
   /* Full-screen cover while the Refresh button's reload re-reads Asana (renderDashboard). */
   .refresh-cover { position:fixed; inset:0; z-index:1000; background:var(--bg);
                    display:flex; align-items:center; justify-content:center; }
-  /* iPhone-style issue count (Time Audit): red pill pinned to the item's right edge. */
-  .nav-item:has(.nav-badge) { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-  .nav-badge { min-width:20px; height:20px; padding:0 6px; border-radius:10px; background:var(--red);
-               color:var(--text); font-size:11px; font-weight:700; line-height:20px; text-align:center;
-               font-variant-numeric:tabular-nums; flex-shrink:0; }
+  .nav-item .ic { opacity:.85; }
+  .nav-item.active .ic { opacity:1; }
+  .nav-l { flex:1 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* Issue count on a nav item (Illegal Time): shadcn/ui's destructive Badge — solid red, bold,
+     with a soft pulsing ring so it can't be missed. On the selected item a dark ring keeps it
+     legible against the accent. The pulse stops for anyone who prefers reduced motion. */
+  .nav-badge { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0;
+               min-width:22px; height:22px; padding:0 7px; box-sizing:border-box; border-radius:6px;
+               font-size:12px; font-weight:800; font-variant-numeric:tabular-nums; line-height:1;
+               color:var(--text); background:var(--red); box-shadow:0 0 0 0 var(--red);
+               animation:nav-badge-pulse 2s ease-out infinite; }
+  .nav-item.active .nav-badge { box-shadow:0 0 0 2px var(--bg); animation:none; }
+  @keyframes nav-badge-pulse { 0% { box-shadow:0 0 0 0 var(--red); } 70%, 100% { box-shadow:0 0 0 6px transparent; } }
+  @media (prefers-reduced-motion: reduce) { .nav-badge { animation:none; } }
   .content { flex:1; min-width:0; }
   .content .head { margin-bottom:4px; }
   .content h1 { font-size:20px; margin:0; }
@@ -2165,10 +2339,6 @@ Chart.register(capLinePlugin);
 // it. Red means far enough behind to need attention.
 const PACE_TOLERANCE = 5;
 const capColorPace = (h, paceTarget) => h >= paceTarget - PACE_TOLERANCE ? C.green : C.red;
-// Team Capacity · Estimated uses a flat threshold instead of the tolerance band: a person
-// carrying more than CAP_GREEN_MIN remaining hours is booked up (green); anyone below it has
-// room and needs work assigned (red).
-const CAP_GREEN_MIN = 80;
 // Workable hours per person per day, for MSA Project Capacity's "Team hours possible".
 const TEAM_DAILY_HOURS = 6;
 // Each person's monthly target on the Team Capacity tabs: TEAM_DAILY_HOURS × the work days in
@@ -2178,7 +2348,10 @@ function personTarget(){
   const [s, e] = monthRange();
   return TEAM_DAILY_HOURS * workdayProgress(s, e).total;
 }
-const capColorEst = h => h > CAP_GREEN_MIN ? C.green : C.red;
+// Team Capacity · Estimated colors each bar against the amber "workable" line (what a person can
+// still work this month): remaining hours at or above it fill the rest of the month (green);
+// below it, that person will run out of work and needs more assigned (red).
+const capColorEst = (h, workable) => h >= workable ? C.green : C.red;
 
 // Label for task rows that sit in no status column; used by the status filters and shown
 // as a muted badge wherever a status column would be.
@@ -2242,23 +2415,6 @@ function noteBox(text){ return `<p class="note box">${esc(text)}</p>`; }
 const LOADING = 'Loading…';
 // "1 project" / "3 projects" — used anywhere a count is read out in prose.
 function plural(n, word, wordPlural){ return `${n} ${n === 1 ? word : (wordPlural || word + 's')}`; }
-// Save rows as a .csv the browser downloads. The BOM makes Excel read it as UTF-8; numbers
-// stay plain (no " h") so the spreadsheet can sum them.
-function downloadCsv(filename, header, rows){
-  const cell = v => { const s = v == null ? '' : String(v);
-                      return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-  const text = [header].concat(rows).map(r => r.map(cell).join(',')).join('\r\n');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' }));
-  a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 0);
-}
-// Toolbar control group for a tab's spreadsheet export button.
-function exportGroup(id){
-  return `<span class="tb-group"><span class="tb-label">Export</span>` +
-         `<button class="btn" id="${id}">Download CSV</button></span>`;
-}
 // Headline stat banner shown at the top of every tab. stats: [{n, l, neg?}].
 // kind 'est' paints the numbers blue (estimated hours), anything else green (logged hours).
 function summaryBar(stats, kind){
@@ -2515,6 +2671,197 @@ function capBar(hours, cap){
         over ? ' — over capacity' : (pct >= 100 ? ' — at capacity' : '')}</span></div>
     </div>`;
 }
+// MSA Project Capacity: open work due in the selected range, per project gid
+// ({ hours, left, n }). Built from the estimated project details (the Time Audit's auditDetails)
+// by buildDueIndex before the tab renders; null until those details have loaded.
+// A task counts when its due date is in range; an open subtask counts against its own due date,
+// or its parent's when it has none. `hours` = the full estimates; `left` = what's still to burn
+// (estimate less time already tracked on the item, never below 0; a task's unestimated subtasks
+// burn it down, as on Team Capacity). `left` is what the projection adds to "hours used" — the
+// tracked part of those estimates is already in it.
+let dueIndex = null;
+// Every open task / subtask on one estimated project detail that is due in [start, end], as
+// table rows: { gid, name, context, project, assignee, due, status, est, act, left }. The one
+// rule buildDueIndex (the cards) and dueTable (the task lists) both read, so they always agree.
+// Unestimated items are included (est 0) so a list can flag them; the totals skip them.
+function dueTaskRows(d, start, end) {
+  const rows = [];
+  const inRange = x => !!x && x >= start && x <= end;
+  (d.tasks || []).forEach(t => {
+    if (inRange(t.due)) {
+      const burn = (t.subtasks || []).filter(s => !s.hours).reduce((a, s) => a + s.actual, 0);
+      rows.push({ gid: t.gid, name: t.name, context: '', project: d.name, assignee: t.assignee,
+                  due: t.due, status: t.section, est: t.hours, act: r2(t.actual + burn),
+                  left: r2(Math.max(0, t.hours - t.actual - burn)) });
+    }
+    (t.subtasks || []).forEach(s => {
+      const due = s.due || t.due;
+      // An unestimated subtask's time burns its parent, so it only lists when the parent doesn't.
+      if (s.done || !inRange(due) || (!s.hours && inRange(t.due))) return;
+      rows.push({ gid: s.gid, name: s.name, context: '', parent: t.name, project: d.name,
+                  assignee: s.assignee, due, status: s.section, est: s.hours, act: s.actual,
+                  left: r2(Math.max(0, s.hours - s.actual)) });
+    });
+  });
+  return rows.sort((a, b) => a.due.localeCompare(b.due) || a.name.localeCompare(b.name));
+}
+function buildDueIndex(details, start, end) {
+  if (!details) return null;
+  const idx = {};
+  details.forEach(d => {
+    const rows = dueTaskRows(d, start, end).filter(r => r.est > 0);
+    idx[d.gid] = { hours: r2(rows.reduce((a, r) => a + r.est, 0)),
+                   left: r2(rows.reduce((a, r) => a + r.left, 0)), n: rows.length };
+  });
+  return idx;
+}
+// Summed due-in-range work for a list of gids; null while unknown.
+function dueFor(gids) {
+  if (!dueIndex) return null;
+  return gids.reduce((a, g) => {
+    const r = dueIndex[g];
+    return r ? { hours: r2(a.hours + r.hours), left: r2(a.left + r.left), n: a.n + r.n } : a;
+  }, { hours: 0, left: 0, n: 0 });
+}
+// A capacity card's budget bar with the projection laid in: the same 10 blocks, green for hours
+// logged, striped blue (estimated) for the open work due in the range still to burn. A headline
+// reads the projected total as a % of capacity and the hours to spare / over (red when over).
+// Falls back to the plain capBar until the estimated details have loaded, or with no capacity.
+function capProjBar(used, cap, due) {
+  if (!due || !(cap > 0)) return capBar(used, cap);
+  const proj = r2(used + due.left), slack = r2(cap - proj);
+  const usedPct = used / cap * 100, projPct = proj / cap * 100;
+  const over = projPct > 100, usedOver = usedPct > 100;
+  const fill = (pct, i) => Math.max(0, Math.min(1, (pct - i * CAP_BLOCK_PCT) / CAP_BLOCK_PCT));
+  let blocks = '';
+  for (let i = 0; i < CAP_BLOCKS; i++) {
+    const u = fill(usedPct, i), e = Math.max(0, fill(projPct, i) - u);
+    blocks += `<i class="blk"><b class="u" style="width:${(u * 100).toFixed(1)}%"></b>` +
+              `<b class="e" style="width:${(e * 100).toFixed(1)}%"></b></i>`;
+  }
+  const tip = `Hours logged plus the estimated hours still to burn on open tasks and subtasks due in ` +
+              `${rangeLabel(dateStart, dateEnd)} (${h2(due.hours)} h estimated in full).`;
+  return `<div class="cap-bar proj${over ? ' p-over' : ''}${usedOver ? ' over' : ''}" title="${esc(tip)}">
+      <div class="proj-head">
+        <span class="proj-v"><b>${projPct.toFixed(0)}%</b> · ${over ? `${h2(-slack)} h over` : `${h2(slack)} h to spare`}</span>
+      </div>
+      <div class="track">${blocks}</div>
+      <div class="lab">
+        <span class="proj-key"><i class="sw u"></i>${h2(used)} h logged</span>
+        <span class="proj-key"><i class="sw e"></i>${h2(due.left)} h est. due</span>
+        <span class="lab-r">${h2(proj)} / ${h2(cap)} h</span>
+      </div>
+    </div>`;
+}
+// Today as YYYY-MM-DD in local time (due dates are local calendar days).
+function isoToday() {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+}
+// Whole days from today to an ISO due date (negative = overdue).
+function daysUntil(due) {
+  return Math.round((Date.parse(due + 'T00:00:00Z') - Date.parse(isoToday() + 'T00:00:00Z')) / 864e5);
+}
+const shortDate = d => fmtDate(d).replace(/, \d{4}$/, '');
+// A due-date cell: the date, in red with "overdue" once it has passed on still-open work.
+function dueCell(due) {
+  if (!due) return '<span class="muted">—</span>';
+  const late = due < isoToday();
+  return `<span class="nowrap${late ? ' due-late' : ''}">${esc(shortDate(due))}${late ? ' · overdue' : ''}</span>`;
+}
+const statusBadge = s => s ? `<span class="badge">${esc(s)}</span>` : `<span class="badge none">${NO_STATUS}</span>`;
+// The open work due in a range as an easy-to-scan list (dueTaskRows' rows, or Team Capacity's
+// task rows mapped to the same shape). Rows are grouped by urgency — Overdue, Next 7 days,
+// Later — each group headed with its count and hours left. Per row: the task with its parent /
+// project on a quiet second line, the assignee with their chart color, the due date with how far
+// off it is, the status, a burn bar (actual against the estimate), and the hours left.
+// opts: { project: show the project on the meta line, assignee: show the Assignee column
+// (default on) }. Unestimated rows stay listed, muted, but add nothing to the group totals.
+// opts.byDate: one group per due date (headed by the date and how far off it is) instead of the
+// urgency groups; the Due column is then dropped, since the heading says it.
+function dueTable(rows, opts) {
+  const o = Object.assign({ project: false, assignee: true, byDate: false }, opts);
+  if (!rows.length) return note(`No open tasks due in ${rangeLabel(dateStart, dateEnd)}.`);
+  const cols = (o.assignee ? 6 : 5) - (o.byDate ? 1 : 0);
+  const relOf = due => { const n = daysUntil(due);
+    return n < 0 ? `<span class="dt-pill late">${-n} d overdue</span>`
+      : n === 0 ? '<span class="dt-pill soon">today</span>' : `<span class="dt-rel">in ${plural(n, 'day')}</span>`; };
+  const groups = o.byDate
+    ? [...new Set(rows.map(r => r.due || ''))].sort((a, b) => (a || '9999').localeCompare(b || '9999')).map(d => ({
+        key: d && daysUntil(d) < 0 ? 'late' : 'date',
+        title: d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : 'No due date',
+        rel: d ? relOf(d) : '', test: (n, r) => (r.due || '') === d }))
+    : [
+    { key: 'late', title: 'Overdue', test: n => n != null && n < 0 },
+    { key: 'soon', title: 'Next 7 days', test: n => n != null && n >= 0 && n < 7 },
+    { key: 'later', title: 'Later', test: n => n != null && n >= 7 },
+    { key: 'none', title: 'No due date', test: n => n == null },
+  ];
+  const rowHtml = r => {
+    const n = r.due ? daysUntil(r.due) : null;
+    const rel = n == null ? '' : n < 0 ? `<span class="dt-pill late">${-n} d overdue</span>`
+      : n === 0 ? '<span class="dt-pill soon">today</span>'
+      : `<span class="dt-rel">in ${plural(n, 'day')}</span>`;
+    const meta = [o.project ? esc(r.project) : '', r.parent ? `↳ ${esc(r.parent)}` : '',
+                  r.context ? esc(r.context) : ''].filter(Boolean).join(' · ');
+    const est = r.est > 0, pct = est ? Math.min(100, r.act / r.est * 100) : 0, over = est && r.act > r.est;
+    return `<tr class="dt-row${est ? '' : ' unest'}">
+      <td class="dt-task"><div class="dt-name">${taskLink(r.gid, r.name)}</div>${meta ? `<div class="dt-meta">${meta}</div>` : ''}</td>
+      ${o.assignee ? `<td class="dt-who"><i class="dt-dot" style="background:${personColor(r.assignee)}"></i>${esc(r.assignee)}</td>` : ''}
+      ${o.byDate ? '' : `<td class="dt-due">${r.due ? `<div>${esc(shortDate(r.due))}</div>${rel}` : '<span class="muted">—</span>'}</td>`}
+      <td class="dt-status">${statusBadge(r.status)}</td>
+      <td class="dt-prog">${est
+        ? `<div class="dt-bar${over ? ' over' : ''}"><i style="width:${pct.toFixed(0)}%"></i></div>
+           <div class="dt-hrs">${h2(r.act)} / ${h2(r.est)} h</div>`
+        : `<span class="dt-pill none">no estimate</span>${r.act ? `<div class="dt-hrs">${h2(r.act)} h logged</div>` : ''}`}</td>
+      <td class="hours dt-left">${est ? h2(r.left) + ' h' : '—'}</td>
+    </tr>`;
+  };
+  const body = groups.map(g => {
+    const list = rows.filter(r => g.test(r.due ? daysUntil(r.due) : null, r));
+    if (!list.length) return '';
+    const left = r2(list.filter(r => r.est > 0).reduce((a, r) => a + r.left, 0));
+    return `<tr class="dt-group ${g.key}"><td colspan="${cols}"><span class="dt-gt">${g.title}</span>${g.rel ? ` ${g.rel}` : ''}
+        <span class="dt-gs">${plural(list.length, 'task')} · ${h2(left)} h left</span></td></tr>` +
+      list.map(rowHtml).join('');
+  }).join('');
+  return `<table class="tasks due-tasks">
+      <thead><tr><th>Task</th>${o.assignee ? '<th>Assignee</th>' : ''}${o.byDate ? '' : '<th>Due</th>'}<th>Status</th>
+        <th>Progress</th><th class="hours">Left</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+// The "due in range" block for a capacity detail page: the projected budget bar (when the
+// project has a capacity) and the task list behind it.
+function dueSection(rows, used, cap, opts) {
+  const est = rows.filter(r => r.est > 0), unest = rows.length - est.length;
+  const due = { hours: r2(est.reduce((a, r) => a + r.est, 0)),
+                left: r2(est.reduce((a, r) => a + r.left, 0)), n: est.length };
+  const people = new Set(est.map(r => r.assignee)).size;
+  return `<h2 class="section-h">Due ${esc(rangeLabel(dateStart, dateEnd))} · work to hit capacity</h2>
+    <p class="drill-total">${h2(due.left)} h still to burn across ${plural(due.n, 'task')}` +
+      ` · ${plural(people, 'person', 'people')} · ${h2(due.hours)} h estimated in full` +
+      `${unest ? ` · plus ${plural(unest, 'task')} due with no estimate` : ''}</p>
+    ${cap != null ? `<div class="cap-wide">${capProjBar(used, cap, due)}</div>` : ''}
+    ${dueTable(rows, opts)}`;
+}
+// "Updated …" stamps: the server's '2026-11-18 04:13:36 PM' read out as "Updated today at
+// 4:13:36 PM" / "yesterday at …" / "Nov 18 at …" (with the year when it isn't this year).
+// Anything that doesn't parse is shown as it came.
+function fmtUpdated(u) {
+  if (!u) return '';
+  const [d, t, ap] = String(u).split(' ');
+  const [y, mo, da] = (d || '').split('-').map(Number), [hh, mi, se] = (t || '').split(':').map(Number);
+  if (!y || !mo || !da || isNaN(hh) || isNaN(mi) || isNaN(se) || !ap) return 'Updated ' + u;
+  const time = `${hh % 12 || 12}:${String(mi).padStart(2, '0')}:${String(se).padStart(2, '0')} ${ap.toUpperCase()}`;
+  const when = new Date(y, mo - 1, da), now = new Date();
+  const day0 = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const ago = Math.round((day0(now) - day0(when)) / 864e5);
+  const day = ago === 0 ? 'today' : ago === 1 ? 'yesterday'
+    : when.toLocaleDateString('en-US', y === now.getFullYear() ? { month: 'short', day: 'numeric' }
+                                                               : { month: 'short', day: 'numeric', year: 'numeric' });
+  return `Updated ${day} at ${time}`;
+}
 function setCrumbs(items) {
   // items: [{label, fn?}] — entries with fn render as links; the last/plain one is the current page.
   const el = document.getElementById('crumbs');
@@ -2553,7 +2900,9 @@ function navBadge(k){
 }
 // Estimated-hours Bar Chart filters, remembered across renders/tab switches.
 let estStatusFilter = null;    // Set of enabled status columns; null = show all statuses
-let estHideUnassigned = false; // when true, drop the Unassigned assignee from the chart
+// Drop the Unassigned assignee from the chart — on by default (as on Team Capacity); the
+// toolbar's "Include Unassigned" box turns it off.
+let estHideUnassigned = true;
 // Bar-chart drill-in: name of the budget group (e.g. "CMD") whose combined bucket has been
 // clicked open into its member projects; null = show the combined bucket. One per chart.
 let estDrillGroup = null;
@@ -2566,6 +2915,11 @@ let actualHiddenProjects = new Set();
 let teamShowUnassigned = false;
 // Team Capacity status-column filter; null = all statuses. Applies to the bars and the drill-in.
 let teamStatusFilter = null;
+// Team Capacity · Estimated due-date filter: 'range' (the default: due within the dashboard's
+// shared date range, dateStart–dateEnd, the same one the Actual-Hours tabs use — so it follows
+// the active month), 'any' (no filter) or 'none' (no due date set). A subtask with no due date
+// of its own goes by its parent's.
+let teamDueMode = 'range';
 // Task List: filter to a single assignee (person who logged the time); null = show everyone.
 let itemFilterPerson = null;
 // Daily Log: filter to a single assignee; null = show everyone. Kept separate from the Task
@@ -2646,67 +3000,77 @@ function workdayProgress(start, end, today){
   return { total, elapsed, left: total - elapsed,
            pct: total ? elapsed / total * 100 : 0 };
 }
-// The single filter row every Actual-Hours tab opens with: the date range, plus whatever
-// extra controls that tab needs appended after a separator — one toolbar, never two stacked.
+// The date range lives in the sidebar (rangePanel), shared by every tab. A range-based tab's
+// toolbar is just its own controls: rangePicker(extra) wraps them in the one .toolbar, and
+// returns nothing when the tab has none.
 function rangePicker(extra){
-  return `<div class="toolbar">
-      <span class="tb-group"><span class="tb-label">Date range</span>
-        <input type="date" id="d-start" value="${dateStart}" aria-label="From">
-        <span>to</span>
-        <input type="date" id="d-end" value="${dateEnd}" aria-label="To">
-        <button class="btn" id="range-go">Search</button></span>
-      ${extra ? '<span class="tb-sep"></span>' + extra : ''}
+  return extra ? `<div class="toolbar">${extra}</div>` : '';
+}
+// The sidebar's date-range panel, under the nav on every page. The dashboard wires it through
+// wireRangeSel (reloads the logged half); a detail page through wireSidebar (re-renders itself).
+function rangePanel(){
+  return `<div class="side-range">
+      <div class="side-range-h">Date range</div>
+      <label class="side-range-row"><span>From</span><input type="date" id="d-start" value="${dateStart}"></label>
+      <label class="side-range-row"><span>To</span><input type="date" id="d-end" value="${dateEnd}"></label>
+      <button class="btn" id="range-go">Apply</button>
     </div>`;
 }
 // Sidebar labels stay short (they read under their section heading); the page <h1> spells
 // out which half of the dashboard you're on, because several tabs share a short label.
 // Every tab carries a one-line `sub` so no page opens without saying what it shows.
 const TABS = {
-  team: { label:'Team Capacity', title:'Team Capacity · Estimated',
-    sub:'Remaining estimated hours per person against the monthly target. Click a bar or ring for their full breakdown.' },
-  estproj: { label:'Bar Chart', title:'Projects · Estimated',
-    sub:'Remaining estimated hours per project, stacked by the person assigned.' },
-  estimated: { label:'Project Cards', title:'Project Cards · Estimated',
-    sub:'One card per project in the Asana portfolio: estimated hours still on the board and how many tasks they sit in.' },
-  teamactual: { label:'Team Capacity', title:'Team Capacity · Logged',
-    sub:'Hours actually logged per person in the selected range, against the monthly target. The amber line is where each person should be today, based on how far through the work month (Mon–Fri, minus holidays) we are — a bar is green when it is at that line or within 5 h of it, red when it falls further behind.' },
-  capacity: { label:'MSA Project Capacity', title:'MSA Project Capacity · Logged',
-    sub:'Hours logged against each retainer budget for the selected range, with what is left.' },
-  actualproj: { label:'Bar Chart', title:'Projects · Logged',
-    sub:'Hours logged per project in the selected range, stacked by the person who logged them.' },
-  actualitems: { label:'Task List', title:'Task List · Logged',
-    sub:'Every task worked on in the selected range, grouped by project.' },
-  actualdaily: { label:'Daily Log', title:'Daily Log · Logged',
-    sub:'Day by day, what each person logged their time to in the selected range.' },
-  audit: { label:'Illegal Time', title:'Illegal Time · Logged',
-    sub:'Open tasks and subtasks that have logged more time than was estimated (all time, not just this range), and time entries in the selected range that are not a multiple of 0.25 h.' },
-  settings: { label:'Graph Colors', title:'Graph Colors',
-    sub:'Pick a color for each person and each project — saved to your account, so it follows you to any browser. People color the stacked bars; projects color the Team Capacity rings.' },
-  theme: { label:'Theme', title:'Theme',
-    sub:'Pick how the dashboard looks to you — backgrounds, panels and accents. Saved to your account, so it follows you to every browser and nobody else\'s view changes.' },
-  holidays: { label:'Holidays', title:'Holidays',
-    sub:'Days off that are not work days. Shared with everyone — anyone signed in can add or remove one, and every work-day count (pace, team availability) updates.' },
+  team: { icon:'users', label:'Team Capacity', title:'Creative Team · Estimated Hours' },   // no sub line, by request
+  estproj: { icon:'chart-column', label:'Bar Chart', title:'Projects · Estimated' },
+  gantt: { icon:'chart-gantt', label:'Gantt (WIP)', title:'Gantt (WIP) · Estimated' },
+  teamactual: { icon:'users', label:'Team Capacity', title:'Team Capacity · Logged' },
+  capacity: { icon:'gauge', label:'MSA Project Capacity', title:'MSA Project Capacity · Logged' },
+  actualproj: { icon:'chart-column', label:'Bar Chart', title:'Projects · Logged' },
+  actualitems: { icon:'list-checks', label:'Task List', title:'Task List · Logged' },
+  actualdaily: { icon:'calendar-days', label:'Daily Log', title:'Daily Log · Logged' },
+  audit: { icon:'triangle-alert', label:'Illegal Time', title:'Illegal Time · Logged' },
+  settings: { icon:'settings', label:'Settings', title:'Settings' },
 };
 // Sidebar groups: estimated/planned views vs. logged-hours & progress views. `tone` picks the
 // section's accent — 'est' = blue, 'act' = green, omitted for neutral (Settings).
 const NAV_SECTIONS = [
-  { title: 'Estimated Hours', tone: 'est', tabs: ['team', 'estproj', 'estimated'] },
+  { title: 'Estimated Hours', tone: 'est', tabs: ['team', 'estproj', 'gantt'] },
   { title: 'Actual Hours', tone: 'act', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily', 'audit'] },
-  { title: 'Settings', tabs: ['settings', 'theme', 'holidays'] },
+  { title: '', tabs: ['settings'] },   // untitled: one item, under a divider
 ];
 
+// Lucide icons (https://lucide.dev, ISC license; the set shadcn/ui uses), inlined as SVG path data
+// so there is no extra dependency. Draw one with icon(name): 24x24, stroke = currentColor, so it
+// takes the color of the text around it. To add one, copy its inner SVG from lucide.dev.
+const ICONS = {
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  'chart-column': '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  'chart-gantt': '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 6h8"/><path d="M12 11h6"/><path d="M9 16h6"/>',
+  gauge: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  'list-checks': '<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
+  'calendar-days': '<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M8 2v4"/><path d="M16 2v4"/><path d="M3 10h18"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/><path d="M16 18h.01"/>',
+  'triangle-alert': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  palette: '<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
+  'log-out': '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
+  'chart-pie': '<path d="M21 12c.552 0 1.005-.449.95-.998a10 10 0 0 0-8.953-8.951c-.55-.055-.998.398-.998.95v8a1 1 0 0 0 1 1z"/><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/>',
+};
+function icon(name, cls) {
+  return ICONS[name] ? `<svg class="ic${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>` : '';
+}
 // Shared left nav, reused by the dashboard and the drill-in detail pages so the
 // sidebar always stays put. The active item tracks the last-opened tab (dashTab).
 function sidebarHtml() {
-  return `<nav class="sidebar">
+  return `<aside class="side-col"><nav class="sidebar">
       <div class="brand">Creative Hours</div>
+      ${rangePanel()}
       ${NAV_SECTIONS.map(sec =>
-        `<div class="nav-sec${sec.tone ? ' ' + sec.tone : ''}">` +
-          `<div class="nav-section">${sec.title}</div><div class="nav-group">` +
-          sec.tabs.map(k => `<a href="#" class="nav-item${k === dashTab ? ' active' : ''}" data-tab="${k}">${TABS[k].label}${navBadge(k)}</a>`).join('') +
+        `<div class="nav-sec${sec.tone ? ' ' + sec.tone : ''}${sec.title ? '' : ' plain'}">` +
+          (sec.title ? `<div class="nav-section">${sec.title}</div>` : '') + '<div class="nav-group">' +
+          sec.tabs.map(k => `<a href="#" class="nav-item${k === dashTab ? ' active' : ''}" data-tab="${k}">${icon(TABS[k].icon)}<span class="nav-l">${TABS[k].label}</span>${navBadge(k)}</a>`).join('') +
         '</div></div>'
       ).join('')}
-    </nav>`;
+    </nav><div id="side-user-slot">${sideUserHtml()}</div></aside>`;
 }
 // Wire nav clicks. onSwitch (dashboard) switches tab in place; on a detail page we
 // set the tab and navigate home, where the dashboard renders it.
@@ -2718,19 +3082,20 @@ function wireSidebar(onSwitch) {
       if (onSwitch) onSwitch(); else location.hash = '';
     };
   });
-}
-
-function estCard(w) {
-  const c = document.createElement('div');
-  c.className = 'card';
-  c.innerHTML = `<h3>${esc(w.name)}</h3>
-    <div class="stats">
-      <div class="stat"><div class="n">${h2(w.hours)}</div><div class="l">Est. Hours</div></div>
-      <div class="stat"><div class="n">${w.ntasks}</div><div class="l">Tasks</div></div>
-      ${w.cap != null ? `<div class="stat"><div class="n">${h2(w.cap)}</div><div class="l">Capacity h/mo</div></div>` : ''}
-    </div>`;
-  c.onclick = () => { location.hash = '#/p/' + w.gid; };
-  return c;
+  // On a detail page, Apply re-renders the page for the new range (the dashboard rewires the
+  // button itself in wireRangeSel). A reversed pair is swapped.
+  if (!onSwitch) {
+    const s0 = document.getElementById('d-start'), e0 = document.getElementById('d-end'),
+          go = document.getElementById('range-go');
+    if (!go) return;
+    const apply = () => {
+      if (!s0.value || !e0.value) return;
+      [dateStart, dateEnd] = s0.value <= e0.value ? [s0.value, e0.value] : [e0.value, s0.value];
+      route();
+    };
+    go.onclick = apply;
+    [s0, e0].forEach(inp => inp.onkeydown = ev => { if (ev.key === 'Enter') apply(); });
+  }
 }
 
 function loggedCard(w) {
@@ -2758,7 +3123,7 @@ function capCard(w) {
       <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
       <div class="stat"><div class="n${remaining < 0 ? ' neg' : ''}">${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
-    ${capBar(used, cap)}`;
+    ${w.gid ? capProjBar(used, cap, dueFor([w.gid])) : capBar(used, cap)}`;
   c.onclick = () => { location.hash = '#/logged/' + w.gid; };
   return c;
 }
@@ -2768,7 +3133,8 @@ function capCard(w) {
 function carveCard(w) {
   // Its section heading already says what kind it is, so no kind tag; a whole-board carve-out
   // (empty match) is its own source, so no "from" tag either.
-  const c = capCard(Object.assign({}, w, { kind: null }));
+  // gid: null — a carve-out is only some of a board's tasks, so no whole-board due-date line.
+  const c = capCard(Object.assign({}, w, { kind: null, gid: null }));
   if (w.match) c.querySelector('h3').insertAdjacentHTML('beforeend',
     ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
   c.querySelector('.stat .l').textContent = 'Capacity';
@@ -2776,7 +3142,7 @@ function carveCard(w) {
   // bar's footer (right-aligned), so every card keeps the same shape.
   // A fixed lifetime budget ("budget") counts down instead: total less everything logged before.
   const lab = c.querySelector('.cap-bar .lab');
-  const base = w.budget != null ? `${h2(w.budget)} total` : `${h2(w.estimated)} est`;
+  const base = w.budget != null ? `${h2(w.budget)} total` : `${h2(w.estimated)} est${w.dueCap ? '. due' : ''}`;
   if (lab) lab.insertAdjacentHTML('beforeend', w.prior > 0
     ? `<span class="lab-r">${base} − ${h2(w.prior)} before ${fmtDate(dateStart).replace(/, \d{4}$/, '')}</span>`
     : `<span class="lab-r">${base}</span>`);
@@ -2820,7 +3186,7 @@ function groupCard(g) {
       <div class="stat"><div class="n">${h2(used)}</div><div class="l">Hours used</div></div>
       <div class="stat"><div class="n${remaining < 0 ? ' neg' : ''}">${h2(remaining)}</div><div class="l">${remaining < 0 ? 'Over' : 'Remaining'}</div></div>
     </div>
-    ${capBar(used, cap)}
+    ${capProjBar(used, cap, dueFor(g.members.filter(m => m.gid).map(m => m.gid)))}
     <div class="grp-members">${rows}</div>
     <div class="go">Open bucket · hours by project →</div>`;
   // Each member row opens that project's own Hours-Logged detail (or a carve-out's page); the
@@ -2879,12 +3245,30 @@ async function storePat(u, tok, me){
     { asanaPat: tok, asanaName: me.name || '', email: u.email, updatedAt: F.serverTimestamp() },
     { merge: true });
 }
-function showSignout(who){
-  let b = document.getElementById('signout-fab');
-  if (!b) { b = document.createElement('button'); b.id = 'signout-fab'; b.className = 'signout'; document.body.appendChild(b); }
-  b.textContent = 'Sign out'; b.title = who ? ('Signed in as ' + who) : ''; b.onclick = doLogout; b.style.display = 'block';
+// Who's signed in is shown in the sidebar's account card (sideUserHtml), which carries the one
+// Sign out button. signedInAs is the name the sign-in reported (the Asana token owner).
+let signedInAs = null;
+function showSignout(who){ signedInAs = who || null; refreshSideUser(); }
+function hideSignout(){ signedInAs = null; refreshSideUser(); }
+// The account card under the sidebar: initials, name (the Google account's, else the Asana
+// token owner's), email, and Sign out (doLogout: Google and the Asana token both).
+function sideUserHtml(){
+  const u = plan.user;
+  const name = (u && (u.displayName || u.email)) || signedInAs || currentUser || '';
+  if (!window.__authed || !name || name === 'Signed in') return '';
+  const email = u && u.email && u.email !== name ? u.email : '';
+  const initials = name.split(' ').filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+  return `<div class="side-user">
+      <span class="su-av" aria-hidden="true">${esc(initials)}</span>
+      <span class="su-t"><b title="${esc(name)}">${esc(name)}</b>${email ? `<small title="${esc(email)}">${esc(email)}</small>` : ''}</span>
+      <button class="su-out" data-signout title="Sign out" aria-label="Sign out">${icon('log-out')}</button>
+    </div>`;
 }
-function hideSignout(){ const b = document.getElementById('signout-fab'); if (b) b.style.display = 'none'; }
+function refreshSideUser(){
+  const el = document.getElementById('side-user-slot');
+  if (el) el.innerHTML = sideUserHtml();
+}
+document.addEventListener('click', e => { if (e.target.closest('[data-signout]')) doLogout(); });
 // The last load's data, kept in this browser so the dashboard opens instantly on it while a
 // fresh load runs (renderDashboard). Per browser, never shared; cleared on sign-out.
 const SNAP_KEY = 'dashSnapshot.v1';
@@ -3032,10 +3416,12 @@ const plan = { status: 'off', fb: null, user: null, month: null, watching: null,
                // caps uses the configured cap from PROJECTS / GROUPS.
                caps: {}, unsubCaps: null, editingCaps: false,
                // Shared holiday list (settings/holidays). holidaysSaved = the doc exists yet.
-               unsubHolidays: null, holidaysSaved: false };
+               unsubHolidays: null, holidaysSaved: false,
+               // Gantt plan (doc settings/gantt), see the gantt object below.
+               unsubGantt: null };
 // The monthly capacity for a card id: the shared override if there is one, else `fallback`.
 function capOverride(id, fallback){ return id in plan.caps ? plan.caps[id] : fallback; }
-function planChanged(){ if (plan.onChange) plan.onChange(); }
+function planChanged(){ refreshSideUser(); if (plan.onChange) plan.onChange(); }
 async function planInit(){
   if (plan.fb || plan.status === 'loading') return;
   plan.status = 'loading';
@@ -3079,6 +3465,8 @@ function planWatch(month){
     plan.unsubCaps = null; plan.caps = {}; plan.editingCaps = false;
     if (plan.unsubHolidays) plan.unsubHolidays();
     plan.unsubHolidays = null; plan.holidaysSaved = false;
+    if (plan.unsubGantt) plan.unsubGantt();
+    plan.unsubGantt = null; gantt.headings = {}; gantt.loose = {}; gantt.loaded = false;
     return;
   }
   if (!plan.unsubHolidays) {
@@ -3111,6 +3499,19 @@ function planWatch(month){
     }, err => {
       plan.order = [];
       plan.error = 'Could not read the card order: ' + err.message;
+      planChanged();
+    });
+  }
+  if (!plan.unsubGantt) {
+    const { F, db } = plan.fb;
+    plan.unsubGantt = F.onSnapshot(F.doc(db, ...GANTT_DOC), snap => {
+      gantt.headings = (snap.exists() && snap.data().headings) || {};
+      gantt.loose = (snap.exists() && snap.data().loose) || {};
+      gantt.loaded = true;
+      planChanged();
+    }, err => {
+      gantt.headings = {}; gantt.loose = {}; gantt.loaded = true;
+      plan.error = 'Could not read the Gantt plan: ' + err.message;
       planChanged();
     });
   }
@@ -3243,6 +3644,109 @@ async function planHolidayReplace(oldDay, newDay){
     return false;
   }
 }
+// ---- Gantt plan (Estimated Hours › Gantt), shared through Firestore ----
+// doc settings/gantt = { headings: { <hid>: { project: <project gid>, name, start, end,
+//                         tasks: { <task gid>: { start, end, name } } } },
+//                        loose: { <task gid>: { start, end } }, by, at }
+// Every open estimated task shows on the Gantt by itself (the Team Capacity · Estimated data);
+// the doc only holds what people changed: headings that group tasks, and bar dates someone has
+// dragged (`loose` for tasks not under a heading). A task with no saved dates gets an automatic
+// bar (ganttAutoSpan). Nothing here is written to Asana. `name` on a heading's task is a
+// snapshot, so a task completed since still shows by name.
+const gantt = { headings: {}, loose: {}, loaded: false,
+                dragging: false,      // a bar is being dragged — hold re-renders until it lands
+                editing: false,       // an inline editor (new heading / task picker) is open
+                zoom: 2,              // index into GANTT_ZOOM
+                expanded: null,       // project gids opened; null = the ones with headings
+                addTo: null,          // heading id whose task picker is open
+                newHeadingFor: null,  // project gid whose "new heading" row is open
+                scrollLeft: null };   // timeline scroll, kept across re-renders
+const GANTT_ZOOM = [12, 20, 32, 48];  // px per day
+const GANTT_DOC = ['settings', 'gantt'];
+function ganttDay(iso, n) {
+  const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+const ganttDiff = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5);
+const ganttWorkday = iso => { const wd = new Date(iso + 'T00:00:00Z').getUTCDay();
+                              return wd !== 0 && wd !== 6 && !HOLIDAYS.has(iso); };
+// The n-th work day counting from `iso` (inclusive when it is one) in direction dir (±1).
+function ganttWorkdays(iso, n, dir) {
+  let d = iso, count = 0;
+  for (let i = 0; i < 400; i++) {
+    if (ganttWorkday(d) && ++count >= n) return d;
+    d = ganttDay(d, dir);
+  }
+  return d;
+}
+// An automatic bar for a task nobody has dragged: as many work days as its remaining hours take
+// at TEAM_DAILY_HOURS a day (at least one), ending on its Asana due date — or, with no due date,
+// starting today. { start, end, auto: true, nodue }.
+function ganttAutoSpan(it) {
+  const n = Math.max(1, Math.ceil(it.left / TEAM_DAILY_HOURS));
+  if (it.due) return { start: ganttWorkdays(it.due, n, -1), end: it.due, auto: true, nodue: false };
+  const start = ganttWorkdays(isoToday(), 1, 1);
+  return { start, end: ganttWorkdays(start, n, 1), auto: true, nodue: true };
+}
+// Apply a change locally at once (mut gets the headings and loose maps), then merge `patch`
+// into the doc; a failed write rolls both back.
+async function ganttApply(mut, patch) {
+  if (plan.status !== 'in') return false;
+  const { F, db } = plan.fb, u = plan.user;
+  const prev = JSON.parse(JSON.stringify({ h: gantt.headings, l: gantt.loose }));
+  mut(gantt.headings, gantt.loose);
+  planChanged();
+  try {
+    await F.setDoc(F.doc(db, ...GANTT_DOC),
+      Object.assign({ by: u.displayName || u.email, at: F.serverTimestamp() }, patch(F)), { merge: true });
+    return true;
+  } catch (e) {
+    gantt.headings = prev.h; gantt.loose = prev.l;
+    plan.error = 'Could not save the Gantt plan: ' + e.message;
+    planChanged();
+    return false;
+  }
+}
+function ganttAddHeading(project, name) {
+  const hid = 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const start = isoToday(), h = { project, name, start, end: ganttDay(start, 13), tasks: {} };
+  return ganttApply(hs => { hs[hid] = JSON.parse(JSON.stringify(h)); }, () => ({ headings: { [hid]: h } }));
+}
+const ganttRename = (hid, name) =>
+  ganttApply(hs => { hs[hid].name = name; }, () => ({ headings: { [hid]: { name } } }));
+// Deleting a heading lets its tasks fall back to "not in a heading", keeping their dates.
+function ganttDelete(hid) {
+  const keep = {};
+  Object.entries(gantt.headings[hid].tasks || {}).forEach(([g, t]) => { keep[g] = { start: t.start, end: t.end }; });
+  return ganttApply((hs, lo) => { delete hs[hid]; Object.assign(lo, keep); },
+                    F => ({ headings: { [hid]: F.deleteField() }, loose: keep }));
+}
+// New dates for a heading and (optionally) some of its tasks: { gid: { start, end } }.
+const ganttSetDates = (hid, start, end, tasks) =>
+  ganttApply(hs => { hs[hid].start = start; hs[hid].end = end;
+                     Object.entries(tasks || {}).forEach(([g, t]) => Object.assign(hs[hid].tasks[g], t)); },
+             () => ({ headings: { [hid]: Object.assign({ start, end }, tasks ? { tasks } : {}) } }));
+const ganttSetTask = (hid, gid, start, end) =>
+  ganttApply(hs => { Object.assign(hs[hid].tasks[gid], { start, end }); },
+             () => ({ headings: { [hid]: { tasks: { [gid]: { start, end } } } } }));
+const ganttSetLoose = (gid, start, end) =>
+  ganttApply((hs, lo) => { lo[gid] = { start, end }; }, () => ({ loose: { [gid]: { start, end } } }));
+// Put a task under a heading (out of any other heading, and out of the loose dates).
+function ganttAttach(hid, gid, name, start, end) {
+  const others = Object.keys(gantt.headings).filter(k => k !== hid && (gantt.headings[k].tasks || {})[gid]);
+  return ganttApply((hs, lo) => { others.forEach(k => delete hs[k].tasks[gid]); delete lo[gid];
+                                  hs[hid].tasks = hs[hid].tasks || {}; hs[hid].tasks[gid] = { start, end, name }; },
+    F => ({ loose: { [gid]: F.deleteField() },
+            headings: Object.assign({ [hid]: { tasks: { [gid]: { start, end, name } } } },
+              ...others.map(k => ({ [k]: { tasks: { [gid]: F.deleteField() } } }))) }));
+}
+// Take a task out of its heading; it keeps its dates as a loose task.
+function ganttDetach(hid, gid) {
+  const t = gantt.headings[hid].tasks[gid], keep = { start: t.start, end: t.end };
+  return ganttApply((hs, lo) => { delete hs[hid].tasks[gid]; lo[gid] = keep; },
+                    F => ({ headings: { [hid]: { tasks: { [gid]: F.deleteField() } } }, loose: { [gid]: keep } }));
+}
+
 // Where a drop lands relative to a card: before or after it. Cards flow left-to-right, so it's
 // the horizontal half — except a full-width card (e.g. CMD), where it's the vertical half.
 function planDropSide(card, e){
@@ -3270,14 +3774,13 @@ function planClearMarks(){
   document.querySelectorAll('.drop-before, .drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after'));
 }
 
-// The toolbar control group: who's signed in, or the sign-in button.
+// The toolbar control group: Edit capacity when signed in, else the sign-in button. (Who's
+// signed in, and Sign out, are in the sidebar's account card.)
 function planToolbar(){
-  const who = plan.status === 'in'
-    ? `<span class="plan-who">${esc(plan.user.displayName || plan.user.email)}</span>
-       <button class="btn" id="cap-edit">${plan.editingCaps ? 'Done editing' : 'Edit capacity'}</button>
-       <button class="btn" id="plan-signout">Sign out</button>`
+  const ctl = plan.status === 'in'
+    ? `<button class="btn" id="cap-edit">${plan.editingCaps ? 'Done editing' : 'Edit capacity'}</button>`
     : '<button class="btn plan-signin">Sign in with Google</button>';
-  return `<span class="tb-group"><span class="tb-label">Planning</span>${who}</span>`;
+  return `<span class="tb-group"><span class="tb-label">Planning</span>${ctl}</span>`;
 }
 function planMovedLine(id){
   const m = plan.out[id] || {};
@@ -3289,8 +3792,6 @@ function planMovedLine(id){
 // "Not this month" grid ([data-drop="out"]). Cards carry their id in data-plan-id.
 function planWire(root){
   root.querySelectorAll('.plan-signin').forEach(b => b.onclick = planSignIn);
-  const so = document.getElementById('plan-signout');
-  if (so) so.onclick = planSignOut;
   const ce = document.getElementById('cap-edit');
   if (ce) ce.onclick = () => { plan.editingCaps = !plan.editingCaps; plan.error = null; planChanged(); };
   if (plan.status !== 'in') return;
@@ -3409,7 +3910,12 @@ async function renderDashboard() {
   plan.onChange = () => {
     if (!view.isConnected || loadError) return;
     // Holidays move the work-day clock, so the tabs that read it redraw too.
-    if (['capacity', 'holidays', 'teamactual', 'team'].includes(dashTab)) renderTab();
+    if (['capacity', 'teamactual', 'team'].includes(dashTab)) renderTab();
+    // Settings redraws only on its Holidays section (the Theme / Graph colors pickers would be
+    // detached by a redraw mid-pick, and nothing shared feeds them).
+    if (dashTab === 'settings' && settingsSection === 'holidays') renderTab();
+    // The Gantt waits while a bar is mid-drag or an inline editor is open, then catches up.
+    if (dashTab === 'gantt' && !gantt.dragging && !gantt.editing) renderTab();
   };
 
   // Wire the date-range Search button (if the current tab rendered one). Editing the date
@@ -3419,8 +3925,9 @@ async function renderDashboard() {
           go = document.getElementById('range-go');
     if (!go) return;
     const apply = () => {
-      if (s.value) dateStart = s.value;
-      if (e.value) dateEnd = e.value;
+      if (!s.value || !e.value) return;
+      [dateStart, dateEnd] = s.value <= e.value ? [s.value, e.value] : [e.value, s.value];
+      s.value = dateStart; e.value = dateEnd;
       loggedData = null; renderTab(); loadLogged(false);
     };
     go.onclick = apply;
@@ -3454,7 +3961,7 @@ async function renderDashboard() {
     }
     const statusOn = s => !estStatusFilter || estStatusFilter.has(s);
 
-    // Toolbar: one checkbox per status column, then an "Exclude Unassigned" toggle.
+    // Toolbar: one checkbox per status column, then an "Include Unassigned" toggle (off by default).
     const toolbar =
       '<div class="toolbar est-toolbar">' +
         '<span class="tb-label">Status</span>' +
@@ -3462,7 +3969,7 @@ async function renderDashboard() {
           `<label class="chk"><input type="checkbox" class="est-status" value="${esc(s)}" ${statusOn(s) ? 'checked' : ''}>${esc(s)}</label>`
         ).join('') +
         '<span class="tb-sep"></span>' +
-        `<label class="chk"><input type="checkbox" id="est-hide-unassigned" ${estHideUnassigned ? 'checked' : ''}>Exclude Unassigned</label>` +
+        `<label class="chk"><input type="checkbox" id="est-hide-unassigned" ${estHideUnassigned ? '' : 'checked'}>Include Unassigned</label>` +
       '</div>';
     const wireFilters = () => {
       view.querySelectorAll('.est-status').forEach(cb => cb.onchange = () => {
@@ -3471,7 +3978,7 @@ async function renderDashboard() {
         renderEstProj();
       });
       const hu = view.querySelector('#est-hide-unassigned');
-      if (hu) hu.onchange = () => { estHideUnassigned = hu.checked; renderEstProj(); };
+      if (hu) hu.onchange = () => { estHideUnassigned = !hu.checked; renderEstProj(); };
     };
 
     // Aggregate remaining hours per project from the filtered task rows: total, item count,
@@ -3983,6 +4490,8 @@ async function renderDashboard() {
     updateAuditBadge();
     saveSnapshot();
     if (dashTab === 'audit') renderAudit();
+    if (dashTab === 'capacity') renderTab();   // its due-in-range lines come from these details
+    if (dashTab === 'gantt') renderTab();      // the Gantt's tasks and hours come from them too
   }
 
   // Open tasks / subtasks whose logged time exceeds their estimate, from the project details.
@@ -4057,8 +4566,7 @@ async function renderDashboard() {
       </select></span>
       <span class="tb-sep"></span>
       <span class="tb-group"><span class="tb-label">Over estimate</span>
-      <label class="chk"><input type="checkbox" id="audit-unest" ${auditUnestimated ? 'checked' : ''}>Include unestimated tasks</label></span>
-      <span class="tb-sep"></span>${exportGroup('audit-csv')}`);
+      <label class="chk"><input type="checkbox" id="audit-unest" ${auditUnestimated ? 'checked' : ''}>Include unestimated tasks</label></span>`);
 
     const who = auditPerson ? ` for ${auditPerson}` : '';
     const overTable = over.length ? `<table class="tasks">
@@ -4088,11 +4596,6 @@ async function renderDashboard() {
     if (sel) sel.onchange = () => { auditPerson = sel.value || null; renderAudit(); };
     const ue = document.getElementById('audit-unest');
     if (ue) ue.onchange = () => { auditUnestimated = ue.checked; renderAudit(); };
-    const csv = document.getElementById('audit-csv');
-    if (csv) csv.onclick = () => downloadCsv(`time-audit_${dateStart}_${dateEnd}.csv`,
-      ['Issue', 'Task', 'Parent', 'Project', 'Person', 'Status', 'Date', 'Estimated', 'Logged', 'Remaining', 'Minutes'],
-      over.map(r => ['Over estimate', r.name, r.context, r.project, r.assignee, r.status, '', h2(r.est), h2(r.act), h2(r.rem), ''])
-        .concat(offq.map(r => ['Not quarter-hour', r.task, '', r.project, r.person, '', r.date, '', h2(r.hours), '', r.minutes])));
   }
 
   // Actual Hours › Daily Log: for each person, a day-by-day list of everything they logged
@@ -4182,6 +4685,325 @@ async function renderDashboard() {
     if (ord) ord.onchange = () => { dailyNewestFirst = ord.value === 'new'; renderActualDaily(); };
   }
 
+  // Estimated Hours › Gantt. Rows: each project on Team Capacity · Estimated (active, not
+  // TEAM_CAPACITY_EXCLUDE) that has open estimated work → its headings (shared Firestore plan),
+  // each with the tasks put under it → then every other open, estimated, assigned task, filled
+  // in automatically (Unassigned tasks are left out). Hours come from the estimated project details (auditDetails, server-cached —
+  // no Asana calls): a task counts its own estimate plus its open subtasks'. A bar is the task's
+  // saved plan dates, else an automatic span (ganttAutoSpan: remaining hours back from the Asana
+  // due date). A heading's bar spans its tasks. Signed in, bars drag (and stretch from their
+  // ends); moving a heading carries its tasks. Each task bar marks its Asana due date (◆).
+  // Nothing here writes to Asana.
+  function renderGantt() {
+    planInit(); planWatch();
+    // esc() leaves quotes alone; attribute values (hover titles) need them escaped too.
+    const escA = v => esc(v).replace(/"/g, '&quot;');
+    const signedIn = plan.status === 'in';
+    const dayW = GANTT_ZOOM[gantt.zoom];
+    const toolbar = `<div class="toolbar">
+        ${signedIn ? '' : `<span class="tb-group"><span class="tb-label">Planning</span>
+          <button class="btn plan-signin">Sign in with Google</button></span><span class="tb-sep"></span>`}
+        <span class="tb-group"><span class="tb-label">Zoom</span>
+          <button class="btn" id="g-zout" ${gantt.zoom ? '' : 'disabled'}>−</button>
+          <button class="btn" id="g-zin" ${gantt.zoom < GANTT_ZOOM.length - 1 ? '' : 'disabled'}>+</button>
+          <button class="btn" id="g-today">Today</button></span>
+        <span class="tb-sep"></span>
+        <span class="tb-group"><span class="tb-label">Rows</span>
+          <button class="btn" id="g-expand">Expand all</button>
+          <button class="btn" id="g-collapse">Collapse all</button></span>
+      </div>`;
+    const errHtml = plan.error ? note(plan.error) : '';
+    if (!estData || !auditDetails || (signedIn && !gantt.loaded)) {
+      view.innerHTML = toolbar + errHtml + note(LOADING);
+      planWire(view);
+      if (estData && !auditDetails) loadAudit();
+      return;
+    }
+    if (!signedIn) {
+      view.innerHTML = toolbar + errHtml + note('Sign in with Google to see and edit the shared Gantt plan.');
+      planWire(view);
+      return;
+    }
+
+    // Open tasks by gid, with rolled-up hours.
+    const items = {};
+    auditDetails.forEach(d => (d.tasks || []).forEach(t => {
+      const subs = t.subtasks || [];
+      const est = r2(t.hours + subs.reduce((a, x) => a + x.hours, 0));
+      const act = r2(t.actual + subs.reduce((a, x) => a + x.actual, 0));
+      items[t.gid] = { gid: t.gid, name: t.name, assignee: t.assignee, due: t.due, project: d.gid,
+                       est, act, left: r2(Math.max(0, est - act)),
+                       // Only assigned tasks are pulled in (listed, or offered under + Task).
+                       assigned: t.assignee !== 'Unassigned' };
+    }));
+    const H = gantt.headings, L = gantt.loose || {};
+    const inHeading = new Set(Object.values(H).flatMap(h => Object.keys(h.tasks || {})));
+    const headingsOf = gid => Object.entries(H).filter(([, h]) => h.project === gid);
+    // A loose task's bar: its dragged dates, else the automatic span.
+    const looseSpan = it => L[it.gid] ? { start: L[it.gid].start, end: L[it.gid].end } : ganttAutoSpan(it);
+    const nameOf = r => r.item ? r.item.name : (r.plan.name || 'Task');
+    const byStart = (a, b) => a.span.start.localeCompare(b.span.start) || nameOf(a).localeCompare(nameOf(b));
+    const sumOf = rs => rs.reduce((a, r) => r.item
+      ? { est: a.est + r.item.est, act: a.act + r.item.act, left: a.left + r.item.left } : a, { est: 0, act: 0, left: 0 });
+    const spanOf = rs => rs.length ? { start: rs.map(r => r.span.start).sort()[0], end: rs.map(r => r.span.end).sort().pop() } : null;
+
+    // Projects as Team Capacity · Estimated sees them, keeping those with open estimated work
+    // or a heading.
+    const projects = estData.filter(w => !isArchived(w) && !teamCapacityExcluded(w.gid, w.name)).map(w => {
+      const heads = headingsOf(w.gid).map(([hid, h]) => {
+        const rows = Object.entries(h.tasks || {}).map(([g, t]) =>
+          ({ gid: g, plan: t, item: items[g], span: { start: t.start, end: t.end } })).sort(byStart);
+        const span = spanOf(rows) || { start: h.start, end: h.end };
+        return { hid, h, rows, span, st: sumOf(rows) };
+      }).sort((a, b) => a.span.start.localeCompare(b.span.start) || a.h.name.localeCompare(b.h.name));
+      const loose = Object.values(items).filter(it => it.project === w.gid && it.est > 0 && it.assigned && !inHeading.has(it.gid))
+        .map(it => ({ gid: it.gid, plan: null, item: it, span: looseSpan(it) })).sort(byStart);
+      const all = [...heads.map(x => ({ span: x.span })), ...loose];
+      const st = [...heads.flatMap(x => x.rows), ...loose].reduce((a, r) => r.item
+        ? { est: a.est + r.item.est, left: a.left + r.item.left } : a, { est: 0, left: 0 });
+      return { gid: w.gid, name: w.name, heads, loose, st, span: spanOf(all) };
+    }).filter(p => p.heads.length || p.loose.length)
+      .sort((a, b) => b.st.left - a.st.left || a.name.localeCompare(b.name));
+    if (gantt.expanded === null) gantt.expanded = new Set(projects.filter(p => p.heads.length).map(p => p.gid));
+
+    // The timeline: a week before the earliest bar (or today), Monday-aligned, to at least ten
+    // weeks out and two weeks past the last bar.
+    const today = isoToday(), dates = [today];
+    projects.forEach(p => { if (p.span) dates.push(p.span.start, p.span.end); });
+    const sorted = dates.filter(Boolean).sort();
+    let t0 = ganttDay([sorted[0], ganttDay(today, -7)].sort()[0], -7);
+    t0 = ganttDay(t0, -((new Date(t0 + 'T00:00:00Z').getUTCDay() + 6) % 7));   // back to Monday
+    const t1 = [ganttDay(today, 70), ganttDay(sorted[sorted.length - 1], 14)].sort()[1];
+    const nDays = ganttDiff(t0, t1) + 1, W = nDays * dayW;
+    const X = iso => ganttDiff(t0, iso) * dayW;
+    const wid = s => (ganttDiff(s.start, s.end) + 1) * dayW;
+    const pctOf = (a, b) => b > 0 ? Math.min(100, a / b * 100) : 0;
+    const perDay = (left, s) => { const n = workdayProgress(s.start, s.end).total; return n ? left / n : 0; };
+
+    // Header: week labels (Mondays) over day numbers; weekends and holidays shaded.
+    let weeks = '', days = '', shade = '';
+    for (let i = 0; i < nDays; i++) {
+      const iso = ganttDay(t0, i), wd = new Date(iso + 'T00:00:00Z').getUTCDay();
+      if (wd === 1) weeks += `<div class="g-wk" style="left:${i * dayW}px;width:${7 * dayW}px">${esc(shortDate(iso))}</div>`;
+      const off = !ganttWorkday(iso);
+      days += `<div class="g-dy${off ? ' off' : ''}${iso === today ? ' today' : ''}" style="width:${dayW}px">${dayW >= 18 ? Number(iso.slice(8)) : ''}</div>`;
+      if (off) shade += `<i class="g-off" style="left:${i * dayW}px;width:${dayW}px"></i>`;
+    }
+    const cols = (est, left) => `<span class="g-col">${h2(est)}</span><span class="g-col g-left">${h2(left)}</span>`;
+    const noCols = '<span class="g-col"></span><span class="g-col"></span>';
+    const handles = '<b class="g-hdl l"></b><b class="g-hdl r"></b>';
+    const track = inner => `<div class="g-track" style="width:${W}px">${inner || ''}</div>`;
+    // One task row. hid = its heading (null for a loose task).
+    const taskRow = (r, hid, color) => {
+      const { gid, item, span } = r, name = nameOf(r);
+      const tip = `${name} · ${rangeLabel(span.start, span.end)}${span.auto ? ' (automatic)' : ''}` +
+        (item ? ` · ${h2(item.est)} h est · ${h2(item.left)} h left` : '') + (span.nodue ? ' · no due date in Asana' : '');
+      return `<div class="g-row g-task-row${item ? '' : ' gone'}">
+        <div class="g-label lvl2"><span class="g-name" title="${escA(name)}">${taskLink(gid, name)}</span>
+          <span class="g-who">${item ? esc(item.assignee) : 'done or no longer open'}</span>
+          ${hid ? `<button class="g-act" data-act="rm-t" data-hid="${hid}" data-gid="${gid}" title="Take out of this heading">✕</button>` : ''}
+          ${item ? cols(item.est, item.left) : noCols}</div>
+        ${track(`<div class="g-bar g-t${span.auto ? ' auto' : ''}${span.nodue ? ' nodue' : ''}" data-gid="${gid}"${hid ? ` data-hid="${hid}"` : ''}
+               style="left:${X(span.start)}px;width:${wid(span)}px;background:${color}" title="${escA(tip)}">
+            ${item ? `<i class="g-prog" style="width:${pctOf(item.act, item.est).toFixed(0)}%"></i>` : ''}${handles}</div>
+          ${item && item.due ? `<i class="g-due" style="left:${X(item.due) + dayW / 2}px" title="Asana due ${escA(fmtDate(item.due))}"></i>` : ''}`)}
+        </div>`;
+    };
+
+    let rows = '', nTask = 0, nNoDue = 0, totEst = 0, totLeft = 0;
+    projects.forEach(p => {
+      const color = projectColor(p.name), open = gantt.expanded.has(p.gid);
+      const count = p.heads.reduce((a, x) => a + x.rows.length, 0) + p.loose.length;
+      nTask += count; totEst += p.st.est; totLeft += p.st.left;
+      nNoDue += p.loose.filter(r => r.span.nodue).length;
+      rows += `<div class="g-row g-proj">
+        <div class="g-label"><button class="g-tog" data-act="tog" data-proj="${p.gid}" title="${open ? 'Collapse' : 'Expand'}">${open ? '▾' : '▸'}</button>
+          <i class="dt-dot" style="background:${color}"></i><span class="g-name" title="${escA(p.name)}">${esc(p.name)}</span>
+          <span class="g-who">${plural(count, 'task')}</span>
+          <button class="g-act" data-act="add-h" data-proj="${p.gid}">+ Heading</button>${cols(p.st.est, p.st.left)}</div>
+        ${track(p.span ? `<div class="g-sum" style="left:${X(p.span.start)}px;width:${wid(p.span)}px;background:${color}"></div>` : '')}
+      </div>`;
+      if (gantt.newHeadingFor === p.gid) rows += `<div class="g-row g-edit-row">
+        <div class="g-label lvl1"><input id="g-new-h" class="g-input" placeholder="Heading name, e.g. Pre Orders" maxlength="80">
+          <button class="btn" id="g-new-ok">Add</button><button class="btn" id="g-new-cancel">Cancel</button></div>
+        ${track()}</div>`;
+      if (!open) return;
+      p.heads.forEach(({ hid, h, rows: trs, span, st }) => {
+        const pd = perDay(st.left, span), empty = !trs.length;
+        rows += `<div class="g-row g-head-row">
+          <div class="g-label lvl1"><span class="g-name" title="${escA(h.name)}">${esc(h.name)}</span>
+            <button class="g-act" data-act="add-t" data-hid="${hid}">+ Task</button>
+            <button class="g-act" data-act="ren-h" data-hid="${hid}" title="Rename">✎</button>
+            <button class="g-act" data-act="del-h" data-hid="${hid}" title="Delete heading (its tasks stay on the chart)">✕</button>${cols(st.est, st.left)}</div>
+          ${track(`<div class="g-bar g-h" data-hid="${hid}" style="left:${X(span.start)}px;width:${wid(span)}px;background:${color}"
+                 title="${escA(`${h.name} · ${rangeLabel(span.start, span.end)} · ${h2(st.left)} h left · ${h2(pd)} h per work day`)}">
+              <i class="g-prog" style="width:${pctOf(st.act, st.est).toFixed(0)}%"></i>
+              <span class="g-txt">${h2(st.est)} h · ${h2(pd)} h/day</span>${empty ? handles : ''}</div>`)}
+          </div>`;
+        if (gantt.addTo === hid) {
+          const opts = Object.values(items).filter(it => it.project === p.gid && it.assigned && !inHeading.has(it.gid))
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map(it => `<option value="${it.gid}">${esc(it.name)} · ${esc(it.assignee)} · ${h2(it.est)} h</option>`).join('');
+          rows += `<div class="g-row g-edit-row">
+            <div class="g-label lvl2">${opts
+              ? `<select id="g-pick" class="g-input"><option value="">Choose a task…</option>${opts}</select>
+                 <button class="btn" id="g-pick-ok">Add</button>`
+              : '<span class="g-name muted">Every open task on this board is already under a heading.</span>'}
+              <button class="btn" id="g-pick-cancel">Cancel</button></div>
+            ${track()}</div>`;
+        }
+        trs.forEach(r => { rows += taskRow(r, hid, color); });
+        if (empty) rows += `<div class="g-row g-task-row"><div class="g-label lvl2"><span class="g-name muted">No tasks yet — use + Task.</span></div>${track()}</div>`;
+      });
+      if (p.loose.length) {
+        if (p.heads.length) {
+          const ls = sumOf(p.loose);
+          rows += `<div class="g-row g-head-row g-other"><div class="g-label lvl1"><span class="g-name">Not in a heading</span>${cols(ls.est, ls.left)}</div>${track()}</div>`;
+        }
+        p.loose.forEach(r => { rows += taskRow(r, null, color); });
+      }
+    });
+
+    const summary = summaryBar([
+      { n: projects.length, l: 'Projects' },
+      { n: nTask, l: 'Tasks' },
+      { n: h2(totEst) + ' h', l: 'Estimated' },
+      { n: h2(totLeft) + ' h', l: 'Remaining' },
+      { n: nNoDue, l: 'No due date' },
+    ], 'est');
+    view.innerHTML = summary + toolbar + errHtml +
+      (projects.length ? `<div class="gantt g-editable" id="gantt">
+        <div class="g-row g-header">
+          <div class="g-label"><span class="g-name">Project / heading / task</span><span class="g-col">Est.</span><span class="g-col">Left</span></div>
+          <div class="g-scale" style="width:${W}px"><div class="g-weeks">${weeks}</div><div class="g-days">${days}</div></div>
+        </div>
+        <div class="g-body">
+          <div class="g-grid" style="width:${W}px">${shade}<i class="g-now" style="left:${X(today) + dayW / 2}px"></i></div>
+          ${rows}
+        </div>
+      </div>`
+      : note('No open estimated tasks.'));
+    planWire(view);
+    const box = document.getElementById('gantt');
+    if (!box) return;
+
+    box.scrollLeft = gantt.scrollLeft != null ? gantt.scrollLeft : Math.max(0, X(today) - 7 * dayW);
+    box.onscroll = () => { gantt.scrollLeft = box.scrollLeft; };
+    const rezoom = z => {   // keep the same date at the left edge
+      gantt.scrollLeft = box.scrollLeft / dayW * GANTT_ZOOM[z];
+      gantt.zoom = z; renderGantt();
+    };
+    document.getElementById('g-zout').onclick = () => rezoom(gantt.zoom - 1);
+    document.getElementById('g-zin').onclick = () => rezoom(gantt.zoom + 1);
+    document.getElementById('g-today').onclick = () => { box.scrollLeft = Math.max(0, X(today) - 7 * dayW); };
+    document.getElementById('g-expand').onclick = () => { gantt.expanded = new Set(projects.map(p => p.gid)); renderGantt(); };
+    document.getElementById('g-collapse').onclick = () => { gantt.expanded = new Set(); renderGantt(); };
+
+    const closeEditors = () => { gantt.addTo = null; gantt.newHeadingFor = null; gantt.editing = false; renderGantt(); };
+    box.onclick = e => {
+      const b = e.target.closest('[data-act]');
+      if (!b) return;
+      const act = b.dataset.act, hid = b.dataset.hid;
+      if (act === 'tog') {
+        const g = b.dataset.proj;
+        if (gantt.expanded.has(g)) gantt.expanded.delete(g); else gantt.expanded.add(g);
+        renderGantt();
+      } else if (act === 'add-h') {
+        gantt.newHeadingFor = b.dataset.proj; gantt.addTo = null; gantt.editing = true;
+        gantt.expanded.add(b.dataset.proj); renderGantt();
+      } else if (act === 'add-t') {
+        gantt.addTo = hid; gantt.newHeadingFor = null; gantt.editing = true; renderGantt();
+      } else if (act === 'ren-h') {
+        const name = (prompt('Rename heading', H[hid].name) || '').trim();
+        if (name && name !== H[hid].name) ganttRename(hid, name.slice(0, 80));
+      } else if (act === 'del-h') {
+        if (confirm(`Delete the heading "${H[hid].name}"? Its tasks stay on the chart with their dates.`)) ganttDelete(hid);
+      } else if (act === 'rm-t') {
+        ganttDetach(hid, b.dataset.gid);
+      }
+    };
+    const nh = document.getElementById('g-new-h');
+    if (nh) {
+      nh.focus();
+      const add = () => {
+        const v = nh.value.trim(), proj = gantt.newHeadingFor;
+        gantt.newHeadingFor = null; gantt.editing = false;
+        if (v) ganttAddHeading(proj, v.slice(0, 80)); else renderGantt();
+      };
+      document.getElementById('g-new-ok').onclick = add;
+      document.getElementById('g-new-cancel').onclick = closeEditors;
+      nh.onkeydown = e => { if (e.key === 'Enter') add(); if (e.key === 'Escape') closeEditors(); };
+    }
+    const pc = document.getElementById('g-pick-cancel');
+    if (pc) pc.onclick = closeEditors;
+    const pk = document.getElementById('g-pick'), pok = document.getElementById('g-pick-ok');
+    if (pk && pok) pok.onclick = () => {
+      const it = items[pk.value], hid = gantt.addTo;
+      if (!it || !H[hid]) return;
+      // It keeps the bar it already had (dragged or automatic).
+      const s = looseSpan(it);
+      gantt.addTo = null; gantt.editing = false;
+      ganttAttach(hid, it.gid, it.name, s.start, s.end);
+    };
+
+    // Dragging: the bar body moves, the 8 px at either end stretches it, snapping to whole days.
+    // A heading spans its tasks, so dragging it moves them all (an empty heading also stretches).
+    box.querySelectorAll('.g-bar[data-gid], .g-bar.g-h').forEach(bar => bar.onpointerdown = e => {
+      if (e.button !== 0) return;
+      const hid = bar.dataset.hid || null, gid = bar.dataset.gid || null;
+      const h = hid ? H[hid] : null;
+      let cur;
+      if (gid && hid) cur = h && (h.tasks || {})[gid];
+      else if (gid) cur = items[gid] && looseSpan(items[gid]);
+      else cur = h && projects.flatMap(p => p.heads).find(x => x.hid === hid).span;
+      if (!cur) return;
+      const hasKids = !gid && Object.keys(h.tasks || {}).length > 0;
+      const r = bar.getBoundingClientRect(), off = e.clientX - r.left;
+      const mode = hasKids ? 'm' : off < 8 ? 'l' : off > r.width - 8 ? 'r' : 'm';
+      const len = ganttDiff(cur.start, cur.end);
+      const kids = hasKids ? [...box.querySelectorAll(`.g-bar.g-t[data-hid="${hid}"]`)] : [];
+      const base = [bar, ...kids].map(b => ({ b, left: parseFloat(b.style.left), width: parseFloat(b.style.width) }));
+      const x0 = e.clientX;
+      let dd = 0;
+      gantt.dragging = true;
+      bar.classList.add('dragging');
+      bar.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      const move = ev => {
+        let d = Math.round((ev.clientX - x0) / dayW);
+        if (mode === 'l') d = Math.min(d, len);
+        if (mode === 'r') d = Math.max(d, -len);
+        if (d === dd) return;
+        dd = d;
+        base.forEach(({ b, left, width }) => {
+          if (mode === 'm') b.style.left = left + d * dayW + 'px';
+          else if (mode === 'l') { b.style.left = left + d * dayW + 'px'; b.style.width = width - d * dayW + 'px'; }
+          else b.style.width = width + d * dayW + 'px';
+        });
+      };
+      const done = () => {
+        bar.removeEventListener('pointermove', move);
+        bar.removeEventListener('pointerup', done);
+        bar.removeEventListener('pointercancel', done);
+        gantt.dragging = false;
+        bar.classList.remove('dragging');
+        if (!dd) { renderGantt(); return; }
+        const ns = mode === 'r' ? cur.start : ganttDay(cur.start, dd);
+        const ne = mode === 'l' ? cur.end : ganttDay(cur.end, dd);
+        if (gid && hid) ganttSetTask(hid, gid, ns, ne);
+        else if (gid) ganttSetLoose(gid, ns, ne);
+        else if (hasKids) {
+          const tasks = {};
+          Object.entries(h.tasks).forEach(([g, t]) => { tasks[g] = { start: ganttDay(t.start, dd), end: ganttDay(t.end, dd) }; });
+          ganttSetDates(hid, ns, ne, tasks);
+        } else ganttSetDates(hid, ns, ne);
+      };
+      bar.addEventListener('pointermove', move);
+      bar.addEventListener('pointerup', done);
+      bar.addEventListener('pointercancel', done);
+    });
+  }
+
   // Every status column present in the Team Capacity task rows, in filter order
   // (alphabetical, with "no status" last).
   function statusColumns() {
@@ -4191,6 +5013,13 @@ async function renderDashboard() {
     return [...seen].sort((a, b) => a === NO_STATUS ? 1 : b === NO_STATUS ? -1 : a.localeCompare(b));
   }
   const teamStatusOn = s => !teamStatusFilter || teamStatusFilter.has(s || NO_STATUS);
+  const teamDueOn = t => teamDueMode === 'any' ? true
+    : teamDueMode === 'none' ? !t.due
+    : !!t.due && t.due >= dateStart && t.due <= dateEnd;
+  const teamFiltered = () => !!teamStatusFilter || teamDueMode !== 'any';
+  // How the due-date filter reads in prose ('' when off).
+  const teamDueNote = () => teamDueMode === 'range' ? `due ${rangeLabel(dateStart, dateEnd)}`
+    : teamDueMode === 'none' ? 'no due date' : '';
 
   // One person's Team Capacity rollup under the current status filter: their projects with
   // only the matching task rows, and the totals those rows add up to. Recomputing from the
@@ -4200,8 +5029,8 @@ async function renderDashboard() {
     const projects = [];
     let estimated = 0, actual = 0, count = 0;
     ((teamData.breakdown || {})[name] || []).forEach(p => {
-      const tasks = (p.tasks || []).filter(t => teamStatusOn(t.status));
-      if (teamStatusFilter && !tasks.length) return;
+      const tasks = (p.tasks || []).filter(t => teamStatusOn(t.status) && teamDueOn(t));
+      if (teamFiltered() && !tasks.length) return;
       const e = tasks.reduce((a, t) => a + (t.estimated || 0), 0);
       const a_ = tasks.reduce((a, t) => a + (t.actual || 0), 0);
       projects.push({ project: p.project, estimated: r2(e), actual: r2(a_), remaining: r2(e - a_), tasks });
@@ -4211,7 +5040,24 @@ async function renderDashboard() {
              remaining: r2(estimated - actual), count };
   }
 
+  // Team Capacity · Estimated's page title names the due-date window: "(November)" when the
+  // range is one whole calendar month (with the year when it isn't this year), the dates
+  // otherwise, nothing for "Any due date", "(no due date)" for that filter.
+  function teamTitle() {
+    const base = TABS.team.title;
+    if (teamDueMode === 'none') return base + ' (no due date)';
+    if (teamDueMode !== 'range') return base;
+    const [y, m] = dateStart.split('-').map(Number);
+    const last = new Date(y, m, 0).getDate();
+    if (dateStart.slice(8) === '01' && dateEnd === `${dateStart.slice(0, 8)}${String(last).padStart(2, '0')}`) {
+      const month = new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long' });
+      return `${base} (${month}${y === new Date().getFullYear() ? '' : ' ' + y})`;
+    }
+    return `${base} (${rangeLabel(dateStart, dateEnd)})`;
+  }
+
   function renderTeam() {
+    document.getElementById('tab-title').textContent = teamTitle();
     // Bar chart of estimated hours per assignee, with a dashed line at the monthly target
     // (personTarget: TEAM_DAILY_HOURS × this month's work days).
     // Bars can be filtered to a subset of status columns; Unassigned is hidden by default.
@@ -4234,16 +5080,18 @@ async function renderDashboard() {
       hours: stats.map(s => s.remaining), estimated: stats.map(s => s.estimated),
       actual: stats.map(s => s.actual), counts: stats.map(s => s.count) };
     const toolbar =
+      // No status-column filter here (by request): every status counts.
       '<div class="toolbar team-toolbar">' +
-        '<span class="tb-label">Status</span>' +
-        statusList.map(s =>
-          `<label class="chk"><input type="checkbox" class="team-status" value="${esc(s)}" ${teamStatusOn(s) ? 'checked' : ''}>${esc(s)}</label>`
-        ).join('') +
+        `<span class="tb-group"><span class="tb-label">Due date</span>
+          <select id="team-due-mode">
+            <option value="any"${teamDueMode === 'any' ? ' selected' : ''}>Any due date</option>
+            <option value="range"${teamDueMode === 'range' ? ' selected' : ''}>Due in date range</option>
+            <option value="none"${teamDueMode === 'none' ? ' selected' : ''}>No due date</option>
+          </select></span>` +
         (hasU
           ? '<span class="tb-sep"></span>' +
             `<label class="chk"><input type="checkbox" id="team-show-unassigned" ${teamShowUnassigned ? 'checked' : ''}>Include Unassigned</label>`
           : '') +
-        '<span class="tb-sep"></span>' + exportGroup('team-export') +
       '</div>';
     // What each person can still work this month: TEAM_DAILY_HOURS × the work days left after
     // today (workdayProgress counts today as used, the same reading Team Capacity · Logged's
@@ -4251,40 +5099,14 @@ async function renderDashboard() {
     const [mStart, mEnd] = monthRange();
     const wpm = workdayProgress(mStart, mEnd);
     const leftCap = TEAM_DAILY_HOURS * wpm.left;
-    // Headline stats: what the team still has on its plate versus what it can absorb.
-    const totRem = d.hours.reduce((a, h) => a + h, 0);
-    const headroom = r2(d.cap * d.labels.length - totRem);
-    const summary = summaryBar([
-      { n: h2(totRem) + ' h', l: 'Remaining estimated' },
-      { n: d.labels.length, l: 'People' },
-      { n: h2(d.labels.length ? totRem / d.labels.length : 0) + ' h', l: 'Avg per person' },
-      { n: h2(headroom) + ' h', l: headroom < 0 ? 'Over team capacity' : 'Team headroom', neg: headroom < 0 },
-      { n: wpm.left, l: 'Work days left' },
-      { n: h2(leftCap) + ' h', l: 'Workable per person' },
-    ], 'est');
-    view.innerHTML = summary + toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
-    view.querySelectorAll('.team-status').forEach(box => box.onchange = () => {
-      const on = [...view.querySelectorAll('.team-status')].filter(c => c.checked).map(c => c.value);
-      teamStatusFilter = (on.length === statusList.length) ? null : new Set(on);
-      renderTeam();
-    });
+    // No headline stat strip on this tab: the chart, its two lines and the toolbar say it all.
+    view.innerHTML = toolbar + '<div class="chart-box"><canvas id="chart"></canvas></div>';
     const cb = document.getElementById('team-show-unassigned');
     if (cb) cb.onchange = () => { teamShowUnassigned = cb.checked; renderTeam(); };
-    // Exactly what the chart and donuts show: a total row per assignee, then their projects.
-    document.getElementById('team-export').onclick = () => {
-      const out = [];
-      rolled.forEach(x => {
-        out.push([x.name, 'All projects', h2(x.roll.estimated), h2(x.roll.actual), h2(x.roll.remaining),
-                  h2(d.cap), (x.roll.remaining / d.cap * 100).toFixed(0), x.roll.count]);
-        x.roll.projects.slice().sort((a, b) => b.remaining - a.remaining).forEach(p =>
-          out.push([x.name, p.project, h2(p.estimated), h2(p.actual), h2(p.remaining), '', '', p.tasks.length]));
-      });
-      downloadCsv('team-capacity-estimated.csv',
-        ['Assignee', 'Project', 'Estimated hours', 'Actual hours', 'Remaining hours',
-         'Monthly capacity', '% of capacity', 'Items'], out);
-    };
+    // Due-date filter. "Due in date range" uses the sidebar's shared date range.
+    document.getElementById('team-due-mode').onchange = e => { teamDueMode = e.target.value; renderTeam(); };
     destroyCharts();
-    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : capColorEst(h));
+    const colors = d.hours.map((h, i) => d.labels[i] === 'Unassigned' ? personColor('Unassigned') : capColorEst(h, leftCap));
     // Someone who has tracked more time than was estimated has negative remaining hours. That
     // is real, but drawing it pulls the axis below zero and squashes everyone else, so the bars
     // bottom out at 0 — the true est/actual split stays in the tooltip and the drill-in.
@@ -4329,9 +5151,28 @@ async function renderDashboard() {
       return { name: x.name, slices, total: Math.max(used, d.cap),
         caption: `${h2(used)} of ${h2(d.cap)} h · ${plural(nproj, 'project')}` +
                  (free > 0 ? '' : ' · at capacity') };
-    }), { title: 'Remaining hours by project, per person',
-          sub: `Each ring is one assignee, filled out to the ${h2(d.cap)} h monthly target. Click a card for their full project/task breakdown.`,
+    }), { title: 'Donut charts',
           onPick: r => showBreakdown(r.name) });
+    teamTaskLists(rolled);
+  }
+
+  // Under the rings: every open task the people on the chart have under the current filters, in
+  // one list grouped under each due date (dueTable byDate), soonest first, with who it's
+  // assigned to. Only with a due-date filter on; unfiltered it would be every open task.
+  function teamTaskLists(rolled) {
+    if (teamDueMode === 'any') {
+      view.insertAdjacentHTML('beforeend', '<h2 class="section-h">Tasks by due date</h2>' +
+        note(`Set Due date to "Due in date range" in the toolbar to list the tasks due in the sidebar's dates.`));
+      return;
+    }
+    const rows = rolled.flatMap(x => x.roll.projects.flatMap(p => p.tasks.filter(t => !t.done).map(t => ({
+      gid: t.gid, name: t.name, context: t.context, project: p.project, assignee: x.name, due: t.due,
+      status: t.status, est: t.estimated, act: t.actual, left: t.remaining }))))
+      .sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999') || a.name.localeCompare(b.name));
+    const rem = r2(rows.reduce((a, r) => a + Math.max(0, r.left), 0));
+    view.insertAdjacentHTML('beforeend',
+      `<h2 class="section-h">Tasks by due date · ${esc(teamDueNote())} <span class="section-aside">${h2(rem)} h left · ${plural(rows.length, 'task')}</span></h2>` +
+      dueTable(rows, { project: true, assignee: true, byDate: true }));
   }
 
   function showBreakdown(name, back) {
@@ -4341,17 +5182,17 @@ async function renderDashboard() {
     const rows_ = roll.projects.slice().sort((a, b) => b.remaining - a.remaining);
     const totEst = roll.estimated, totAct = roll.actual, totRem = roll.remaining;
     const pct = (totRem / teamData.cap * 100).toFixed(0);
-    const filterNote = teamStatusFilter
-      ? ` · status: ${[...teamStatusFilter].join(', ')}` : '';
+    const filterNote = (teamStatusFilter ? ` · status: ${[...teamStatusFilter].join(', ')}` : '') +
+      (teamDueMode !== 'any' ? ` · ${teamDueNote()}` : '');
     // Each project is a bold header row, with that person's tasks/subtasks listed beneath it.
     let rows = rows_.map(r => {
-      let body = `<tr class="parent"><td>${esc(r.project)}</td><td></td>` +
+      let body = `<tr class="parent"><td>${esc(r.project)}</td><td></td><td></td>` +
         `<td class="hours">${h2(r.estimated)} h</td>` +
         `<td class="hours">${h2(r.actual)} h</td>` +
         `<td class="hours">${h2(r.remaining)} h</td></tr>`;
       const tasks = r.tasks || [];
       if (!tasks.length) {
-        body += `<tr class="sub"><td class="sub-name" colspan="5">No tasks.</td></tr>`;
+        body += `<tr class="sub"><td class="sub-name" colspan="6">No tasks.</td></tr>`;
       } else {
         body += tasks.map(t => {
           const ctx = t.context ? ` <span class="muted">(${esc(t.context)})</span>` : '';
@@ -4362,6 +5203,7 @@ async function renderDashboard() {
             `<td>${t.done ? '<span class="badge done">Completed</span>'
                           : t.status ? `<span class="badge">${esc(t.status)}</span>`
                                      : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
+            `<td>${t.done ? '' : dueCell(t.due)}</td>` +
             `<td class="hours">${h2(t.estimated)} h</td>` +
             `<td class="hours">${h2(t.actual)} h</td>` +
             `<td class="hours">${h2(t.remaining)} h</td></tr>`;
@@ -4369,7 +5211,7 @@ async function renderDashboard() {
       }
       return body;
     }).join('');
-    if (!rows_.length) rows = '<tr><td colspan="5" class="muted">No estimated or actual hours.</td></tr>';
+    if (!rows_.length) rows = '<tr><td colspan="6" class="muted">No estimated or actual hours.</td></tr>';
     view.innerHTML =
       `<div class="drill-head">
          <button class="btn back" id="tochart">← Back to chart</button>
@@ -4377,7 +5219,7 @@ async function renderDashboard() {
        </div>
        <p class="drill-total">${h2(totRem)} h remaining of ${h2(teamData.cap)} (${pct}%) · ${h2(totEst)} est − ${h2(totAct)} actual · ${plural(rows_.length, 'project')}${esc(filterNote)}</p>
        <table class="tasks">
-         <thead><tr><th>Project / Task</th><th>Status</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
+         <thead><tr><th>Project / Task</th><th>Status</th><th>Due</th><th class="hours">Est.</th><th class="hours">Actual</th><th class="hours">Remaining</th></tr></thead>
          <tbody>${rows}</tbody>
        </table>`;
     document.getElementById('tochart').onclick = back || renderTeam;
@@ -4402,7 +5244,6 @@ async function renderDashboard() {
     // Headline stats: what the team actually booked against what it could have.
     const totLogged = rows.reduce((a, r) => a + r.total, 0);
     const totUnbill = rows.reduce((a, r) => a + r.unbill, 0);
-    const teamCap = cap * rows.length;
     // How far through the work month (Mon–Fri, minus holidays) we are, and therefore how many hours each
     // person should already have logged if they are keeping pace with the monthly target.
     const wp = workdayProgress(dateStart, dateEnd);
@@ -4415,17 +5256,13 @@ async function renderDashboard() {
       { n: h2(totLogged) + ' h', l: 'Hours logged' },
       { n: h2(totLogged - totUnbill) + ' h', l: 'Billable' },
       { n: h2(totUnbill) + ' h', l: 'Unbillable' },
-      { n: (totLogged ? ((totLogged - totUnbill) / totLogged * 100).toFixed(0) : '0') + '%', l: 'Billable share' },
-      { n: rows.length, l: 'People' },
       { n: h2(rows.length ? totLogged / rows.length : 0) + ' h', l: 'Avg per person' },
-      { n: (teamCap ? (totLogged / teamCap * 100).toFixed(0) : '0') + '%', l: 'Of team capacity' },
       { n: wp.pct.toFixed(0) + '%', l: 'Of work month elapsed' },
       { n: `${wp.elapsed} of ${wp.total}`, l: 'Work days used' },
       { n: wp.left, l: 'Work days left' },
-      { n: h2(paceTarget) + ' h', l: 'Target by today' },
       { n: teamPaceTarget ? teamPace.toFixed(0) + '%' : '—', l: 'Team pace', neg: teamPaceTarget > 0 && teamPace < 100 },
     ]);
-    view.innerHTML = summary + rangePicker(rows.length ? exportGroup('team-export') : '') +
+    view.innerHTML = summary +
       '<div class="chart-box"><canvas id="chart"></canvas></div>';
     wireRangeSel();
     if (!rows.length) {
@@ -4479,25 +5316,6 @@ async function renderDashboard() {
     // Per-slice split (a project, or a carve-out such as Support Tickets on its own), minus
     // TEAM_CAPACITY_EXCLUDE projects — keyed by label, so nameOf[k] || k below is the label.
     const pc = teamSliceCache[key] || {};
-    // Exactly what the chart and donuts show: a total row per person, then their projects.
-    document.getElementById('team-export').onclick = () => {
-      const out = [];
-      rows.forEach(r => {
-        out.push([r.name, 'All projects', h2(r.total), h2(r.total - r.unbill), h2(r.unbill),
-                  h2(cap), (r.total / cap * 100).toFixed(0), h2(paceTarget),
-                  paceTarget ? (r.total / paceTarget * 100).toFixed(0) : '']);
-        const m = {};
-        Object.entries(pc).forEach(([gid, pm]) => {
-          const v = pm[r.name];
-          if (v > 0) { const n = nameOf[gid] || gid; m[n] = (m[n] || 0) + v; }
-        });
-        Object.entries(m).sort((a, b) => b[1] - a[1]).forEach(([proj, h]) =>
-          out.push([r.name, proj, h2(h), '', '', '', '', '', '']));
-      });
-      downloadCsv(`team-capacity-logged_${dateStart}_to_${dateEnd}.csv`,
-        ['Logged by', 'Project', 'Hours logged', 'Billable hours', 'Unbillable hours',
-         'Monthly capacity', '% of capacity', 'Target by today', '% of pace'], out);
-    };
     donutGrid(view, rows.map(r => {
       const m = {};
       Object.entries(pc).forEach(([gid, pm]) => {
@@ -4506,9 +5324,7 @@ async function renderDashboard() {
       });
       const slices = donutSlices(m);
       return { name: r.name, slices, total: slices.reduce((a, s) => a + s.hours, 0) };
-    }), { title: 'Logged hours by project, per person',
-          sub: 'Each ring is one person — hover a slice for its project. Click a card for their '
-             + 'per-project totals and the tasks behind them. Project colors are set in Graph Colors.',
+    }), { title: 'Donut charts',
           onPick: r => showLoggedBreakdown(r.name) });
   }
 
@@ -4582,14 +5398,14 @@ async function renderDashboard() {
     const el = document.getElementById('dash-updated');
     if (!el) return;
     let u = null;
-    if (dashTab === 'settings' || dashTab === 'holidays') u = null;
+    if (dashTab === 'settings') u = null;
     else if (dashTab === 'team') u = teamData && teamData.updated;
-    else if (dashTab === 'estimated' || dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
+    else if (dashTab === 'estproj') u = estData && estData[0] && estData[0].updated;
     else u = loggedData && loggedData[0] && loggedData[0].updated;
     // While a load runs over saved data, say so — the numbers on screen may be a little old.
-    const fresh = ['team', 'estimated', 'estproj'].includes(dashTab) ? freshEst : freshLogged;
+    const fresh = ['team', 'estproj'].includes(dashTab) ? freshEst : freshLogged;
     const pending = loading && savedAt && !fresh;
-    el.textContent = u ? ('Updated ' + u + (pending ? ' · checking Asana for changes…' : '')) : '';
+    el.textContent = u ? (fmtUpdated(u) + (pending ? ' · checking Asana for changes…' : '')) : '';
   }
 
   // Shared capacity overrides (plan.caps) replace the configured caps on the loaded rows, so
@@ -4648,6 +5464,7 @@ async function renderDashboard() {
   }
 
   function renderTab() {
+    wireRangeSel();   // the sidebar's date range applies from every tab
     applyCapOverrides();
     if (teamData) teamData.cap = personTarget();   // live: follows holiday edits
     destroyCharts();   // leaving any chart tab
@@ -4660,7 +5477,9 @@ async function renderDashboard() {
     // place that shows the selected date range.
     document.getElementById('tab-title').textContent = TABS[dashTab].title;
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
-    subEl.textContent = sub; subEl.style.display = sub ? '' : 'none';
+    // A tab with no sub line keeps the (empty) element, so its bottom margin still spaces the
+    // header from the toolbar.
+    subEl.textContent = sub;
     const loading = note(LOADING);
 
     if (dashTab === 'team') {
@@ -4677,30 +5496,8 @@ async function renderDashboard() {
       renderActualDaily();
     } else if (dashTab === 'audit') {
       renderAudit();
-    } else if (dashTab === 'estimated') {
-      if (!estData) view.innerHTML = loading;
-      else {
-        // Only projects in the Asana portfolio (in_portfolio; a project configured in PROJECTS
-        // but not in the portfolio stays off this tab). null = portfolio unreadable → show all.
-        // Archived projects sit in their own section below the active ones and stay out of
-        // the headline stats, which are about the work in flight.
-        const cards = estData.filter(w => w.in_portfolio !== false);
-        const live = cards.filter(w => !isArchived(w)), arch = cards.filter(isArchived);
-        const summary = summaryBar([
-          { n: h2(live.reduce((a, w) => a + (w.hours || 0), 0)) + ' h', l: 'Estimated remaining' },
-          { n: live.length, l: 'Projects' },
-          { n: live.reduce((a, w) => a + (w.ntasks || 0), 0), l: 'Tasks' },
-          { n: h2(arch.reduce((a, w) => a + (w.hours || 0), 0)) + ' h', l: 'Archived (est.)' },
-        ], 'est');
-        cardGrid(live, estCard, 'No projects.', summary);
-        if (arch.length) {
-          view.insertAdjacentHTML('beforeend', '<h2 class="section-h">Archived projects</h2>');
-          const g = document.createElement('div');
-          g.className = 'grid';
-          arch.forEach(w => g.appendChild(estCard(w)));
-          view.appendChild(g);
-        }
-      }
+    } else if (dashTab === 'gantt') {
+      renderGantt();
     } else if (dashTab === 'capacity') {
       const month = dateStart.slice(0, 7);
       planInit();
@@ -4708,11 +5505,25 @@ async function renderDashboard() {
       const picker = rangePicker(planToolbar());
       if (!loggedData) { view.innerHTML = picker + loading; wireRangeSel(); planWire(view); }
       else {
+        dueIndex = buildDueIndex(auditDetails, dateStart, dateEnd);
         // MSA projects with a monthly capacity lead the list and are highlighted: combined
         // budget buckets first, then any standalone capped project (group members roll into
         // their bucket). Everything else that logged hours follows as plain statistics cards.
         const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
-        const allCarves = Array.isArray(carveData) ? carveData : [];
+        // A carve-out with capacity_mode "due" (e.g. Savannah Camellia Fest 2027): capacity = the
+        // estimated hours of its open tasks (and subtasks) due in the range, from the estimated
+        // details — the same rule as the cards' "est. due" projection.
+        const dueCarve = w => {
+          if (w.capacity_mode !== 'due' || !auditDetails) return w;
+          const d = auditDetails.find(x => x.gid === w.source);
+          if (!d) return w;
+          const needle = (w.match || '').toLowerCase();
+          const rows = dueTaskRows(d, dateStart, dateEnd).filter(r => r.est > 0 &&
+            (!needle || (r.parent || r.name).toLowerCase().includes(needle)));
+          const est = r2(rows.reduce((a, r) => a + r.est, 0));
+          return Object.assign({}, w, { cap: est, estimated: est, prior: 0, budget: null, dueCap: true, ntasks: rows.length });
+        };
+        const allCarves = (Array.isArray(carveData) ? carveData : []).map(dueCarve);
         const groupsAll = (groupsConfig || []).map(g => buildGroupSummary(g, loggedData, allCarves))
                             .filter(g => g.members.length);
         const standaloneAll = loggedData.filter(w => w.cap != null && !memberGids.has(w.gid))
@@ -4757,9 +5568,18 @@ async function renderDashboard() {
         // Same work-month clock as Team Capacity · Logged, so "Budget used" can be read
         // against how much of the month has gone.
         const wp = workdayProgress(dateStart, dateEnd);
+        // Estimated hours of open work due in the range, across the budgeted projects (carve-outs
+        // excluded: they're only some of a board's tasks). Waits on the estimated details.
+        const totDue = dueFor([...groups.flatMap(g => g.members.filter(m => m.gid).map(m => m.gid)),
+                               ...standalone.map(w => w.gid)]);
         const summary = summaryBar([
           { n: h2(totCap) + ' h', l: 'Budgeted capacity' },
           { n: h2(totUsed) + ' h', l: 'Hours used' },
+          ...(totDue ? [
+            { n: h2(totDue.left) + ' h', l: 'Est. due remaining' },
+            { n: (totCap ? ((totUsed + totDue.left) / totCap * 100).toFixed(0) : '0') + '%',
+              l: 'Projected budget use', neg: totUsed + totDue.left > totCap },
+          ] : []),
           { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
           { n: (totCap ? (totUsed / totCap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
           { n: wp.pct.toFixed(0) + '%', l: 'Of work month elapsed' },
@@ -4843,8 +5663,8 @@ async function renderDashboard() {
               </div>`;
             view.insertAdjacentHTML('beforeend',
               '<h2 class="section-h flush">Team availability · rest of month</h2>' + panel);
-            const msa = capSection('MSA projects · monthly capacity', null, false);
-            const est = capSection('Estimate-based projects · capacity = open task estimates', 'Estimate', false);
+            const msa = capSection('MSA projects · monthly retainers', null, false);
+            const est = capSection('Estimate-based projects · capacity = estimated hours due in range', 'Estimate', false);
             const sup = capSection('Support · monthly capacity', 'Support', false);
             hasCapShown = msa || est || sup;
           }
@@ -4912,12 +5732,54 @@ async function renderDashboard() {
         planWire(view);
       }
     } else if (dashTab === 'settings') {
-      renderSettings();
-    } else if (dashTab === 'theme') {
-      renderTheme();
-    } else if (dashTab === 'holidays') {
-      renderHolidays();
+      renderSettingsTab();
     }
+  }
+
+  // Settings: one tab, a settings page with its own section list (Theme, Graph colors,
+  // Holidays) beside a pane. Each section keeps its own renderer, drawing into the pane through
+  // settingsRoot(); settingsSection is the open one (kept across re-renders and tab switches).
+  let settingsSection = 'theme';
+  const SETTINGS_SECTIONS = [
+    { group: 'Personal', items: [
+      { key: 'theme', label: 'Theme', hint: 'How the dashboard looks to you', scope: 'Only you',
+        desc: 'Backgrounds, panels and the two accents. Saved to your account, so it follows you to every browser and nobody else sees a change.',
+        icon: 'palette' },
+      { key: 'colors', label: 'Graph colors', hint: 'People and projects in charts', scope: 'Only you',
+        desc: 'A color for each person (the stacked bars) and each project (the Team Capacity donuts). Saved to your account.',
+        icon: 'chart-pie' },
+    ] },
+    { group: 'Team', items: [
+      { key: 'holidays', label: 'Holidays', hint: 'Shared days off', scope: 'Shared with everyone',
+        desc: 'Days that are not work days. Anyone signed in can add, edit or remove one, and every work-day count (pace, team availability, the Gantt) updates for the whole team.',
+        icon: 'calendar-days' },
+    ] },
+  ];
+  const settingsItem = k => SETTINGS_SECTIONS.flatMap(g => g.items).find(i => i.key === k);
+  // Draw the settings tab bar (shadcn-style segmented tabs, scope tag on the right) and return
+  // the body element the open section renders into, full width below it.
+  function settingsRoot() {
+    const cur = settingsItem(settingsSection) || settingsItem('theme');
+    const items = SETTINGS_SECTIONS.flatMap(g => g.items);
+    view.innerHTML = `<div class="set-bar">
+        <div class="set-tabs" role="tablist" aria-label="Settings sections">${items.map(i => `
+          <button class="set-tab${i.key === cur.key ? ' on' : ''}" role="tab" data-sec="${i.key}"
+                  aria-selected="${i.key === cur.key}" title="${esc(i.hint)}">${icon(i.icon)}<span>${esc(i.label)}</span></button>`).join('')}
+        </div>
+        <span class="set-scope${cur.scope.startsWith('Shared') ? ' shared' : ''}">${esc(cur.scope)}</span>
+      </div>
+      <div class="set-body" id="set-body" role="tabpanel"></div>`;
+    view.querySelectorAll('.set-tab').forEach(b => b.onclick = () => {
+      if (b.dataset.sec === settingsSection) return;
+      settingsSection = b.dataset.sec; plan.error = null; renderSettingsTab();
+    });
+    return document.getElementById('set-body');
+  }
+  function renderSettingsTab() {
+    destroyCharts();
+    if (settingsSection === 'colors') renderSettings();
+    else if (settingsSection === 'holidays') renderHolidays();
+    else renderTheme();
   }
 
   // Settings › Holidays: the shared list of days off. Summary, one toolbar (the add form),
@@ -4926,6 +5788,7 @@ async function renderDashboard() {
   // (kept across the re-render a live snapshot triggers).
   let holEdit = null;
   function renderHolidays() {
+    const root = settingsRoot();
     planInit();
     planWatch();
     const now = new Date(), pad = n => String(n).padStart(2, '0');
@@ -4935,7 +5798,7 @@ async function renderDashboard() {
     const [ms, me] = monthRange();
     const upcoming = holidayList.filter(h => h.date >= today && !weekend(h.date));
     const canEdit = plan.status === 'in';
-    view.innerHTML = summaryBar([
+    root.innerHTML = summaryBar([
       { n: holidayList.filter(h => h.date.startsWith(year) && !weekend(h.date)).length, l: `Weekday holidays in ${year}` },
       { n: upcoming.length ? fmtDate(upcoming[0].date) : '—', l: upcoming.length ? 'Next: ' + (upcoming[0].name || 'holiday') : 'Next holiday' },
       { n: workdayProgress(ms, me).total, l: 'Work days this month' },
@@ -4950,7 +5813,7 @@ async function renderDashboard() {
       + (plan.error ? `<p class="plan-err">${esc(plan.error)}</p>` : '')
       + (!plan.holidaysSaved ? `<p class="cap-edit-help">Showing the starting list from the code — the first change saves it to the shared list.</p>` : '');
     const years = [...new Set(holidayList.map(h => h.date.slice(0, 4)))].sort().reverse();
-    if (!years.length) view.insertAdjacentHTML('beforeend', note('No holidays yet.'));
+    if (!years.length) root.insertAdjacentHTML('beforeend', note('No holidays yet.'));
     years.forEach((y, i) => {
       const rows = holidayList.filter(h => h.date.startsWith(y)).map(h => canEdit && h.date === holEdit ? `
         <tr class="parent editing">
@@ -4967,7 +5830,7 @@ async function renderDashboard() {
           <td class="hol-act">${canEdit ? `<button class="btn hol-btn hol-edit" data-date="${esc(h.date)}">Edit</button>
             <button class="btn hol-btn hol-del" data-date="${esc(h.date)}">Remove</button>` : ''}</td>
         </tr>`).join('');
-      view.insertAdjacentHTML('beforeend', `<h2 class="section-h${i === 0 ? ' flush' : ''}">${esc(y)}</h2>
+      root.insertAdjacentHTML('beforeend', `<h2 class="section-h${i === 0 ? ' flush' : ''}">${esc(y)}</h2>
         <table class="tasks hol-table"><thead><tr><th>Date</th><th>Day</th><th>Holiday</th><th></th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>`);
     });
@@ -4983,22 +5846,22 @@ async function renderDashboard() {
     };
     add.onclick = submit;
     [dIn, nIn].forEach(el => el.onkeydown = ev => { if (ev.key === 'Enter') submit(); });
-    view.querySelectorAll('.hol-del').forEach(b => b.onclick = async () => {
+    root.querySelectorAll('.hol-del').forEach(b => b.onclick = async () => {
       const day = holidayList.find(h => h.date === b.dataset.date);
       if (!day || !confirm(`Remove ${day.name || 'the holiday'} on ${fmtDate(day.date)}?`)) return;
       b.disabled = true; plan.error = null;
       await planHoliday({ date: day.date, name: day.name || '' }, false);
     });
-    view.querySelectorAll('.hol-edit').forEach(b => b.onclick = () => {
+    root.querySelectorAll('.hol-edit').forEach(b => b.onclick = () => {
       holEdit = b.dataset.date; plan.error = null; renderHolidays();
-      const n = view.querySelector('.hol-e-name');
+      const n = root.querySelector('.hol-e-name');
       if (n) { n.focus(); n.select(); }
     });
-    const cancel = view.querySelector('.hol-cancel');
+    const cancel = root.querySelector('.hol-cancel');
     if (cancel) cancel.onclick = () => { holEdit = null; plan.error = null; renderHolidays(); };
-    const save = view.querySelector('.hol-save');
+    const save = root.querySelector('.hol-save');
     if (save) {
-      const eDate = view.querySelector('.hol-e-date'), eName = view.querySelector('.hol-e-name');
+      const eDate = root.querySelector('.hol-e-date'), eName = root.querySelector('.hol-e-name');
       const doSave = async () => {
         const day = holidayList.find(h => h.date === save.dataset.date);
         if (!day) { holEdit = null; return renderHolidays(); }   // removed by someone else meanwhile
@@ -5026,6 +5889,7 @@ async function renderDashboard() {
   // users/{uid}.graphColors) and recolors the preview as the picker moves.
   function renderSettings() {
     destroyCharts();
+    const root = settingsRoot();
     const colorRow = (kind, i, name, color, custom) => `<div class="color-row" data-kind="${kind}" data-i="${i}">
         <input type="color" class="color-pick" value="${color}" aria-label="Color for ${esc(name)}">
         <span class="color-name">${esc(name)}</span>
@@ -5039,13 +5903,13 @@ async function renderDashboard() {
     const projects = [...new Set([...PROJECT_ROSTER, ...(Array.isArray(carveData) ? carveData.map(c => c.name) : []),
                                   ..._seenProjects, ...Object.keys(projectColorConfig)])]
       .filter(n => n && n !== OTHER_SLICE && n !== FREE_SLICE);
-    view.innerHTML = `<h2 class="section-h flush">People <span class="section-aside">the per-person stacked bars · preview uses sample hours</span></h2>
+    root.innerHTML = `<h2 class="section-h flush">People</h2>
       <div class="chart-box preview-box"><canvas id="chart"></canvas></div>
       <div class="panel color-panel">
         <div class="color-list">${people.map((p, i) => colorRow('person', i, p, personColor(p), p in personColorConfig)).join('')}</div>
         <div class="color-actions"><button class="btn back" id="reset-people">Reset people to defaults</button></div>
       </div>
-      <h2 class="section-h">Projects <span class="section-aside">the Team Capacity rings · preview uses sample hours</span></h2>
+      <h2 class="section-h">Projects</h2>
       <div class="chart-box preview-box"><canvas id="proj-preview"></canvas></div>
       <div class="panel color-panel">
         <div class="color-list color-cols">${projects.map((p, i) => colorRow('project', i, p, projectColor(p), p in projectColorConfig)).join('')}</div>
@@ -5082,7 +5946,7 @@ async function renderDashboard() {
       else ring.data.datasets[0].backgroundColor = projects.map(projectColor);
       (kind === 'person' ? chart : ring).update();
     };
-    view.querySelectorAll('.color-row').forEach(row => {
+    root.querySelectorAll('.color-row').forEach(row => {
       const kind = row.dataset.kind, person = kind === 'person';
       const name = (person ? people : projects)[+row.dataset.i];   // by index: names may hold any characters
       const cfg = () => person ? personColorConfig : projectColorConfig;
@@ -5142,11 +6006,12 @@ async function renderDashboard() {
   // CUSTOM_FIELDS entry, applied live as it moves (updateCustomTheme) and saved for this person.
   // "Start from" copies a preset's colors in as a starting point.
   function renderTheme(msg) {
+    const root = settingsRoot();
     const ordered = THEMES.slice().sort(byShade);
     const editing = theme === 'custom';
-    view.innerHTML = `<div class="grid">${ordered.map(themeCardHtml).join('')}${themeCardHtml(customThemeEntry(customTheme))}</div>
+    root.innerHTML = `<div class="grid">${ordered.map(themeCardHtml).join('')}${themeCardHtml(customThemeEntry(customTheme))}</div>
       <p class="note" id="theme-msg"${msg ? '' : ' hidden'}>${esc(msg || '')}</p>
-      ${editing ? `<h2 class="section-h">Custom theme <span class="section-aside">changes apply as you pick · saved to your account</span></h2>
+      ${editing ? `<h2 class="section-h">Custom theme</h2>
         <div class="panel ct-panel">
           <div class="ct-grid">${CUSTOM_FIELDS.map(f => `<label class="ct-row">
               <input type="color" class="color-pick" data-k="${f.k}" value="${customTheme[f.k]}">
@@ -5160,7 +6025,7 @@ async function renderDashboard() {
           <p class="hint">Keep the two accents easy to tell apart, and steer clear of red and yellow — on this dashboard
             red means over budget and yellow marks pace.</p>
         </div>` : ''}`;
-    view.querySelectorAll('.theme-card').forEach(c => {
+    root.querySelectorAll('.theme-card').forEach(c => {
       const pick = async () => { const m = await setTheme(c.dataset.theme); renderTheme(m); };
       c.onclick = pick;
       c.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } };
@@ -5171,13 +6036,13 @@ async function renderDashboard() {
     const msgEl = document.getElementById('theme-msg');
     const saved = m => { msgEl.hidden = !m; msgEl.textContent = m || ''; };
     const repaintCard = () => {
-      const old = view.querySelector('.theme-card[data-theme="custom"]');
+      const old = root.querySelector('.theme-card[data-theme="custom"]');
       old.insertAdjacentHTML('afterend', themeCardHtml(customThemeEntry(customTheme)));
       const card = old.nextElementSibling;
       old.remove();
       card.onclick = () => {};   // already the current theme
     };
-    view.querySelectorAll('.ct-row .color-pick').forEach(inp => inp.oninput = () => {
+    root.querySelectorAll('.ct-row .color-pick').forEach(inp => inp.oninput = () => {
       updateCustomTheme({ [inp.dataset.k]: inp.value }, saved);
       repaintCard();
     });
@@ -5219,7 +6084,7 @@ async function renderDashboard() {
   // apply a "you" default. A failure here is not worth an error banner — the filters simply
   // open on everyone — so it resolves to null instead of rejecting.
   const mePromise = fetch('/api/me').then(r => r.json())
-    .then(j => { currentUser = (j && j.name) || null; })
+    .then(j => { currentUser = (j && j.name) || null; refreshSideUser(); })
     .catch(() => { currentUser = null; })
     .finally(() => { meKnown = true; });
 
@@ -5337,7 +6202,7 @@ async function renderDetail(gid) {
   let detailData = null;
 
   // This page is a drill-in from Projects · Estimated, so it reads that tab's filters rather
-  // than starting fresh: the status checkboxes and "Exclude Unassigned". Both are module-level
+  // than starting fresh: the status checkboxes and "Include Unassigned". Both are module-level
   // and hash routing never reloads the page, so they survive the navigation.
   const estStatusOn = s => !estStatusFilter || estStatusFilter.has(s);
   const estKept = t => estStatusOn(t.section || NO_STATUS);
@@ -5468,7 +6333,7 @@ async function renderDetail(gid) {
       document.getElementById('sub').textContent =
         `Remaining estimated hours per assignee (estimated − time tracked) · ${plural(detailData.ntasks, 'task')} (excludes Completed tasks)` +
         estFilterNote();
-      document.getElementById('dash-updated').textContent = detailData.updated ? ('Updated ' + detailData.updated) : '';
+      document.getElementById('dash-updated').textContent = fmtUpdated(detailData.updated);
       showChart();
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
     finally { btn.disabled = false; btn.textContent = 'Refresh'; }
@@ -5498,11 +6363,17 @@ async function renderLoggedDetail(gid) {
   const toDash = () => { location.hash = ''; };
   const btn = document.getElementById('refresh');
   let data = null;
+  // The open work due in the range (from the estimated detail) and the project's capacity
+  // (from the logged summary row, with any override); due stays null if that read fails.
+  let due = null, cap = null;
 
   function showChart() {
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:data.name}]);
     document.getElementById('view').innerHTML =
-      '<div class="chart-box"><canvas id="chart"></canvas></div>';
+      (data.labels.length ? '<div class="chart-box"><canvas id="chart"></canvas></div>'
+                          : noteBox(`No hours logged in ${rangeLabel(data.start, data.end)}.`)) +
+      (due ? dueSection(due, data.total_hours, cap) : '');
+    if (!data.labels.length) return;
     destroyCharts();
     chart = new Chart(document.getElementById('chart'), {
       type:'bar',
@@ -5551,11 +6422,21 @@ async function renderLoggedDetail(gid) {
   async function load(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
     try {
-      data = await (await fetch('/api/logged/' + gid + `?start=${dateStart}&end=${dateEnd}` + (refresh ? '&refresh=1' : ''))).json();
+      const q = `?start=${dateStart}&end=${dateEnd}`;
+      data = await (await fetch('/api/logged/' + gid + q + (refresh ? '&refresh=1' : ''))).json();
+      // Both read the caches the load above just filled — no extra Asana calls.
+      try {
+        const [det, rows] = await Promise.all([
+          fetch('/api/project/' + gid).then(r => r.json()),
+          fetch('/api/logged' + q).then(r => r.json())]);
+        const row = (rows || []).find(w => w.gid === gid);
+        cap = row && row.cap != null ? capOverride('p:' + gid, row.cap) : null;
+        due = det && det.tasks ? dueTaskRows(det, dateStart, dateEnd) : null;
+      } catch (e) { due = null; }
       document.getElementById('page-title').textContent = data.name;
       document.getElementById('sub').textContent =
         `Hours logged ${rangeLabel(data.start, data.end)} per person · ${plural(data.nentries, 'time entry', 'time entries')} · ${h2(data.total_hours)} h total`;
-      document.getElementById('dash-updated').textContent = data.updated ? ('Updated ' + data.updated) : '';
+      document.getElementById('dash-updated').textContent = fmtUpdated(data.updated);
       showChart();
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
     finally { btn.disabled = false; btn.textContent = 'Refresh'; }
@@ -5600,9 +6481,12 @@ async function renderGroupDetail(name) {
       { n: (cap ? (used / cap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
       { n: members.length, l: members.length === 1 ? 'Project' : 'Projects' },
     ]) + `<div class="cap-wide">${capBar(used, cap)}</div>`;
+    // Open work due in the range across the member projects (carve-outs aside: they're only
+    // some of a board's tasks), drawn after the chart and the member table.
+    const dueHtml = dueRows ? dueSection(dueRows, used, cap, { project: true }) : '';
     if (!members.some(m => (m.hours || 0) > 0)) {
       view.insertAdjacentHTML('beforeend',
-        noteBox(`No hours logged against ${g.name} in ${rangeLabel(dateStart, dateEnd)}.`));
+        noteBox(`No hours logged against ${g.name} in ${rangeLabel(dateStart, dateEnd)}.`) + dueHtml);
       return;
     }
     view.insertAdjacentHTML('beforeend', '<div class="chart-box"><canvas id="chart"></canvas></div>');
@@ -5642,11 +6526,12 @@ async function renderGroupDetail(name) {
            <th class="hours">Share of bucket</th><th class="hours">Of capacity</th>
            <th class="hours">Entries</th></tr></thead>
          <tbody>${rows}</tbody>
-       </table>`);
+       </table>` + dueHtml);
     view.querySelectorAll('tr.parent[data-href]').forEach(r =>
       r.onclick = () => { location.hash = r.dataset.href; });
   }
   const memberHref = m => m.carve ? '#/carve/' + encodeURIComponent(m.carve) : '#/logged/' + m.gid;
+  let dueRows = null;
 
   async function load(refresh) {
     btn.disabled = true; btn.textContent = refresh ? 'Refreshing…' : 'Refresh';
@@ -5668,11 +6553,18 @@ async function renderGroupDetail(name) {
       }
       const g = buildGroupSummary(Object.assign({}, cfg, { cap: capOverride('grp:' + cfg.name, cfg.cap) }),
                                   logged, carves);
+      // Member projects' estimated details (server-cached — no Asana calls) → the due list.
+      try {
+        const dets = await Promise.all(g.members.filter(m => m.gid)
+          .map(m => fetch('/api/project/' + m.gid).then(r => r.json())));
+        dueRows = dets.filter(d => d && d.tasks).flatMap(d => dueTaskRows(d, dateStart, dateEnd))
+          .sort((a, b) => a.due.localeCompare(b.due) || a.name.localeCompare(b.name));
+      } catch (e) { dueRows = null; }
       document.getElementById('page-title').textContent = g.name;
       document.getElementById('sub').textContent =
         `Combined monthly bucket · ${plural(g.members.length, 'member')} · ` +
         `hours logged ${rangeLabel(dateStart, dateEnd)}`;
-      document.getElementById('dash-updated').textContent = g.updated ? ('Updated ' + g.updated) : '';
+      document.getElementById('dash-updated').textContent = fmtUpdated(g.updated);
       show(g);
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
     finally { btn.disabled = false; btn.textContent = 'Refresh'; }
@@ -5800,7 +6692,7 @@ async function renderCarveDetail(name) {
         (w.match ? `Tasks on ${w.source_name} containing “${w.match}”` : `All tasks on ${w.source_name}`) +
         ` · estimates of tasks open or worked on in the range, less time logged before it, ` +
         `against hours logged ${rangeLabel(dateStart, dateEnd)}`;
-      document.getElementById('dash-updated').textContent = w.updated ? ('Updated ' + w.updated) : '';
+      document.getElementById('dash-updated').textContent = fmtUpdated(w.updated);
       notesRefresh = refresh;
       show(w);
     } catch (e) { document.getElementById('view').innerHTML = fmtErr(e); }
