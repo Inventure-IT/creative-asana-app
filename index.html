@@ -299,6 +299,39 @@
   .content h1 { font-size:20px; margin:0; }
   .content .sub { margin:3px 0 16px; }   /* tighter than the standalone .sub default */
   .section-h { font-size:16px; margin:30px 0 12px; padding-top:6px; border-top:1px solid var(--border); }
+  /* Daily Log: a row per week, five columns (Mon–Fri); one card per day — date and total, a
+     project-split bar, then one row per task. Weekend time adds cards after the five. */
+  .dl-week { margin-bottom:18px; }
+  .dl-week-h { display:flex; align-items:baseline; gap:8px; font-size:12px; font-weight:600; text-transform:uppercase;
+               letter-spacing:.05em; color:var(--muted); margin:0 2px 8px; }
+  .dl-week-h span { color:var(--green); font-variant-numeric:tabular-nums; }
+  .dl-grid { display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); gap:10px; align-items:stretch; }   /* a week's cards share one height */
+  @media (max-width:1100px) { .dl-grid { grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); } }
+  .dl-day { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:11px 12px 6px; min-width:0; }
+  .dl-day.off { border-style:dashed; }
+  .dl-day.empty { background:transparent; padding-bottom:11px; }
+  .dl-day.blank { border-color:var(--sep); opacity:.5; }
+  .dl-none { font-size:12px; color:var(--faint); margin-top:8px; }
+  .dl-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+  .dl-date { display:flex; align-items:baseline; gap:6px; min-width:0; }
+  .dl-date b { font-size:14px; font-weight:700; color:var(--text); }
+  .dl-date span { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .dl-tot { font-size:16px; font-weight:700; color:var(--green); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .dl-split { display:flex; height:5px; border-radius:3px; overflow:hidden; background:var(--blk-off); margin:8px 0 4px; gap:2px; }
+  .dl-split i { display:block; height:100%; min-width:3px; }
+  .dl-row { display:flex; align-items:flex-start; gap:8px; padding:7px 0; border-top:1px solid var(--sep); }
+  .dl-row:first-child { border-top:0; }
+  .dl-dot { flex:0 0 7px; width:7px; height:7px; border-radius:50%; margin-top:5px; }
+  .dl-task { flex:1 1 auto; min-width:0; }
+  .dl-name { font-size:13px; line-height:1.3; overflow-wrap:anywhere; }
+  .dl-name a { color:var(--text); text-decoration:none; }
+  .dl-name a:hover { color:var(--blue); text-decoration:underline; }
+  .dl-proj { font-size:11px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .dl-h { flex:0 0 auto; font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--text); }
+  .section-h.with-ctl { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:12px; }
+  .sec-select { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:7px;
+                padding:6px 9px; font-size:13px; font-weight:400; cursor:pointer; font-family:inherit; }
+  .sec-select:hover { border-color:var(--border-h); }
   .section-aside { font-size:13px; font-weight:400; color:var(--muted); margin-left:4px; }
   /* Sign-in screen + floating sign-out (both builds). */
   .login { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
@@ -2363,7 +2396,6 @@ const TABS = {
   teamactual: { icon:'users', label:'Logged Time', title:'Logged Time', rangeTitle:true },
   capacity: { icon:'gauge', label:'MSA Project Capacity', title:'MSA Project Capacity · Logged' },
   actualproj: { icon:'chart-column', label:'Bar Chart', title:'Projects · Logged' },
-  actualitems: { icon:'list-checks', label:'Task List', title:'Task List · Logged' },
   actualdaily: { icon:'calendar-days', label:'Daily Log', title:'Daily Log · Logged' },
   audit: { icon:'triangle-alert', label:'Illegal Time', title:'Illegal Time · Logged' },
   settings: { icon:'settings', label:'Settings', title:'Settings' },
@@ -2372,7 +2404,7 @@ const TABS = {
 // section's accent — 'est' = blue, 'act' = green, omitted for neutral (Settings).
 const NAV_SECTIONS = [
   { title: 'Estimated Hours', tone: 'est', tabs: ['team', 'estproj', 'gantt'] },
-  { title: 'Actual Hours', tone: 'act', tabs: ['teamactual', 'capacity', 'actualproj', 'actualitems', 'actualdaily', 'audit'] },
+  { title: 'Actual Hours', tone: 'act', tabs: ['teamactual', 'capacity', 'actualproj', 'actualdaily', 'audit'] },
   { title: '', tabs: ['settings'] },   // untitled: one item, under a divider
 ];
 
@@ -3747,7 +3779,6 @@ async function renderDashboard() {
         || a.task.localeCompare(b.task));
     // Re-render the whole tab so the chart (which needs the per-project split) draws too.
     if (dashTab === 'actualproj') renderActualProj();
-    else if (dashTab === 'actualitems') renderActualItems();
     else if (dashTab === 'actualdaily') renderActualDaily();
     else if (dashTab === 'teamactual') renderTeamActual();
     else if (dashTab === 'audit') renderAudit();
@@ -3755,67 +3786,41 @@ async function renderDashboard() {
     saveSnapshot();
   }
 
-  // Actual Hours › Items: every task worked on in the selected range, with its logged
-  // hours and a grand total. Reuses the per-item rollup
-  // that loadPersonStats builds from each project's time entries.
-  function renderActualItems() {
-    if (!loggedData) { view.innerHTML = rangePicker() + note(LOADING); wireRangeSel(); return; }
-    if (!loggedData.some(w => w.hours > 0)) {
-      view.innerHTML = rangePicker() + note(`No hours logged in ${rangeLabel(dateStart, dateEnd)}.`);
-      wireRangeSel(); return;
-    }
-    const key = dateStart + ':' + dateEnd, allItems = itemStatsCache[key];
-    if (!allItems) {
-      view.innerHTML = rangePicker() + note(LOADING);
-      wireRangeSel();
-      loadPersonStats(key);
-      return;
-    }
-    // Assignee filter: dropdown of everyone who logged time in this range. If the remembered
-    // selection isn't present in this range, fall back to showing everyone.
+  // Logged Time's "Task list" section, under the donuts: every task worked on in the range,
+  // grouped by project (heaviest first), with who logged it. Its Assignee filter sits in the
+  // section heading and redraws only this section (the charts above stay). Reuses the per-item
+  // rollup loadPersonStats builds (itemStatsCache).
+  function teamItemList(key) {
+    const allItems = itemStatsCache[key];
+    if (!allItems) return;
+    view.insertAdjacentHTML('beforeend', '<div id="item-list"></div>');
+    const box = document.getElementById('item-list');
     const people = [...new Set(allItems.map(it => it.person))].sort((a, b) => a.localeCompare(b));
-    if (itemFilterPerson && !people.includes(itemFilterPerson)) itemFilterPerson = null;
-    const items = itemFilterPerson ? allItems.filter(it => it.person === itemFilterPerson) : allItems;
-    // Range + assignee live in the one toolbar this tab shows.
-    const picker = rangePicker(`<span class="tb-group"><span class="tb-label">Assignee</span>
-      <select id="item-assignee">
-        <option value="">All assignees</option>
-        ${people.map(p => `<option value="${esc(p)}"${p === itemFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
-      </select></span>`);
-    const tot = items.reduce((a, it) => a + it.hours, 0);
-    const totEntries = items.reduce((a, it) => a + it.entries, 0);
-    const nproj = new Set(items.map(it => it.project)).size;
-    const hoursCells = (h) => `<td class="hours">${h2(h)} h</td>`;
-    // Headline summary: total hours logged across every project for the selected range.
-    const summary = summaryBar([
-      { n: h2(tot) + ' h', l: 'Hours logged' },
-      { n: nproj, l: 'Projects' },
-      { n: items.length, l: 'Tasks' },
-      { n: totEntries, l: 'Time entries' },
-    ]);
-    // One titled section per project: a heading, a table of that project's logged tasks
-    // (with who logged them), and a project total row. `items` is already sorted by project,
-    // so the keys keep project order.
-    const byProject = {};
-    items.forEach(it => (byProject[it.project] = byProject[it.project] || []).push(it));
-    const sections = Object.keys(byProject).map((proj, i) => {
-      const list = byProject[proj];
-      const pTot = list.reduce((a, it) => a + it.hours, 0);
-      const body = list.map(it =>
-        `<tr><td>${taskLink(it.tgid, it.task)}</td><td>${esc(it.person)}</td>${hoursCells(it.hours)}</tr>`).join('');
-      // Heading carries the project total, matching how the Daily Log heads its sections.
-      // The heading carries the project total, so the table needs no total row.
-      return `<h2 class="section-h${i ? '' : ' flush'}">${esc(proj)} · ${h2(pTot)} h</h2>
-        <table class="tasks">
-          <thead><tr><th>Task</th><th>Logged by</th><th class="hours">Hours</th></tr></thead>
-          <tbody>${body}</tbody>
-        </table>`;
-    }).join('');
-    const noneMsg = items.length ? '' : note(`No hours logged by ${itemFilterPerson} in ${rangeLabel(dateStart, dateEnd)}.`);
-    view.innerHTML = summary + picker + (noneMsg || sections);
-    wireRangeSel();
-    const sel = document.getElementById('item-assignee');
-    if (sel) sel.onchange = () => { itemFilterPerson = sel.value || null; renderActualItems(); };
+    const draw = () => {
+      if (itemFilterPerson && !people.includes(itemFilterPerson)) itemFilterPerson = null;
+      const items = itemFilterPerson ? allItems.filter(it => it.person === itemFilterPerson) : allItems;
+      const tot = items.reduce((a, it) => a + it.hours, 0);
+      const byProject = {};
+      items.forEach(it => (byProject[it.project] = byProject[it.project] || []).push(it));
+      const sections = Object.keys(byProject).map(proj => {
+        const list = byProject[proj];
+        const pTot = list.reduce((a, it) => a + it.hours, 0);
+        return `<h3 class="person-h">${esc(proj)} <span class="muted">· ${h2(pTot)} h</span></h3>
+          <table class="tasks">
+            <thead><tr><th>Task</th><th>Logged by</th><th class="hours">Hours</th></tr></thead>
+            <tbody>${list.map(it => `<tr><td>${taskLink(it.tgid, it.task)}</td><td>${esc(it.person)}</td>` +
+              `<td class="hours">${h2(it.hours)} h</td></tr>`).join('')}</tbody>
+          </table>`;
+      }).join('');
+      box.innerHTML = `<h2 class="section-h with-ctl"><span>Task list <span class="section-aside">${h2(tot)} h · ${plural(items.length, 'task')}</span></span>
+          <select id="item-assignee" class="sec-select" aria-label="Assignee">
+            <option value="">All assignees</option>
+            ${people.map(p => `<option value="${esc(p)}"${p === itemFilterPerson ? ' selected' : ''}>${esc(p)}</option>`).join('')}
+          </select></h2>` +
+        (items.length ? sections : note(`No hours logged by ${itemFilterPerson} in ${rangeLabel(dateStart, dateEnd)}.`));
+      box.querySelector('#item-assignee').onchange = e => { itemFilterPerson = e.target.value || null; draw(); };
+    };
+    draw();
   }
 
   // Time Audit: fetch every active project's estimated detail (served from the server's cache,
@@ -3986,15 +3991,7 @@ async function renderDashboard() {
         <option value="old"${dailyNewestFirst ? '' : ' selected'}>Oldest day first</option>
         <option value="new"${dailyNewestFirst ? ' selected' : ''}>Newest day first</option>
       </select></span>`);
-    const tot = rows.reduce((a, r) => a + r.hours, 0);
-    const totEntries = rows.reduce((a, r) => a + r.entries, 0);
-    const days = new Set(rows.map(r => r.person + '|' + r.date));
-    const hoursCells = (h) => `<td class="hours">${h2(h)} h</td>`;
-    const summary = summaryBar([
-      { n: h2(tot) + ' h', l: 'Hours logged' },
-      { n: days.size, l: 'Person-days' },
-      { n: totEntries, l: 'Time entries' },
-    ]);
+    // No headline stat strip here (by request): each person's heading carries their totals.
     // Group person → day. `rows` is already sorted person A→Z then date ascending, so the
     // key order holds; only the day order flips when "newest first" is selected.
     const byPerson = {};
@@ -4002,31 +3999,71 @@ async function renderDashboard() {
       const p = byPerson[r.person] = byPerson[r.person] || {};
       (p[r.date] = p[r.date] || []).push(r);
     });
-    // One table per person — not one per day. The date cell spans that day's rows and
-    // carries the day's total underneath it, so nothing is stated twice and the column
-    // headers appear once instead of once per day.
+    // Per person: a heading (total, days worked, average per day), then one row per week laid out
+    // as five columns, Monday to Friday. A day card heads with the weekday and date, the day's
+    // total, and a thin bar split by project (each in its projectColor), over one row per task —
+    // a project-colored dot, the task, its project underneath, and the hours. A weekday with no
+    // time says so (or "Holiday"); days outside the range or still ahead stay blank. Time logged
+    // on a weekend gets its own card after that week's five. Newest/oldest flips the week order.
+    const isoOf = dt => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+    const addDays = (iso, n) => { const dt = new Date(iso + 'T00:00:00'); dt.setDate(dt.getDate() + n); return isoOf(dt); };
+    const mondayOf = iso => { const dt = new Date(iso + 'T00:00:00'); return addDays(iso, -((dt.getDay() + 6) % 7)); };
+    const todayIso = isoToday();
+    const dayCard = (d, list) => {
+      const dt = new Date(d + 'T00:00:00');
+      const wk = dt.toLocaleDateString('en-US', { weekday: 'short' });
+      const md = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const off = dt.getDay() === 0 || dt.getDay() === 6;
+      if (!list) {
+        const inRange = d >= dateStart && d <= dateEnd && d <= todayIso;
+        const msg = !inRange ? '' : HOLIDAYS.has(d) ? 'Holiday' : 'No time logged';
+        return `<div class="dl-day empty${inRange ? '' : ' blank'}">
+            <div class="dl-head"><div class="dl-date"><b>${esc(wk)}</b><span>${esc(md)}</span></div></div>
+            ${msg ? `<div class="dl-none">${msg}</div>` : ''}</div>`;
+      }
+      list = list.slice().sort((x, y) => y.hours - x.hours || x.task.localeCompare(y.task));
+      const dTot = list.reduce((acc, r) => acc + r.hours, 0);
+      const byProj = {};
+      list.forEach(r => { byProj[r.project] = (byProj[r.project] || 0) + r.hours; });
+      const split = Object.entries(byProj).sort((x, y) => y[1] - x[1]).map(([proj, h]) =>
+        `<i style="width:${dTot ? (h / dTot * 100).toFixed(2) : 0}%;background:${projectColor(proj)}" title="${esc(proj)} · ${h2(h)} h"></i>`).join('');
+      return `<div class="dl-day${off || HOLIDAYS.has(d) ? ' off' : ''}">
+          <div class="dl-head">
+            <div class="dl-date"><b>${esc(wk)}</b><span>${esc(md)}</span></div>
+            <div class="dl-tot">${h2(dTot)} h</div>
+          </div>
+          <div class="dl-split">${split}</div>
+          <div class="dl-rows">${list.map(r => `
+            <div class="dl-row">
+              <i class="dl-dot" style="background:${projectColor(r.project)}"></i>
+              <div class="dl-task"><div class="dl-name">${taskLink(r.tgid, r.task)}</div><div class="dl-proj">${esc(r.project)}</div></div>
+              <div class="dl-h">${h2(r.hours)}</div>
+            </div>`).join('')}
+          </div>
+        </div>`;
+    };
     const sections = Object.keys(byPerson).map((person, pi) => {
       const dayMap = byPerson[person];
-      const dayKeys = Object.keys(dayMap);
-      if (dailyNewestFirst) dayKeys.reverse();
-      const pTot = dayKeys.reduce((a, d) => a + dayMap[d].reduce((x, r) => x + r.hours, 0), 0);
-      const body = dayKeys.map(d => {
-        const list = dayMap[d];
-        const dTot = list.reduce((a, r) => a + r.hours, 0);
-        const dayCell = `<td class="day" rowspan="${list.length}">${d ? esc(fmtDate(d)) : 'No date'}` +
-          `<span class="day-tot">${h2(dTot)} h</span></td>`;
-        return list.map((r, i) =>
-          `<tr class="${i ? '' : 'day-start'}">${i ? '' : dayCell}` +
-          `<td>${taskLink(r.tgid, r.task)}</td><td>${esc(r.project)}</td>${hoursCells(r.hours)}</tr>`).join('');
+      const dayKeys = Object.keys(dayMap).filter(Boolean);
+      const pTot = Object.values(dayMap).reduce((acc, list) => acc + list.reduce((x, r) => x + r.hours, 0), 0);
+      const weeks = [...new Set(dayKeys.map(mondayOf))].sort();
+      if (dailyNewestFirst) weeks.reverse();
+      const weekRows = weeks.map(mon => {
+        const days = [0, 1, 2, 3, 4].map(i => addDays(mon, i));
+        const weekend = [5, 6].map(i => addDays(mon, i)).filter(d => dayMap[d]);
+        const wTot = [...days, ...weekend].reduce((acc, d) => acc + (dayMap[d] || []).reduce((x, r) => x + r.hours, 0), 0);
+        return `<div class="dl-week">
+            <div class="dl-week-h">Week of ${esc(new Date(mon + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))}
+              <span>${h2(wTot)} h</span></div>
+            <div class="dl-grid">${days.map(d => dayCard(d, dayMap[d])).join('')}${weekend.map(d => dayCard(d, dayMap[d])).join('')}</div>
+          </div>`;
       }).join('');
-      return `<h2 class="section-h${pi ? '' : ' flush'}">${esc(person)} · ${h2(pTot)} h</h2>
-        <table class="tasks daylog">
-          <thead><tr><th>Day</th><th>Task</th><th>Project</th><th class="hours">Hours</th></tr></thead>
-          <tbody>${body}</tbody>
-        </table>`;
+      const nDays = dayKeys.length;
+      return `<h2 class="section-h${pi ? '' : ' flush'}">${esc(person)} <span class="section-aside">${h2(pTot)} h · ${plural(nDays, 'day')} · ${h2(nDays ? pTot / nDays : 0)} h/day</span></h2>
+        ${weekRows}`;
     }).join('');
     const noneMsg = rows.length ? '' : note(`No hours logged by ${dailyFilterPerson} in ${rangeLabel(dateStart, dateEnd)}.`);
-    view.innerHTML = summary + picker + (noneMsg || sections);
+    view.innerHTML = picker + (noneMsg || sections);
     wireRangeSel();
     const sel = document.getElementById('daily-assignee');
     if (sel) sel.onchange = () => { dailyFilterPerson = sel.value || null; dailyFilterInit = true; renderActualDaily(); };
@@ -4676,6 +4713,7 @@ async function renderDashboard() {
       return { name: r.name, slices, total: slices.reduce((a, s) => a + s.hours, 0) };
     }), { title: 'Donut charts',
           onPick: r => showLoggedBreakdown(r.name) });
+    teamItemList(key);
   }
 
   // Per-project logged-hours breakdown for one person, opened from the Actual Hours Team
@@ -4841,8 +4879,6 @@ async function renderDashboard() {
       renderEstProj();
     } else if (dashTab === 'actualproj') {
       renderActualProj();
-    } else if (dashTab === 'actualitems') {
-      renderActualItems();
     } else if (dashTab === 'actualdaily') {
       renderActualDaily();
     } else if (dashTab === 'audit') {
@@ -5428,7 +5464,7 @@ async function renderDashboard() {
     if (loggedData.some(w => w.hours > 0)) loadPersonStats(s + ':' + e);
     updateAuditBadge();
     await mePromise;   // so Daily Log knows who "you" are before it picks its default assignee
-    if (['capacity', 'actualproj', 'actualitems', 'actualdaily', 'teamactual', 'audit'].includes(dashTab)) renderTab();
+    if (['capacity', 'actualproj', 'actualdaily', 'teamactual', 'audit'].includes(dashTab)) renderTab();
   }
 
   // Who owns the token, resolved once at startup and awaited before any render that could

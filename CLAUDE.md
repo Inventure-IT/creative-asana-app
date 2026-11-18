@@ -132,7 +132,7 @@ In order, top to bottom — do not reorder, and do not skip a step:
    axis labels and chart lines speak. Titles are qualified (`Team Capacity · Estimated` vs `· Logged`)
    because several tabs share a short sidebar label.
 2. A `summaryBar([...])` of headline stats — the numbers a PM should get without scrolling.
-   (Exception: Team Capacity · Estimated has no summary bar, by request.)
+   (Exceptions, by request: Team Capacity · Estimated and Daily Log have no summary bar.)
 3. **One** `.toolbar`. Never stack two. Tabs call `rangePicker(extra)` with their own controls
    (it returns nothing when there are none); each control group starts with a `<span class="tb-label">`.
    The **date range itself lives in the sidebar** (`rangePanel()`, under the nav on every page),
