@@ -699,7 +699,8 @@ async function carveOutSummary(c, start, end){
   const gid = c.source;
   // A fixed lifetime budget needs every hour ever logged: whole history (mirrors carve_out_summary).
   const budget = c.budget ?? null;
-  const tree = await fetchTree(gid, false, budget != null ? BUDGET_HISTORY : treeSince(start));
+  // An engagement total (display only) also needs the whole history, for its progress bar.
+  const tree = await fetchTree(gid, false, budget != null || c.total ? BUDGET_HISTORY : treeSince(start));
   const hits = carveOutHits(c, tree), touched = touchedCutoff(start);
   const done = x => !!x.completed || isExcluded(x, gid);
   const subsOf = t => tree.subs[t.gid] || [];
@@ -775,7 +776,9 @@ async function carveOutSummary(c, start, end){
     section: sectionName(t, gid), done: done(t),
     estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
-  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null, capacity_mode: c.capacity || null,
+  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null, capacity_mode: c.capacity || null, total: c.total || null,
+    // Mirrors "lifetime": every hour ever tracked to the matching tasks and subtasks.
+    lifetime: c.total ? round2(hits.reduce((a, t) => a + [t, ...subsOf(t)].reduce((x, i) => x + (i.actual_time_minutes || 0), 0), 0) / 60) : null,
     cap: round2(Math.max((budget != null ? budget : est) - priorMin / 60, 0)), estimated: round2(est), budget, prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes

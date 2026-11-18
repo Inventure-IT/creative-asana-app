@@ -75,7 +75,9 @@ duplicate a project list or a team roster anywhere else.
   = `budget` − every hour logged before the range, so it counts down month to month; it reads the
   board's whole history (`BUDGET_HISTORY`). A carve-out with `"capacity": "due"` (Savannah Camellia Fest 2027,
   kind `Estimate`) instead gets its capacity on MSA Project Capacity from the estimated hours of its
-  open tasks due in the range (`dueCarve`, using `dueTaskRows` on `auditDetails`).
+  open tasks due in the range (`dueCarve`, using `dueTaskRows` on `auditDetails`). Its `"total": 120` is display
+  only: the card shows a separate "Total budget" bar of every hour ever tracked (`lifetime`,
+  Asana's running totals; reading it fetches the board's whole history) against it.
 - `UNBILLABLE_GIDS` marks projects whose logged time is unbillable; a carve-out's tasks on
   such a board stay billable. Each logged entry carries `billable`, and Team Capacity · Logged
   stacks billable (solid) under unbillable (faded) per person.

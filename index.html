@@ -55,6 +55,17 @@
   .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; display:flex; gap:12px;
                  justify-content:space-between; font-variant-numeric:tabular-nums; }
   .cap-bar .lab-r { color:var(--faint); white-space:nowrap; }
+  /* A card's whole-engagement progress (carve-out "total"), set apart from the monthly bar. */
+  .eng { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); font-variant-numeric:tabular-nums; }
+  .eng-head { display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:6px; }
+  .eng-l { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .eng-v { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .eng-v b { font-size:14px; color:var(--text); font-weight:700; }
+  .eng-bar { height:8px; border-radius:4px; background:var(--blk-off); overflow:hidden; }
+  .eng-bar i { display:block; height:100%; background:var(--green); border-radius:4px; }
+  .eng.over .eng-bar i { background:var(--red); }
+  .eng.over .eng-v b { color:var(--red); }
+  .eng-foot { font-size:11px; color:var(--faint); margin-top:5px; }
   /* Capacity card with a projection: each block fills continuously — green = logged, striped
      blue = estimated work due in the range still to burn (red stripes once that runs past the
      capacity). The headline reads the projected total. */
@@ -586,7 +597,7 @@ const EST_PROJECTS = [{"gid": "1214228966572515", "name": "Georgia Grown Market 
 // this, so the local app's boot script injects it too.
 const ARCHIVED_GIDS = ["1214228966572503", "1214228966572508", "1214228966572568", "1214228966572573", "1214228966572578", "1214755322546416", "1216640931651593"];
 const GROUPS = [{"name": "CMD", "cap": 244, "gids": ["1214228966572536", "1214228966572531", "1214228966572526", "1216154609521581", "1220217758251082", "1220217758251087"]}, {"name": "Support Tickets", "cap": 40, "kind": "Support", "gids": ["1214229029715234"], "carves": ["Support Tickets"]}];
-const CARVE_OUTS = [{"name": "Savannah Camellia Fest 2027", "source": "1214228966572551", "match": "", "kind": "Estimate", "capacity": "due"}, {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday", "billable": false, "kind": "Hourly"}, {"name": "Support Tickets", "source": "1214228966572563", "match": "Support Tickets", "kind": "Support"}, {"name": "The Recreational Group: Thatch", "source": "1219066223453162", "match": "", "kind": "Hourly"}, {"name": "Slimothy the Slug", "source": "1219254406444525", "match": "", "kind": "Hourly"}, {"name": "Transformed Testimony", "source": "1219099033687412", "match": "", "kind": "Hourly"}];
+const CARVE_OUTS = [{"name": "Savannah Camellia Fest 2027", "source": "1214228966572551", "match": "", "kind": "Estimate", "capacity": "due", "total": 120}, {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday", "billable": false, "kind": "Hourly"}, {"name": "Support Tickets", "source": "1214228966572563", "match": "Support Tickets", "kind": "Support"}, {"name": "The Recreational Group: Thatch", "source": "1219066223453162", "match": "", "kind": "Hourly"}, {"name": "Slimothy the Slug", "source": "1219254406444525", "match": "", "kind": "Hourly"}, {"name": "Transformed Testimony", "source": "1219099033687412", "match": "", "kind": "Hourly"}];
 const UNBILLABLE_GIDS = new Set(["1214228966572563"]);
 const DEF_START = "2026-06-01", DEF_END = "2026-06-30";
 // Mirrors HISTORY_SLACK_DAYS: a load reads open tasks plus those completed / modified within this
@@ -1235,7 +1246,8 @@ async function carveOutSummary(c, start, end){
   const gid = c.source;
   // A fixed lifetime budget needs every hour ever logged: whole history (mirrors carve_out_summary).
   const budget = c.budget ?? null;
-  const tree = await fetchTree(gid, false, budget != null ? BUDGET_HISTORY : treeSince(start));
+  // An engagement total (display only) also needs the whole history, for its progress bar.
+  const tree = await fetchTree(gid, false, budget != null || c.total ? BUDGET_HISTORY : treeSince(start));
   const hits = carveOutHits(c, tree), touched = touchedCutoff(start);
   const done = x => !!x.completed || isExcluded(x, gid);
   const subsOf = t => tree.subs[t.gid] || [];
@@ -1311,7 +1323,9 @@ async function carveOutSummary(c, start, end){
     section: sectionName(t, gid), done: done(t),
     estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
-  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null, capacity_mode: c.capacity || null,
+  return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null, capacity_mode: c.capacity || null, total: c.total || null,
+    // Mirrors "lifetime": every hour ever tracked to the matching tasks and subtasks.
+    lifetime: c.total ? round2(hits.reduce((a, t) => a + [t, ...subsOf(t)].reduce((x, i) => x + (i.actual_time_minutes || 0), 0), 0) / 60) : null,
     cap: round2(Math.max((budget != null ? budget : est) - priorMin / 60, 0)), estimated: round2(est), budget, prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes
@@ -2173,6 +2187,18 @@ function fmtUpdated(u) {
                                                                : { month: 'short', day: 'numeric', year: 'numeric' });
   return `Updated ${day} at ${time}`;
 }
+// A page title's date-range suffix: " (November)" when the range is one whole calendar month
+// (with the year when it isn't this year), else " (Nov 3, 2026 – Nov 20, 2026)". Tabs opt in
+// with TABS[key].rangeTitle; Team Capacity · Estimated adds it through teamTitle().
+function rangeTitle(start, end) {
+  const [y, m] = start.split('-').map(Number);
+  const last = new Date(y, m, 0).getDate();
+  if (start.slice(8) === '01' && end === `${start.slice(0, 8)}${String(last).padStart(2, '0')}`) {
+    const month = new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long' });
+    return ` (${month}${y === new Date().getFullYear() ? '' : ' ' + y})`;
+  }
+  return ` (${rangeLabel(start, end)})`;
+}
 function setCrumbs(items) {
   // items: [{label, fn?}] — entries with fn render as links; the last/plain one is the current page.
   const el = document.getElementById('crumbs');
@@ -2334,7 +2360,7 @@ const TABS = {
   team: { icon:'users', label:'Team Capacity', title:'Creative Team · Estimated Hours' },   // no sub line, by request
   estproj: { icon:'chart-column', label:'Bar Chart', title:'Projects · Estimated' },
   gantt: { icon:'chart-gantt', label:'Gantt (WIP)', title:'Gantt (WIP) · Estimated' },
-  teamactual: { icon:'users', label:'Team Capacity', title:'Team Capacity · Logged' },
+  teamactual: { icon:'users', label:'Logged Time', title:'Logged Time', rangeTitle:true },
   capacity: { icon:'gauge', label:'MSA Project Capacity', title:'MSA Project Capacity · Logged' },
   actualproj: { icon:'chart-column', label:'Bar Chart', title:'Projects · Logged' },
   actualitems: { icon:'list-checks', label:'Task List', title:'Task List · Logged' },
@@ -2448,6 +2474,18 @@ function carveCard(w) {
   const c = capCard(Object.assign({}, w, { kind: null, gid: null }));
   if (w.match) c.querySelector('h3').insertAdjacentHTML('beforeend',
     ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
+  // A whole-engagement total (config "total", e.g. 120 h): its own progress block under the
+  // monthly bar — every hour logged to date against the total. Not part of the capacity.
+  if (w.total) {
+    const done = Number(w.lifetime || 0), tot = Number(w.total), pct = tot > 0 ? done / tot * 100 : 0;
+    const over = done > tot;
+    c.insertAdjacentHTML('beforeend', `<div class="eng${over ? ' over' : ''}" title="All hours logged to date against the total budget — separate from the monthly capacity above">
+        <div class="eng-head"><span class="eng-l">Total budget</span>
+          <span class="eng-v"><b>${h2(done)}</b> / ${h2(tot)} h · ${pct.toFixed(0)}%</span></div>
+        <div class="eng-bar"><i style="width:${Math.min(100, pct).toFixed(1)}%"></i></div>
+        <div class="eng-foot">${over ? `${h2(done - tot)} h over the total budget` : `${h2(tot - done)} h left of the total budget`}</div>
+      </div>`);
+  }
   c.querySelector('.stat .l').textContent = 'Capacity';
   // Capacity is the estimate less time already logged before the range. Show that sum in the
   // bar's footer (right-aligned), so every card keeps the same shape.
@@ -4358,13 +4396,7 @@ async function renderDashboard() {
     const base = TABS.team.title;
     if (teamDueMode === 'none') return base + ' (no due date)';
     if (teamDueMode !== 'range') return base;
-    const [y, m] = dateStart.split('-').map(Number);
-    const last = new Date(y, m, 0).getDate();
-    if (dateStart.slice(8) === '01' && dateEnd === `${dateStart.slice(0, 8)}${String(last).padStart(2, '0')}`) {
-      const month = new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long' });
-      return `${base} (${month}${y === new Date().getFullYear() ? '' : ' ' + y})`;
-    }
-    return `${base} (${rangeLabel(dateStart, dateEnd)})`;
+    return base + rangeTitle(dateStart, dateEnd);
   }
 
   function renderTeam() {
@@ -4598,7 +4630,14 @@ async function renderDashboard() {
         onClick: (evt, els) => { if (els.length) showLoggedBreakdown(rows[els[0].index].name); },
         onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
         scales: { x: { stacked: true, title: { display: true, text: 'Logged by' },
-                       ticks: { callback: (v, i) => [labels[i], h2(totals[i]) + ' h'] } },
+                       // The figure under each name sums only the visible segments, so hiding
+                       // Billable or Unbillable in the legend updates it (until the next render).
+                       ticks: { callback: function (v, i) {
+                         const ch = this.chart;
+                         const shown = ch.data.datasets.reduce((a, ds, k) =>
+                           a + (ch.isDatasetVisible(k) ? (ds.data[i] || 0) : 0), 0);
+                         return [labels[i], h2(shown) + ' h'];
+                       } } },
                   y: { stacked: true, beginAtZero: true, suggestedMax: Math.max(cap * 1.1, ...totals, 1),
                        title: { display: true, text: 'Hours logged' }, ticks: { callback: v => h2(v) } } },
         // The pace line only means something mid-range: before it opens there is nothing to
@@ -4786,7 +4825,8 @@ async function renderDashboard() {
     setUpdatedLabel();
     // Titles stay clean: the From/To filter under range-based tabs is the single
     // place that shows the selected date range.
-    document.getElementById('tab-title').textContent = TABS[dashTab].title;
+    document.getElementById('tab-title').textContent =
+      TABS[dashTab].title + (TABS[dashTab].rangeTitle ? rangeTitle(dateStart, dateEnd) : '');
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     // A tab with no sub line keeps the (empty) element, so its bottom margin still spaces the
     // header from the toolbar.

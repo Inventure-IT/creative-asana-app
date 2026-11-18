@@ -98,8 +98,10 @@ CARVE_OUTS = [
     # "capacity": "due" — MSA Project Capacity sets this card's capacity to the estimated hours of
     # its open tasks due in the selected date range (the page's due-date rule), and lists it under
     # the "Estimate" section.
+    # "total" is information only: the whole engagement's hours, shown as a tag on the card so
+    # nobody reads the monthly capacity as the full budget.
     {"name": "Savannah Camellia Fest 2027", "source": "1214228966572551", "match": "",
-     "kind": "Estimate", "capacity": "due"},
+     "kind": "Estimate", "capacity": "due", "total": 120},
 
     {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday",   # Internal IIT Backlog
      "billable": False, "kind": "Hourly"},
@@ -1350,8 +1352,9 @@ def carve_out_summary(c, start, end, refresh=False):
     """
     gid = c["source"]
     budget = c.get("budget")   # a fixed lifetime budget needs every hour ever logged: whole history
+    total = c.get("total")     # so does an engagement total (display only: its progress bar)
     tree = fetch_tree(gid, refresh=refresh,
-                      since=BUDGET_HISTORY if budget is not None else tree_since(start))
+                      since=BUDGET_HISTORY if budget is not None or total else tree_since(start))
     hits = carve_out_hits(c, tree)
     touched = touched_cutoff(start)
     done = lambda x: bool(x.get("completed")) or is_excluded(x, gid)
@@ -1456,6 +1459,11 @@ def carve_out_summary(c, start, end, refresh=False):
         "match": c["match"],
         "kind": c.get("kind"),
         "capacity_mode": c.get("capacity"),   # "due" = the page uses the estimates due in range
+        "total": total,                        # whole-engagement hours, display only
+        # Every hour ever tracked to the matching tasks and subtasks (Asana's running totals,
+        # finished work included) — the engagement's progress toward `total`.
+        "lifetime": round(sum((i.get("actual_time_minutes") or 0)
+                              for t in hits for i in [t] + subs_of(t)) / 60, 2) if total else None,
         "cap": round(max((est if budget is None else budget) - prior_min / 60, 0), 2),   # never below zero
         "estimated": round(est, 2),
         "budget": budget,   # fixed lifetime hours, or None (capacity comes from the estimates)
@@ -1568,6 +1576,17 @@ PAGE = r"""<!DOCTYPE html>
   .cap-bar .lab { font-size:11px; color:var(--muted); margin-top:5px; display:flex; gap:12px;
                  justify-content:space-between; font-variant-numeric:tabular-nums; }
   .cap-bar .lab-r { color:var(--faint); white-space:nowrap; }
+  /* A card's whole-engagement progress (carve-out "total"), set apart from the monthly bar. */
+  .eng { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); font-variant-numeric:tabular-nums; }
+  .eng-head { display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:6px; }
+  .eng-l { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .eng-v { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .eng-v b { font-size:14px; color:var(--text); font-weight:700; }
+  .eng-bar { height:8px; border-radius:4px; background:var(--blk-off); overflow:hidden; }
+  .eng-bar i { display:block; height:100%; background:var(--green); border-radius:4px; }
+  .eng.over .eng-bar i { background:var(--red); }
+  .eng.over .eng-v b { color:var(--red); }
+  .eng-foot { font-size:11px; color:var(--faint); margin-top:5px; }
   /* Capacity card with a projection: each block fills continuously — green = logged, striped
      blue = estimated work due in the range still to burn (red stripes once that runs past the
      capacity). The headline reads the projected total. */
@@ -2862,6 +2881,18 @@ function fmtUpdated(u) {
                                                                : { month: 'short', day: 'numeric', year: 'numeric' });
   return `Updated ${day} at ${time}`;
 }
+// A page title's date-range suffix: " (November)" when the range is one whole calendar month
+// (with the year when it isn't this year), else " (Nov 3, 2026 – Nov 20, 2026)". Tabs opt in
+// with TABS[key].rangeTitle; Team Capacity · Estimated adds it through teamTitle().
+function rangeTitle(start, end) {
+  const [y, m] = start.split('-').map(Number);
+  const last = new Date(y, m, 0).getDate();
+  if (start.slice(8) === '01' && end === `${start.slice(0, 8)}${String(last).padStart(2, '0')}`) {
+    const month = new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long' });
+    return ` (${month}${y === new Date().getFullYear() ? '' : ' ' + y})`;
+  }
+  return ` (${rangeLabel(start, end)})`;
+}
 function setCrumbs(items) {
   // items: [{label, fn?}] — entries with fn render as links; the last/plain one is the current page.
   const el = document.getElementById('crumbs');
@@ -3023,7 +3054,7 @@ const TABS = {
   team: { icon:'users', label:'Team Capacity', title:'Creative Team · Estimated Hours' },   // no sub line, by request
   estproj: { icon:'chart-column', label:'Bar Chart', title:'Projects · Estimated' },
   gantt: { icon:'chart-gantt', label:'Gantt (WIP)', title:'Gantt (WIP) · Estimated' },
-  teamactual: { icon:'users', label:'Team Capacity', title:'Team Capacity · Logged' },
+  teamactual: { icon:'users', label:'Logged Time', title:'Logged Time', rangeTitle:true },
   capacity: { icon:'gauge', label:'MSA Project Capacity', title:'MSA Project Capacity · Logged' },
   actualproj: { icon:'chart-column', label:'Bar Chart', title:'Projects · Logged' },
   actualitems: { icon:'list-checks', label:'Task List', title:'Task List · Logged' },
@@ -3137,6 +3168,18 @@ function carveCard(w) {
   const c = capCard(Object.assign({}, w, { kind: null, gid: null }));
   if (w.match) c.querySelector('h3').insertAdjacentHTML('beforeend',
     ` <span class="grp-tag">from ${esc(w.source_name)}</span>`);
+  // A whole-engagement total (config "total", e.g. 120 h): its own progress block under the
+  // monthly bar — every hour logged to date against the total. Not part of the capacity.
+  if (w.total) {
+    const done = Number(w.lifetime || 0), tot = Number(w.total), pct = tot > 0 ? done / tot * 100 : 0;
+    const over = done > tot;
+    c.insertAdjacentHTML('beforeend', `<div class="eng${over ? ' over' : ''}" title="All hours logged to date against the total budget — separate from the monthly capacity above">
+        <div class="eng-head"><span class="eng-l">Total budget</span>
+          <span class="eng-v"><b>${h2(done)}</b> / ${h2(tot)} h · ${pct.toFixed(0)}%</span></div>
+        <div class="eng-bar"><i style="width:${Math.min(100, pct).toFixed(1)}%"></i></div>
+        <div class="eng-foot">${over ? `${h2(done - tot)} h over the total budget` : `${h2(tot - done)} h left of the total budget`}</div>
+      </div>`);
+  }
   c.querySelector('.stat .l').textContent = 'Capacity';
   // Capacity is the estimate less time already logged before the range. Show that sum in the
   // bar's footer (right-aligned), so every card keeps the same shape.
@@ -5047,13 +5090,7 @@ async function renderDashboard() {
     const base = TABS.team.title;
     if (teamDueMode === 'none') return base + ' (no due date)';
     if (teamDueMode !== 'range') return base;
-    const [y, m] = dateStart.split('-').map(Number);
-    const last = new Date(y, m, 0).getDate();
-    if (dateStart.slice(8) === '01' && dateEnd === `${dateStart.slice(0, 8)}${String(last).padStart(2, '0')}`) {
-      const month = new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long' });
-      return `${base} (${month}${y === new Date().getFullYear() ? '' : ' ' + y})`;
-    }
-    return `${base} (${rangeLabel(dateStart, dateEnd)})`;
+    return base + rangeTitle(dateStart, dateEnd);
   }
 
   function renderTeam() {
@@ -5287,7 +5324,14 @@ async function renderDashboard() {
         onClick: (evt, els) => { if (els.length) showLoggedBreakdown(rows[els[0].index].name); },
         onHover: (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
         scales: { x: { stacked: true, title: { display: true, text: 'Logged by' },
-                       ticks: { callback: (v, i) => [labels[i], h2(totals[i]) + ' h'] } },
+                       // The figure under each name sums only the visible segments, so hiding
+                       // Billable or Unbillable in the legend updates it (until the next render).
+                       ticks: { callback: function (v, i) {
+                         const ch = this.chart;
+                         const shown = ch.data.datasets.reduce((a, ds, k) =>
+                           a + (ch.isDatasetVisible(k) ? (ds.data[i] || 0) : 0), 0);
+                         return [labels[i], h2(shown) + ' h'];
+                       } } },
                   y: { stacked: true, beginAtZero: true, suggestedMax: Math.max(cap * 1.1, ...totals, 1),
                        title: { display: true, text: 'Hours logged' }, ticks: { callback: v => h2(v) } } },
         // The pace line only means something mid-range: before it opens there is nothing to
@@ -5475,7 +5519,8 @@ async function renderDashboard() {
     setUpdatedLabel();
     // Titles stay clean: the From/To filter under range-based tabs is the single
     // place that shows the selected date range.
-    document.getElementById('tab-title').textContent = TABS[dashTab].title;
+    document.getElementById('tab-title').textContent =
+      TABS[dashTab].title + (TABS[dashTab].rangeTitle ? rangeTitle(dateStart, dateEnd) : '');
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     // A tab with no sub line keeps the (empty) element, so its bottom margin still spaces the
     // header from the toolbar.
