@@ -1,0 +1,33 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isTeam() {
+      return request.auth != null
+        && request.auth.token.email_verified
+        && request.auth.token.email.matches('.*@(inventureit[.]com|complete[.]md)$');
+    }
+    match /capacity/{month} {
+      allow read, write: if isTeam();
+    }
+    // Shared card order on MSA Project Capacity.
+    match /layout/{doc} {
+      allow read, write: if isTeam();
+    }
+    // Capacity overrides from "Edit capacity".
+    match /settings/{doc} {
+      allow read, write: if isTeam();
+    }
+    // Each person's Asana token: only they can read or change it.
+    match /users/{uid} {
+      allow read, write: if isTeam() && request.auth.uid == uid;
+    }
+    // Who's on which page (presence avatars): one doc per open browser tab. Everyone on the
+    // team can see them; each person writes only their own; anyone may sweep a day-old one.
+    match /presence/{sid} {
+      allow read: if isTeam();
+      allow create, update: if isTeam() && request.resource.data.uid == request.auth.uid;
+      allow delete: if isTeam() && (resource.data.uid == request.auth.uid
+                       || resource.data.at < request.time - duration.value(1, 'd'));
+    }
+  }
+}

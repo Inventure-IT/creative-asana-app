@@ -1570,6 +1570,15 @@ PAGE = r"""<!DOCTYPE html>
   .stat .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .card .go { margin-top:14px; font-size:12px; color:var(--blue-d); }
   .head-right { display:flex; align-items:center; gap:12px; }
+  /* Presence: overlapping avatars of the other people on this page (presenceHtml). */
+  .presence { display:flex; align-items:center; }
+  .presence:empty { display:none; }
+  .pr-av { position:relative; width:28px; height:28px; margin-left:-8px; border-radius:50%; overflow:hidden;
+           display:grid; place-items:center; background:var(--panel2); color:var(--text);
+           font-size:11px; font-weight:700; box-shadow:0 0 0 2px var(--bg); cursor:default; }
+  .pr-av:first-child { margin-left:0; }
+  .pr-av img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .pr-more { color:var(--muted); font-weight:600; }
   /* Loading / empty / "nothing matches the filter" states. One component everywhere, so
      every tab announces itself the same way. .box centers it inside a chart frame. */
   .note { color:var(--muted); font-size:13px; margin:14px 0; }
@@ -3381,7 +3390,8 @@ function dropSnapshot(){ try { localStorage.removeItem(SNAP_KEY); } catch (e) {}
 function doLogout(){
   dropSnapshot();
   if (window.__dropToken) window.__dropToken();
-  if (plan.fb) plan.fb.A.signOut(plan.fb.auth);
+  // Remove this tab's presence doc while still signed in, then sign out.
+  if (plan.fb) presenceStop().finally(() => plan.fb.A.signOut(plan.fb.auth));
   destroyCharts();
   location.hash = '';
   renderLogin();
@@ -3535,6 +3545,7 @@ async function planInit(){
       plan.status = user ? 'in' : 'out';
       if (user) plan.error = null;
       planWatch(plan.month);
+      if (user) presenceStart(); else presenceStop();
       planChanged();
     });
   } catch (e) {
@@ -3639,6 +3650,107 @@ async function planSignIn(){
   }
 }
 function planSignOut(){ if (plan.fb) plan.fb.A.signOut(plan.fb.auth); }
+
+// ---- Presence: who else is on this page (Google Docs-style avatars in the page header) ----
+// One doc per open browser tab: presence/{session id} = { uid, name, email, photo, page, at }.
+// The session id lives in sessionStorage, so a reload reuses its doc. `at` is bumped every
+// PRESENCE_BEAT; a doc older than PRESENCE_STALE counts as gone (closing a tab can't always
+// delete it). Docs older than a day are swept by whoever signs in next. Google sign-in only.
+const PRESENCE_BEAT = 30e3, PRESENCE_STALE = 150e3, PRESENCE_MAX = 4;
+const presence = { sid: null, unsub: null, timer: null, tick: null, page: null, docs: {}, uid: null };
+function presenceSid(){
+  if (presence.sid) return presence.sid;
+  let s = null;
+  try { s = sessionStorage.getItem('presenceSid'); } catch (e) {}
+  if (!s) {
+    s = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    try { sessionStorage.setItem('presenceSid', s); } catch (e) {}
+  }
+  return presence.sid = s;
+}
+// The page a person is on: a detail route as-is, else the dashboard tab.
+function presencePage(){
+  return /^#\/(logged|p|grp|carve)\//.test(location.hash) ? location.hash : 'tab:' + dashTab;
+}
+function presenceWrite(){
+  const u = plan.user;
+  if (!plan.fb || plan.status !== 'in' || !u || !presence.unsub) return;
+  const { F, db } = plan.fb;
+  presence.page = presencePage();
+  F.setDoc(F.doc(db, 'presence', presenceSid()), {
+    uid: u.uid, name: u.displayName || u.email, email: u.email || '',
+    photo: u.photoURL || '', page: presence.page, at: F.serverTimestamp(),
+  }).catch(e => dbg('presence: write failed — ' + e.message));
+}
+function presenceStart(){
+  const u = plan.user;
+  if (!plan.fb || !u || presence.uid === u.uid) return;
+  presenceStop();
+  presence.uid = u.uid;
+  const { F, db } = plan.fb;
+  presence.unsub = F.onSnapshot(F.collection(db, 'presence'), snap => {
+    const docs = {};
+    snap.forEach(d => { docs[d.id] = d.data(); });
+    presence.docs = docs;
+    presenceRender();
+  }, err => dbg('presence: read failed — ' + err.message));
+  // Sweep docs left behind by tabs that closed without cleaning up.
+  F.getDocs(F.query(F.collection(db, 'presence'),
+      F.where('at', '<', F.Timestamp.fromMillis(Date.now() - 864e5))))
+    .then(s => s.forEach(d => F.deleteDoc(d.ref).catch(() => {})))
+    .catch(() => {});
+  presenceWrite();
+  presence.timer = setInterval(presenceWrite, PRESENCE_BEAT);
+  presence.tick = setInterval(presenceRender, PRESENCE_BEAT / 2);   // let stale avatars drop off
+}
+// Stop watching; resolves once this tab's own doc is deleted (best effort).
+function presenceStop(){
+  clearInterval(presence.timer); clearInterval(presence.tick);
+  if (presence.unsub) presence.unsub();
+  const had = presence.uid && plan.fb && plan.user;
+  presence.unsub = null; presence.timer = presence.tick = null;
+  presence.uid = null; presence.docs = {}; presence.page = null;
+  presenceRender();
+  if (!had) return Promise.resolve();
+  const { F, db } = plan.fb;
+  return F.deleteDoc(F.doc(db, 'presence', presenceSid())).catch(() => {});
+}
+// Called whenever the page or tab changes: re-announce if it moved, and redraw the avatars.
+function presenceUpdate(){
+  if (presence.unsub && presencePage() !== presence.page) presenceWrite();
+  presenceRender();
+}
+function presenceHtml(){
+  if (!presence.unsub) return '';
+  const page = presencePage(), now = Date.now(), seen = {};
+  const people = [];
+  Object.entries(presence.docs).forEach(([id, d]) => {
+    if (id === presence.sid || d.uid === presence.uid || d.page !== page || seen[d.uid]) return;
+    const at = d.at && d.at.toMillis ? d.at.toMillis() : 0;
+    if (now - at > PRESENCE_STALE) return;
+    seen[d.uid] = true;
+    people.push(d);
+  });
+  if (!people.length) return '';
+  people.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const shown = people.length > PRESENCE_MAX ? people.slice(0, PRESENCE_MAX - 1) : people;
+  const av = d => {
+    const name = String(d.name || d.email || '?');
+    const initials = name.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+    const photo = /^https:\/\//.test(d.photo || '')
+      ? `<img src="${esc(d.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : '';
+    return `<span class="pr-av" title="${esc(name)} is viewing this page">${esc(initials)}${photo}</span>`;
+  };
+  const rest = people.slice(shown.length);
+  const more = rest.length
+    ? `<span class="pr-av pr-more" title="${esc(rest.map(d => d.name).join(', '))}">+${rest.length}</span>` : '';
+  return shown.map(av).join('') + more;
+}
+function presenceRender(){
+  const el = document.getElementById('presence-slot');
+  if (el) el.innerHTML = presenceHtml();
+}
+window.addEventListener('pagehide', () => { presenceStop(); });
 // Move a card out of (out = true) or back into the watched month. Applied locally at once;
 // Firestore's snapshot confirms it, and a failed write rolls it back.
 async function planMove(id, out){
@@ -3960,6 +4072,7 @@ async function renderDashboard() {
         <div class="head">
           <h1 id="tab-title"></h1>
           <div class="head-right">
+            <span class="presence" id="presence-slot"></span>
             <span id="dash-updated" class="dash-updated"></span>
             <button class="btn" id="dash-refresh">Refresh</button>
           </div>
@@ -5575,6 +5688,7 @@ async function renderDashboard() {
     // place that shows the selected date range.
     document.getElementById('tab-title').textContent =
       TABS[dashTab].title + (TABS[dashTab].rangeTitle ? rangeTitle(dateStart, dateEnd) : '');
+    presenceUpdate();
     const sub = TABS[dashTab].sub || '', subEl = document.getElementById('tab-sub');
     // A tab with no sub line keeps the (empty) element, so its bottom margin still spaces the
     // header from the toolbar.
@@ -6285,6 +6399,7 @@ async function renderDetail(gid) {
         <div class="head">
           <h1 id="page-title"></h1>
           <div class="head-right">
+            <span class="presence" id="presence-slot"></span>
             <span id="dash-updated" class="dash-updated"></span>
             <button class="btn" id="refresh">Refresh</button>
           </div>
@@ -6448,6 +6563,7 @@ async function renderLoggedDetail(gid) {
         <div class="head">
           <h1 id="page-title"></h1>
           <div class="head-right">
+            <span class="presence" id="presence-slot"></span>
             <span id="dash-updated" class="dash-updated"></span>
             <button class="btn" id="refresh">Refresh</button>
           </div>
@@ -6554,6 +6670,7 @@ async function renderGroupDetail(name) {
         <div class="head">
           <h1 id="page-title"></h1>
           <div class="head-right">
+            <span class="presence" id="presence-slot"></span>
             <span id="dash-updated" class="dash-updated"></span>
             <button class="btn" id="refresh">Refresh</button>
           </div>
@@ -6682,6 +6799,7 @@ async function renderCarveDetail(name) {
         <div class="head">
           <h1 id="page-title"></h1>
           <div class="head-right">
+            <span class="presence" id="presence-slot"></span>
             <span id="dash-updated" class="dash-updated"></span>
             <button class="btn" id="refresh">Refresh</button>
           </div>
@@ -6800,6 +6918,11 @@ async function renderCarveDetail(name) {
 }
 
 function route() {
+  const r = routeTo();
+  presenceUpdate();   // the new page's header exists by now (each render paints it first)
+  return r;
+}
+function routeTo() {
   destroyCharts();
   // A reload on a detail page is just that page's load; don't save the full refresh for later.
   if (/^#\/(logged|p|grp|carve)\//.test(location.hash)) pageReloaded = false;
