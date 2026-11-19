@@ -266,8 +266,8 @@ existing `capLinePlugin` / `capMarksPlugin` and are enabled per-chart through
   load. Batching is an optimization only: a rejected batch, a failed action, or a response with
   a `next_page` falls back to a plain GET for that path, so it can cost requests but must never
   lose rows. Keep that fallback if you touch it. **Note: `/batch_requests` returns 404 on this
-  workspace**, so in practice the fallback is the live path; the code probes once, warns, and
-  disables batching for the session. Console prints per-route call counts
+  workspace**, so `BATCH_ENABLED = False` starts batching switched off and no probe is sent (set
+  it True to try again; a 404 still disables it for the session). Console prints per-route call counts
   (`/api/logged  48 Asana calls`) — use it to check a change actually reduced requests.
 - **The binding constraint is Asana's per-token rate limit** (1500 requests/minute on paid
   plans, 150 on free), not connections or thread count. Every call passes a token bucket

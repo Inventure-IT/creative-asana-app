@@ -24,6 +24,7 @@ GROUPS = json.dumps(a.GROUPS)
 CARVE_OUTS = json.dumps(a.CARVE_OUTS)
 UNBILLABLE = json.dumps(sorted(a.UNBILLABLE_GIDS))
 EST_FIELD = json.dumps(a.EST_FIELD)
+BATCH_ENABLED = json.dumps(a.BATCH_ENABLED)
 STATUS_FIELD = json.dumps(a.STATUS_FIELD)
 EXCLUDE = json.dumps(sorted(a.EXCLUDE_SECTIONS))
 ASSIGNEE_CAP = a.ASSIGNEE_HOURS_CAP
@@ -210,7 +211,8 @@ const BATCH_MAX = 10;
 // form, fall back to the structured form, and only then give up on batching for the session —
 // escalating once, not once per chunk, so a rejection can't cost hundreds of wasted POSTs.
 const BATCH_MODES = ['path', 'options', 'off'];
-let _batchMode = 0;
+// Mirrors BATCH_ENABLED: off on this workspace (Asana 404s the endpoint), so no probe is sent.
+let _batchMode = __BATCH__ ? 0 : BATCH_MODES.length - 1;
 function batchAction(p, mode){
   if (mode === 'path') return { method: 'get', relative_path: p };
   const [base, qs] = p.split('?');
@@ -564,7 +566,7 @@ async function projectEntries(projectGid, minutesByGid){
   if (!_projectEntriesOk) return {};
   let rows;
   try {
-    rows = await asanaGet(`/time_tracking_entries?attributable_project=${projectGid}` +
+    rows = await asanaGet(`/time_tracking_entries?attributable_to=${projectGid}` +
       '&opt_fields=duration_minutes,entered_on,created_by.name,task&limit=100');
   } catch (e) {
     if (/Asana (400|402|403|404)/.test(String(e && e.message))) {
@@ -869,6 +871,7 @@ def build():
     page = a.PAGE
     prepend = (PREPEND
                .replace('__ESTFIELD__', EST_FIELD)
+               .replace('__BATCH__', BATCH_ENABLED)
                .replace('__STATUSFIELD__', STATUS_FIELD)
                .replace('__EXCLUDE__', EXCLUDE)
                .replace('__CAP__', str(ASSIGNEE_CAP))

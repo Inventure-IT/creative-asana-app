@@ -376,7 +376,7 @@ REQ_LOCK = threading.Lock()
 
 def _count(target):
     kind = ("batch" if "batch_requests" in target else
-            "project-entries" if "attributable_project=" in target else
+            "project-entries" if "attributable_to=" in target else
             "entries" if "time_tracking_entries" in target else
             "subtasks" if "/subtasks" in target else
             "tasks" if "/tasks?" in target else "other")
@@ -467,7 +467,11 @@ BATCH_MAX = 10
 # form, fall back to the structured form, and only then give up on batching for this process —
 # escalating once, not once per chunk, so a rejection can't cost hundreds of wasted POSTs.
 BATCH_MODES = ["path", "options", "off"]
-_BATCH_MODE = [0]
+# This workspace has no /batch_requests (Asana answers 404), so batching starts switched off:
+# the probe only ever cost a wasted request and a red console error per load. Set True to try
+# it again (e.g. after a plan change) — a 404 still switches it off for the session.
+BATCH_ENABLED = False
+_BATCH_MODE = [0 if BATCH_ENABLED else len(BATCH_MODES) - 1]
 
 
 def _batch_action(path, mode):
@@ -650,7 +654,7 @@ def entries_path(task_gid):
 
 
 # A cold load reads time entries one task at a time — hundreds of calls. Asana can also list a
-# whole project's entries (/time_tracking_entries?attributable_project=…, 100 per page), so when a
+# whole project's entries (/time_tracking_entries?attributable_to=…, 100 per page), so when a
 # project has at least PROJECT_ENTRIES_MIN tasks to read, read the project instead. It's only a
 # shortcut: a task's rows are kept only if they add up to exactly its actual_time_minutes (the
 # same invariant the entry cache trusts); any task that doesn't — time attributed to another
@@ -662,7 +666,7 @@ _PROJECT_ENTRIES_OK = [True]
 
 def project_entries_path(project_gid):
     fields = "duration_minutes,entered_on,created_by.name,task"
-    return (f"/time_tracking_entries?attributable_project={project_gid}"
+    return (f"/time_tracking_entries?attributable_to={project_gid}"
             f"&opt_fields={fields}&limit=100")
 
 
@@ -1537,6 +1541,7 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark">
 <title>Creative Hours Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236aa9e0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpolyline points='12 6 12 12 16 14'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root { --blue:#6aa9e0; --blue-d:#9cc7f0; --green:#4cc085; --green-d:#6cd49d; --red:#e26b66;

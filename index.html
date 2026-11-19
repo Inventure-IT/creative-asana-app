@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark">
 <title>Creative Hours Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236aa9e0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpolyline points='12 6 12 12 16 14'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root { --blue:#6aa9e0; --blue-d:#9cc7f0; --green:#4cc085; --green-d:#6cd49d; --red:#e26b66;
@@ -789,7 +790,8 @@ const BATCH_MAX = 10;
 // form, fall back to the structured form, and only then give up on batching for the session —
 // escalating once, not once per chunk, so a rejection can't cost hundreds of wasted POSTs.
 const BATCH_MODES = ['path', 'options', 'off'];
-let _batchMode = 0;
+// Mirrors BATCH_ENABLED: off on this workspace (Asana 404s the endpoint), so no probe is sent.
+let _batchMode = false ? 0 : BATCH_MODES.length - 1;
 function batchAction(p, mode){
   if (mode === 'path') return { method: 'get', relative_path: p };
   const [base, qs] = p.split('?');
@@ -1143,7 +1145,7 @@ async function projectEntries(projectGid, minutesByGid){
   if (!_projectEntriesOk) return {};
   let rows;
   try {
-    rows = await asanaGet(`/time_tracking_entries?attributable_project=${projectGid}` +
+    rows = await asanaGet(`/time_tracking_entries?attributable_to=${projectGid}` +
       '&opt_fields=duration_minutes,entered_on,created_by.name,task&limit=100');
   } catch (e) {
     if (/Asana (400|402|403|404)/.test(String(e && e.message))) {
