@@ -333,7 +333,7 @@ back from its Asana due date). It never writes to Asana. The `plan` object and
 **Presence** (Google Docs-style avatars in each page's `.head-right`, `#presence-slot`): one doc per
 open browser tab, `presence/{session id}` = `{ uid, name, email, photo, page, at }`, heartbeat every
 30 s (`presenceWrite`), counted gone after 150 s; `page` is the detail hash or `tab:<dashTab>`, and
-only others on the *same* page show. Started/stopped from `onAuthStateChanged` (Google sign-in only);
+the row shows you first (`.pr-self`, blue ring, from `plan.user`) then others on the *same* page. Started/stopped from `onAuthStateChanged` (Google sign-in only);
 `route()` and `renderTab()` call `presenceUpdate()`. Docs older than a day are swept on sign-in.
 - Don't add light-mode styling or a third accent color without a reason that survives the
   blue/green semantics above.

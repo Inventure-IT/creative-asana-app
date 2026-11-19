@@ -1579,6 +1579,8 @@ PAGE = r"""<!DOCTYPE html>
   .pr-av:first-child { margin-left:0; }
   .pr-av img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
   .pr-more { color:var(--muted); font-weight:600; }
+  /* Your own avatar: an accent ring, so you can pick yourself out of the row. */
+  .pr-self { box-shadow:0 0 0 2px var(--bg), 0 0 0 3.5px var(--blue); margin-right:4px; }
   /* Loading / empty / "nothing matches the filter" states. One component everywhere, so
      every tab announces itself the same way. .box centers it inside a chart frame. */
   .note { color:var(--muted); font-size:13px; margin:14px 0; }
@@ -3722,24 +3724,29 @@ function presenceUpdate(){
 }
 function presenceHtml(){
   if (!presence.unsub) return '';
-  const page = presencePage(), now = Date.now(), seen = {};
+  const page = presencePage(), now = Date.now(), seen = { [presence.uid]: true };
   const people = [];
   Object.entries(presence.docs).forEach(([id, d]) => {
-    if (id === presence.sid || d.uid === presence.uid || d.page !== page || seen[d.uid]) return;
+    if (d.page !== page || seen[d.uid]) return;
     const at = d.at && d.at.toMillis ? d.at.toMillis() : 0;
     if (now - at > PRESENCE_STALE) return;
     seen[d.uid] = true;
     people.push(d);
   });
-  if (!people.length) return '';
   people.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  // You always come first (straight from the sign-in, so you show even before the first write lands).
+  const u = plan.user;
+  if (u) people.unshift({ uid: u.uid, name: u.displayName || u.email, email: u.email,
+                          photo: u.photoURL || '', self: true });
+  if (!people.length) return '';
   const shown = people.length > PRESENCE_MAX ? people.slice(0, PRESENCE_MAX - 1) : people;
   const av = d => {
     const name = String(d.name || d.email || '?');
     const initials = name.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
     const photo = /^https:\/\//.test(d.photo || '')
       ? `<img src="${esc(d.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : '';
-    return `<span class="pr-av" title="${esc(name)} is viewing this page">${esc(initials)}${photo}</span>`;
+    const tip = d.self ? `You (${name})` : `${name} is viewing this page`;
+    return `<span class="pr-av${d.self ? ' pr-self' : ''}" title="${esc(tip)}">${esc(initials)}${photo}</span>`;
   };
   const rest = people.slice(shown.length);
   const more = rest.length
