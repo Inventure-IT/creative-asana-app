@@ -166,7 +166,8 @@ def team_capacity_excluded(gid, name):
 PORTFOLIO_GID = "1214229029715231"
 
 EST_FIELD = "Estimated time"             # stored in minutes
-EXCLUDE_SECTIONS = {"completed"}         # status columns excluded from hour totals (case-insensitive)
+STATUS_FIELD = "Status"                  # enum custom field shown as a task's status; boards without it fall back to the section
+EXCLUDE_SECTIONS = {"completed"}         # statuses / status columns excluded from hour totals (case-insensitive)
 DEFAULT_START = "2026-06-01"             # default date range (inclusive) for the "Hours logged" view
 DEFAULT_END = "2026-06-30"               #   entries with start <= entered_on <= end are counted
 # A load asks Asana only for open tasks plus those completed or modified within this many days
@@ -585,12 +586,12 @@ def api_batch(paths):
 # `modified_at` gates the time-entry reads: logging time always bumps the item's own modified_at,
 # so an item untouched since a range started has no entries in that range (see is_touched).
 TASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,num_subtasks,"
-               "custom_fields.name,custom_fields.number_value,"
+               "custom_fields.name,custom_fields.number_value,custom_fields.display_value,"
                "memberships.section.name,memberships.project.gid")
 # A subtask carries its own memberships, so it gets its own status column when it has been
 # added to the project — never inherit the parent's section for it.
 SUBTASK_FIELDS = ("name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,"
-                  "custom_fields.name,custom_fields.number_value,"
+                  "custom_fields.name,custom_fields.number_value,custom_fields.display_value,"
                   "memberships.section.name,memberships.project.gid")
 # The task-list read asks for each task's subtasks nested inside it, so a project's whole tree
 # comes back in its task-list pages instead of one extra call per task that has subtasks.
@@ -808,9 +809,19 @@ def section_name(t, gid):
     return fallback
 
 
+def status_name(t, gid):
+    """The task's status: its STATUS_FIELD custom-field value ('' when unset). A board that
+    doesn't have the field at all falls back to the task's section."""
+    for cf in t.get("custom_fields", []):
+        if cf.get("name") == STATUS_FIELD:
+            return (cf.get("display_value") or "").strip()
+    return section_name(t, gid)
+
+
 def is_excluded(t, gid):
-    """True if the task sits in an excluded status column (e.g. Completed) of this project."""
-    return section_name(t, gid).strip().lower() in EXCLUDE_SECTIONS
+    """True if the task's status, or its status column, is excluded (e.g. Completed)."""
+    return (section_name(t, gid).strip().lower() in EXCLUDE_SECTIONS
+            or status_name(t, gid).strip().lower() in EXCLUDE_SECTIONS)
 
 
 def build_task(t, gid, children):
@@ -841,7 +852,7 @@ def build_task(t, gid, children):
             "hours": round(m / 60, 2),
             "actual": round(actual_minutes(s) / 60, 2),
             # the subtask's OWN status column; '' when it isn't a member of the project
-            "section": section_name(s, gid),
+            "section": status_name(s, gid),
             "due": s.get("due_on") or "",     # YYYY-MM-DD, '' when unset
             "done": done,
         })
@@ -851,7 +862,7 @@ def build_task(t, gid, children):
         "assignee": (t.get("assignee") or {}).get("name") or "Unassigned",
         "hours": round(parent_min / 60, 2),   # parent's own estimate (attributed to parent assignee)
         "actual": round(actual_minutes(t) / 60, 2),   # parent's own tracked time
-        "section": section_name(t, gid),
+        "section": status_name(t, gid),
         "due": t.get("due_on") or "",         # YYYY-MM-DD, '' when unset
         "subtasks": subs,                     # each subtask attributed to its own assignee
     }
@@ -1446,7 +1457,7 @@ def carve_out_summary(c, start, end, refresh=False):
             "gid": g,
             "name": t.get("name", "(untitled)"),
             "assignee": (t.get("assignee") or {}).get("name") or "Unassigned",
-            "section": section_name(t, gid),
+            "section": status_name(t, gid),
             "done": done(t),
             "estimated": round(task_est[g], 2),
             "logged": round(task_min.get(g, 0) / 60, 2),

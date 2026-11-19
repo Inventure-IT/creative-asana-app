@@ -619,6 +619,7 @@
 // ===== Static build: Asana data layer (runs entirely in the browser) =====
 const ASANA_API = 'https://app.asana.com/api/1.0';
 const EST_FIELD = "Estimated time";
+const STATUS_FIELD = "Status";
 const EXCLUDE_SECTIONS = new Set(["completed"]);
 const ASSIGNEE_HOURS_CAP = 128;
 const TEAM_MEMBERS = ["Miranda Osborn", "Linh Trinh", "Julia Reeves", "Grant Roach"];
@@ -875,16 +876,18 @@ async function asanaBatch(paths){
 function taskMinutes(t){ for (const cf of (t.custom_fields || [])){ if (cf.name === EST_FIELD && cf.number_value != null) return cf.number_value; } return 0; }
 function actualMinutes(t){ return t.actual_time_minutes || 0; }
 function sectionName(t, gid){ let fb = ''; for (const m of (t.memberships || [])){ const sec = (m.section || {}).name; if (!sec) continue; if ((m.project || {}).gid === gid) return sec; fb = fb || sec; } return fb; }
-function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).trim().toLowerCase()); }
+// Mirrors status_name: the STATUS_FIELD custom-field value; a board without the field falls back to the section.
+function statusName(t, gid){ for (const cf of (t.custom_fields || [])){ if (cf.name === STATUS_FIELD) return (cf.display_value || '').trim(); } return sectionName(t, gid); }
+function isExcluded(t, gid){ return EXCLUDE_SECTIONS.has(sectionName(t, gid).trim().toLowerCase()) || EXCLUDE_SECTIONS.has(statusName(t, gid).trim().toLowerCase()); }
 
 // One field set for both halves of the app (mirrors TASK_FIELDS / SUBTASK_FIELDS): num_subtasks
 // lets fetchTree skip the subtask call for a leaf task, and completed_at is what the
 // logged-hours layer needs, so it no longer re-fetches these same lists.
 // modified_at gates the time-entry reads (see isTouched).
-const TASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+const TASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,num_subtasks,custom_fields.name,custom_fields.number_value,custom_fields.display_value,memberships.section.name,memberships.project.gid';
 // A subtask carries its own memberships, so it gets its own status column when it has been
 // added to the project — never inherit the parent's section for it.
-const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,custom_fields.name,custom_fields.number_value,memberships.section.name,memberships.project.gid';
+const SUBTASK_FIELDS = 'name,assignee.name,completed,completed_at,modified_at,due_on,actual_time_minutes,custom_fields.name,custom_fields.number_value,custom_fields.display_value,memberships.section.name,memberships.project.gid';
 // Mirrors TREE_FIELDS: each task carries its subtasks nested, so a project's tree comes back in
 // its task-list pages instead of one extra call per task with subtasks.
 const TREE_FIELDS = TASK_FIELDS + ',' + SUBTASK_FIELDS.split(',').map(f => 'subtasks.' + f).join(',');
@@ -960,10 +963,10 @@ function buildTask(t, gid, children){
     subs.push({ gid: s.gid, name: s.name || '(untitled)', assignee: (s.assignee || {}).name || 'Unassigned',
       hours: round2(m / 60), actual: round2(actualMinutes(s) / 60),
       // the subtask's OWN status column; '' when it isn't a member of the project
-      section: sectionName(s, gid), due: s.due_on || '', done });
+      section: statusName(s, gid), due: s.due_on || '', done });
   }
   return { gid: t.gid, name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
-    hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: sectionName(t, gid), due: t.due_on || '', subtasks: subs };
+    hours: round2(taskMinutes(t) / 60), actual: round2(actualMinutes(t) / 60), section: statusName(t, gid), due: t.due_on || '', subtasks: subs };
 }
 
 async function projectDetail(gid, refresh){
@@ -1353,7 +1356,7 @@ async function carveOutSummary(c, start, end){
   // One row per task that brought its estimate in (open, or worked on in the range).
   const tasks = hits.filter(t => t.gid in taskEst).map(t => ({
     gid: t.gid, name: t.name || '(untitled)', assignee: (t.assignee || {}).name || 'Unassigned',
-    section: sectionName(t, gid), done: done(t),
+    section: statusName(t, gid), done: done(t),
     estimated: round2(taskEst[t.gid]), logged: round2((taskMin[t.gid] || 0) / 60) }))
     .sort((x, y) => (x.done - y.done) || (y.estimated - x.estimated) || (y.logged - x.logged));
   return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null, capacity_mode: c.capacity || null, total: c.total || null,

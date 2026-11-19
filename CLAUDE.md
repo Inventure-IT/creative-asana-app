@@ -249,8 +249,10 @@ existing `capLinePlugin` / `capMarksPlugin` and are enabled per-chart through
 - Estimated hours come from the `Estimated time` custom field (**stored in minutes**);
   actual hours from `actual_time_minutes` and per-task time entries. Convert to hours at the
   edge, round with `r2` / `round2`.
-- Tasks in an excluded status column (`EXCLUDE_SECTIONS`, currently `completed`) don't count
-  toward estimated-hours totals.
+- A task's **status** is its `Status` enum custom field (`STATUS_FIELD`, read by `status_name` /
+  `statusName`), not its section; a board without that field falls back to the section.
+- Tasks whose status *or* section is excluded (`EXCLUDE_SECTIONS`, currently `completed`) don't
+  count toward estimated-hours totals.
 - Everything is cached in memory (`CACHE`) until the user clicks **Refresh** (`?refresh=1`).
   Navigation must never re-hit the Asana API. Respect the two thread pools — `LEAF_POOL` for
   small per-task calls, `PROJECT_POOL` for whole projects — and never create ad-hoc pools;
