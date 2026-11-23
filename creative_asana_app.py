@@ -57,7 +57,7 @@ PROJECTS = [
     {"gid": "1217194342869306", "name": "St. Patrick's Day"},
     {"gid": "1219066223453162", "name": "The Recreational Group: Thatch", "kind": "Hourly"},
     {"gid": "1219254406444525", "name": "Slimothy the Slug", "kind": "Hourly"},
-    {"gid": "1219099033687412", "name": "Transformed Testimony", "kind": "Hourly"},
+    {"gid": "1219099033687412", "name": "Transformed Testimony", "kind": "Estimate"},
     {"gid": "1220217758251082", "name": "CMD: POC"},
     {"gid": "1220217758251087", "name": "CMD: Features"},
 ]
@@ -96,15 +96,15 @@ GROUPS = [
 # starts, so it counts down month by month. Such a carve-out reads its board's whole history.
 CARVE_OUTS = [
     # "capacity": "due" — MSA Project Capacity sets this card's capacity to the estimated hours of
-    # its open tasks due in the selected date range (the page's due-date rule), and lists it under
-    # the "Estimate" section.
+    # its open tasks due in the selected date range (the page's due-date rule). Every carve-out
+    # of kind "Estimate" gets this automatically; its kind lists it under the "Estimate" section.
     # "total" is information only: the whole engagement's hours, shown as a tag on the card so
     # nobody reads the monthly capacity as the full budget.
     {"name": "Savannah Camellia Fest 2027", "source": "1214228966572551", "match": "",
      "kind": "Estimate", "capacity": "due", "total": 120},
 
     {"name": "Update Tuesday", "source": "1214228966572563", "match": "Update Tuesday",   # Internal IIT Backlog
-     "billable": False, "kind": "Hourly"},
+     "billable": False, "kind": "Support"},
     {"name": "Support Tickets", "source": "1214228966572563", "match": "Support Tickets",   # Internal IIT Backlog
      "kind": "Support"},
     # An empty match claims the whole board: its budget is every open task's estimate. Such a
@@ -114,7 +114,9 @@ CARVE_OUTS = [
     {"name": "Slimothy the Slug", "source": "1219254406444525", "match": "",
      "kind": "Hourly"},
     {"name": "Transformed Testimony", "source": "1219099033687412", "match": "",
-     "kind": "Hourly"},
+     "kind": "Estimate"},
+    {"name": "St. Patrick's Day", "source": "1217194342869306", "match": "",
+     "kind": "Estimate"},
 ]
 
 # Projects whose logged time is unbillable (internal work); everything else is billable. A
@@ -1397,6 +1399,7 @@ def carve_out_summary(c, start, end, refresh=False):
             label[s["gid"]] = f"{tname} › {s.get('name') or '(untitled)'}"
 
     seen, logged, nentries, task_min, people, rows_out = set(), 0, 0, {}, {}, []
+    item_min = {}    # minutes logged in the range per task / subtask (not rolled up to the parent)
     worked = set()   # task/subtask gids with time logged in the range
     for item_gid, rows in by_gid.items():
         for e in rows:
@@ -1414,6 +1417,7 @@ def carve_out_summary(c, start, end, refresh=False):
             logged += m
             nentries += 1
             task_min[owner[item_gid]] = task_min.get(owner[item_gid], 0) + m
+            item_min[item_gid] = item_min.get(item_gid, 0) + m
             people[by] = people.get(by, 0) + m
             rows_out.append({"gid": egid, "tgid": item_gid, "date": entered, "by": by,
                              "task": label.get(item_gid, ""), "hours": round(m / 60, 2)})
@@ -1433,6 +1437,40 @@ def carve_out_summary(c, start, end, refresh=False):
         covered.update(i["gid"] for i in keep)
         task_est[t["gid"]] = sum(task_minutes(i) for i in keep) / 60
     est = sum(task_est.values())
+    # Estimated hours due in the range — finished work included, since a task done this month
+    # still belongs to this month's capacity. A task counts its own estimate when it is due in
+    # range; a subtask counts its own when it (or, undated, its parent) is. The Estimate section
+    # of MSA Project Capacity uses this as the card's capacity.
+    in_range = lambda d: bool(d) and start <= d <= end
+    due_min = 0
+    # Every task and subtask with its (effective) due date, estimate, hours logged in the range and
+    # whether it counts toward that capacity — the carve-out page's "Tasks by due date" table.
+    due_rows = []
+
+    def due_row(i, parent, due):
+        m = task_minutes(i)
+        due_rows.append({
+            "gid": i["gid"], "name": i.get("name") or "(untitled)",
+            "parent": (parent.get("name") or "(untitled)") if parent else "",
+            "due": due or "", "inherited": bool(parent) and not i.get("due_on") and bool(due),
+            "est": round(m / 60, 2), "logged": round(item_min.get(i["gid"], 0) / 60, 2),
+            "done": done(i), "status": status_name(i, gid),
+            "counted": in_range(due) and m > 0,
+        })
+        return m if in_range(due) else 0
+
+    # A subtask that was also added to the project appears as a task of its own too: list (and
+    # count) it once, under its parent.
+    sub_gids = {s["gid"] for t in hits for s in subs_of(t)}
+    listed = set()
+    for t in hits:
+        if t["gid"] not in sub_gids and t["gid"] not in listed:
+            listed.add(t["gid"])
+            due_min += due_row(t, None, t.get("due_on"))
+        for s in subs_of(t):
+            if s["gid"] not in listed:
+                listed.add(s["gid"])
+                due_min += due_row(s, t, s.get("due_on") or t.get("due_on"))
     if budget is not None:
         # A lifetime budget is burned by everything ever logged to the board, finished work too.
         covered = {i["gid"] for t in hits for i in [t] + subs_of(t)}
@@ -1481,6 +1519,8 @@ def carve_out_summary(c, start, end, refresh=False):
                               for t in hits for i in [t] + subs_of(t)) / 60, 2) if total else None,
         "cap": round(max((est if budget is None else budget) - prior_min / 60, 0), 2),   # never below zero
         "estimated": round(est, 2),
+        "due_est": round(due_min / 60, 2),   # estimates due in the range, finished work included
+        "due_rows": due_rows,
         "budget": budget,   # fixed lifetime hours, or None (capacity comes from the estimates)
         "prior": round(prior_min / 60, 2),
         "ntasks": open_n,
@@ -1881,6 +1921,14 @@ PAGE = r"""<!DOCTYPE html>
                 padding:6px 9px; font-size:13px; font-weight:400; cursor:pointer; font-family:inherit; }
   .sec-select:hover { border-color:var(--border-h); }
   .section-aside { font-size:13px; font-weight:400; color:var(--muted); margin-left:4px; }
+  /* A section's second line: how its capacity is worked out, read as a formula. */
+  .section-h.has-formula { margin-bottom:6px; }
+  .section-formula { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 0 14px;
+                     font-size:12px; color:var(--muted); }
+  .section-formula .sf-term { padding:2px 8px; border-radius:6px; background:var(--panel2);
+                              border:1px solid var(--border); color:var(--text); }
+  .section-formula .sf-term.est { color:var(--blue); border-color:var(--blue-d); }
+  .section-formula .sf-op { color:var(--faint); font-weight:600; }
   /* Sign-in screen + floating sign-out (both builds). */
   .login { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
   .login-card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:34px 32px;
@@ -1904,6 +1952,8 @@ PAGE = r"""<!DOCTYPE html>
   [data-plan-id][draggable="true"]:active { cursor:grabbing; }
   body.plan-dragging [data-drop] { outline:2px dashed var(--border); outline-offset:6px; border-radius:12px; }
   body.plan-dragging [data-drop].drop-hot { outline-color:var(--blue); }
+  .sec-drop-only { display:none; }
+  body.plan-dragging .sec-drop-only { display:block; }
   .plan-out .card { opacity:.55; }
   /* Reorder marker: a blue bar on the side of the card the dragged one will land next to. */
   .card.drop-before { box-shadow:-4px 0 0 0 var(--blue); }
@@ -2139,6 +2189,8 @@ PAGE = r"""<!DOCTYPE html>
   .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; background:var(--panel2); color:var(--text); }
   .badge.none { color:var(--faint); }   /* the "No status" placeholder badge */
   .badge.done { color:var(--green); }   /* the "Completed" marker on a finished subtask */
+  .badge.cnt { color:var(--blue); }     /* "Counted" toward a due-date capacity (estimated = blue) */
+  table.tasks tr.row-dim td { color:var(--muted); }   /* a task that doesn't count toward capacity */
   .sub-name { padding-left:22px; position:relative; }
   .sub-name::before { content:'↳'; position:absolute; left:6px; color:var(--sep); }
   /* Nesting steps for rows in the breakdown tables: .lvl1 is a task under its project
@@ -3518,6 +3570,10 @@ const plan = { status: 'off', fb: null, user: null, month: null, watching: null,
                // { caps: { 'p:<gid>' | 'grp:<group>': hours }, by, at }. A card id missing from
                // caps uses the configured cap from PROJECTS / GROUPS.
                caps: {}, unsubCaps: null, editingCaps: false,
+               // Section overrides, shared by everyone: doc settings/kinds = { kinds: { <card id>:
+               // kind } } ('' = MSA projects). Dragging a budgeted card into another section of MSA
+               // Project Capacity sets it; a card missing from kinds uses its configured kind.
+               kinds: {}, unsubKinds: null,
                // Shared holiday list (settings/holidays). holidaysSaved = the doc exists yet.
                unsubHolidays: null, holidaysSaved: false,
                // Gantt plan (doc settings/gantt), see the gantt object below.
@@ -3567,6 +3623,8 @@ function planWatch(month){
     plan.unsub = null; plan.watching = null; plan.out = {};
     plan.unsubOrder = null; plan.order = [];
     plan.unsubCaps = null; plan.caps = {}; plan.editingCaps = false;
+    if (plan.unsubKinds) plan.unsubKinds();
+    plan.unsubKinds = null; plan.kinds = {};
     if (plan.unsubHolidays) plan.unsubHolidays();
     plan.unsubHolidays = null; plan.holidaysSaved = false;
     if (plan.unsubGantt) plan.unsubGantt();
@@ -3592,6 +3650,17 @@ function planWatch(month){
     }, err => {
       plan.caps = {};
       plan.error = 'Could not read capacity settings: ' + err.message;
+      planChanged();
+    });
+  }
+  if (!plan.unsubKinds) {
+    const { F, db } = plan.fb;
+    plan.unsubKinds = F.onSnapshot(F.doc(db, 'settings', 'kinds'), snap => {
+      plan.kinds = (snap.exists() && snap.data().kinds) || {};
+      planChanged();
+    }, err => {
+      plan.kinds = {};
+      plan.error = 'Could not read the card sections: ' + err.message;
       planChanged();
     });
   }
@@ -3796,6 +3865,24 @@ async function planSaveOrder(order){
   } catch (e) {
     plan.order = prev;
     plan.error = 'Could not save the card order: ' + e.message;
+    planChanged();
+  }
+}
+// Move card `id` into the section for `kind` ('' = MSA projects). Back in its configured section
+// the override is dropped. Applied locally at once; a failed write rolls back.
+async function planSaveKind(id, kind, cfgKind){
+  if (plan.status !== 'in') return;
+  const { F, db } = plan.fb, u = plan.user, prev = plan.kinds;
+  const kinds = Object.assign({}, prev);
+  if (kind === (cfgKind || '')) delete kinds[id]; else kinds[id] = kind;
+  plan.kinds = kinds;
+  planChanged();
+  try {
+    await F.setDoc(F.doc(db, 'settings', 'kinds'),
+      { kinds, by: u.displayName || u.email, at: F.serverTimestamp() });
+  } catch (e) {
+    plan.kinds = prev;
+    plan.error = 'Could not move the card: ' + e.message;
     planChanged();
   }
 }
@@ -4056,6 +4143,11 @@ function planWire(root){
       document.body.classList.remove('plan-dragging');
       const id = e.dataTransfer.getData('text/plain'), out = z.dataset.drop === 'out';
       if (!id) return;
+      // A budgeted card (data-kind) dropped on another section's grid (data-kind) changes section.
+      const card = [...root.querySelectorAll('[data-plan-id]')].find(c => c.dataset.planId === id);
+      if (!out && card && card.dataset.kind != null && z.dataset.kind != null
+          && card.dataset.kind !== z.dataset.kind)
+        planSaveKind(id, z.dataset.kind, card.dataset.cfgKind);
       if (out !== !!plan.out[id]) return planMove(id, out);   // into / out of "Not this month"
       // Reorder within one section: rebuild the on-screen order with the card moved,
       // and keep any ids not on screen (moved out, or not in this range) after them.
@@ -5728,11 +5820,20 @@ async function renderDashboard() {
         // budget buckets first, then any standalone capped project (group members roll into
         // their bucket). Everything else that logged hours follows as plain statistics cards.
         const memberGids = new Set((groupsConfig || []).flatMap(g => g.gids));
-        // A carve-out with capacity_mode "due" (e.g. Savannah Camellia Fest 2027): capacity = the
+        // Section moves (plan.kinds) replace a budgeted card's configured kind; cfgKind keeps it.
+        const kindIds = plan.status === 'in' ? plan.kinds : {};
+        const withKind = (w, id) => Object.assign({}, w, { cfgKind: w.kind || '',
+          kind: id in kindIds ? (kindIds[id] || null) : w.kind });
+        // A carve-out with capacity_mode "due" or kind "Estimate" (e.g. Savannah Camellia Fest 2027): capacity = the
         // estimated hours of its open tasks (and subtasks) due in the range, from the estimated
         // details — the same rule as the cards' "est. due" projection.
         const dueCarve = w => {
-          if (w.capacity_mode !== 'due' || !auditDetails) return w;
+          if (w.capacity_mode !== 'due' && w.kind !== 'Estimate') return w;
+          // due_est (from the carve-out summary) counts finished tasks due in the range too, which
+          // the estimated details (open tasks only) can't see.
+          if (w.due_est != null)
+            return Object.assign({}, w, { cap: w.due_est, estimated: w.due_est, prior: 0, budget: null, dueCap: true });
+          if (!auditDetails) return w;
           const d = auditDetails.find(x => x.gid === w.source);
           if (!d) return w;
           const needle = (w.match || '').toLowerCase();
@@ -5741,10 +5842,18 @@ async function renderDashboard() {
           const est = r2(rows.reduce((a, r) => a + r.est, 0));
           return Object.assign({}, w, { cap: est, estimated: est, prior: 0, budget: null, dueCap: true, ntasks: rows.length });
         };
-        const allCarves = (Array.isArray(carveData) ? carveData : []).map(dueCarve);
-        const groupsAll = (groupsConfig || []).map(g => buildGroupSummary(g, loggedData, allCarves))
+        const allCarves = (Array.isArray(carveData) ? carveData : [])
+                            .map(w => dueCarve(withKind(w, 'carve:' + w.name)));
+        const groupsAll = (groupsConfig || []).map(g => withKind(buildGroupSummary(g, loggedData, allCarves), 'grp:' + g.name))
                             .filter(g => g.members.length);
+        // A standalone project in the Estimate section: capacity = its estimated hours due in range.
+        const dueProj = w => {
+          if (w.kind !== 'Estimate') return w;
+          const d = dueFor([w.gid]);
+          return d ? Object.assign({}, w, { cap: d.hours }) : w;
+        };
         const standaloneAll = loggedData.filter(w => w.cap != null && !memberGids.has(w.gid))
+                                .map(w => dueProj(withKind(w, 'p:' + w.gid)))
                                 .sort((a, b) => b.hours - a.hours);
         // Archived projects still show their logged hours, but in a section of their own at
         // the bottom rather than mixed in with the active work.
@@ -5767,12 +5876,14 @@ async function renderDashboard() {
         const groups = groupsAll.filter(w => !isOut(planId.grp(w)));
         const standalone = standaloneAll.filter(w => !isOut(planId.p(w)));
         const carves = carvesAll.filter(w => !isOut(planId.carve(w)));
-        const tag = (c, id) => { c.dataset.planId = id; return c; };
+        // Budgeted cards carry their section (data-kind) so a drop on another section moves them.
+        const tag = (c, id, w) => { c.dataset.planId = id;
+          if (w) { c.dataset.kind = w.kind || ''; c.dataset.cfgKind = w.cfgKind || ''; } return c; };
         const tagSort = w => { const c = loggedCard(w); c.dataset.planId = 'p:' + w.gid; return c; };
         const moved = [
-          ...groupsAll.filter(w => isOut(planId.grp(w))).map(w => tag(groupCard(w), planId.grp(w))),
-          ...standaloneAll.filter(w => isOut(planId.p(w))).map(w => tag(capCard(w), planId.p(w))),
-          ...carvesAll.filter(w => isOut(planId.carve(w))).map(w => tag(carveCard(w), planId.carve(w))),
+          ...groupsAll.filter(w => isOut(planId.grp(w))).map(w => tag(groupCard(w), planId.grp(w), w)),
+          ...standaloneAll.filter(w => isOut(planId.p(w))).map(w => tag(capCard(w), planId.p(w), w)),
+          ...carvesAll.filter(w => isOut(planId.carve(w))).map(w => tag(carveCard(w), planId.carve(w), w)),
           // Cards outside capacity can be filed here too — it just moves them out of the way.
           ...others.filter(w => isOut('p:' + w.gid)).map(tagSort),
           ...archived.filter(w => isOut('p:' + w.gid)).map(tagSort),
@@ -5813,15 +5924,26 @@ async function renderDashboard() {
           // Budgets split into sections by kind: plain MSA projects, then "Estimate" (budget = the
           // project's open task estimates), then "Support", then "Hourly". All of them count in the summary bar.
           const SECTION_KINDS = ['Estimate', 'Support', 'Hourly'];
-          const capSection = (title, kind, flush) => {
+          const secDropOnly = (title, kind) => `<div class="sec-drop-only">
+              <h2 class="section-h">${esc(title)}</h2>
+              <div class="grid cap-grid" data-drop="in" data-kind="${esc(kind)}">
+                <div class="plan-empty">Drop a card here to move it to this section.</div></div></div>`;
+          // A section's optional second line: how its capacity is worked out, as a small formula
+          // (HTML — callers pass escaped text).
+          const capSection = (title, kind, flush, formula) => {
             const pick = w => kind ? w.kind === kind : !SECTION_KINDS.includes(w.kind);
             // Combined buckets get a row of their own above the single-project cards, so a tall
             // bucket (member list) never stretches a short project card beside it.
-            const buckets = groups.filter(pick).map(w => tag(groupCard(w), planId.grp(w)));
-            const cards = [...standalone.filter(pick).map(w => tag(capCard(w), planId.p(w))),
-                           ...carves.filter(pick).map(w => tag(carveCard(w), planId.carve(w)))];
-            if (!buckets.length && !cards.length) return false;
-            view.insertAdjacentHTML('beforeend', `<h2 class="section-h${flush ? ' flush' : ''}">${esc(title)}</h2>`);
+            const buckets = groups.filter(pick).map(w => tag(groupCard(w), planId.grp(w), w));
+            const cards = [...standalone.filter(pick).map(w => tag(capCard(w), planId.p(w), w)),
+                           ...carves.filter(pick).map(w => tag(carveCard(w), planId.carve(w), w))];
+            if (!buckets.length && !cards.length) {
+              // Empty: shown only while a card is being dragged, so it can be moved here.
+              if (plan.status === 'in') view.insertAdjacentHTML('beforeend', secDropOnly(title, kind || ''));
+              return false;
+            }
+            view.insertAdjacentHTML('beforeend', `<h2 class="section-h${flush ? ' flush' : ''}${formula ? ' has-formula' : ''}">${esc(title)}</h2>` +
+              (formula ? `<div class="section-formula">${formula}</div>` : ''));
             // Two or more buckets get the wide two-per-row layout; a lone bucket (e.g. Support
             // Tickets) is just a normal card among the section's others.
             const wide = buckets.length >= 2;
@@ -5830,6 +5952,7 @@ async function renderDashboard() {
               const capGrid = document.createElement('div');
               capGrid.className = 'grid cap-grid' + (wide && i === 0 ? ' bucket-grid' : '');
               capGrid.dataset.drop = 'in';
+              capGrid.dataset.kind = kind || '';
               planSort(list).forEach(c => { c.classList.add('cap'); capGrid.appendChild(c); });
               view.appendChild(capGrid);
             });
@@ -5882,22 +6005,28 @@ async function renderDashboard() {
             view.insertAdjacentHTML('beforeend',
               '<h2 class="section-h flush">Team availability · rest of month</h2>' + panel);
             const msa = capSection('MSA projects · monthly retainers', null, false);
-            const est = capSection('Estimate-based projects · capacity = estimated hours due in range', 'Estimate', false);
-            const sup = capSection('Support · monthly capacity', 'Support', false);
+            const est = capSection('Estimate-based projects', 'Estimate', false,
+              `<span class="sf-term">Capacity</span><span class="sf-op">=</span>` +
+              `<span class="sf-term est">Estimated hours</span><span class="sf-txt">of tasks due</span>` +
+              `<span class="sf-term">${esc(rangeLabel(dateStart, dateEnd))}</span>`);
+            const sup = capSection('Support + Maintenance', 'Support', false);
             hasCapShown = msa || est || sup;
           }
           // Hourly engagements (billed by the hour): any budgeted card of kind "Hourly" (e.g. a
           // whole-board carve-out) followed by the uncapped hourly projects' logged-hours cards.
-          const hourlyCap = [...groups.filter(w => w.kind === 'Hourly').map(w => tag(groupCard(w), planId.grp(w))),
-                             ...standalone.filter(w => w.kind === 'Hourly').map(w => tag(capCard(w), planId.p(w))),
-                             ...carves.filter(w => w.kind === 'Hourly').map(w => tag(carveCard(w), planId.carve(w)))];
+          const hourlyCap = [...groups.filter(w => w.kind === 'Hourly').map(w => tag(groupCard(w), planId.grp(w), w)),
+                             ...standalone.filter(w => w.kind === 'Hourly').map(w => tag(capCard(w), planId.p(w), w)),
+                             ...carves.filter(w => w.kind === 'Hourly').map(w => tag(carveCard(w), planId.carve(w), w))];
           const hourly = others.filter(w => w.kind === 'Hourly' && !isOut('p:' + w.gid));
+          if (!hourlyCap.length && !hourly.length && hasCap && plan.status === 'in')
+            view.insertAdjacentHTML('beforeend', secDropOnly('Hourly projects', 'Hourly'));
           if (hourlyCap.length || hourly.length) {
             view.insertAdjacentHTML('beforeend',
               `<h2 class="section-h${hasCapShown ? '' : ' flush'}">Hourly projects</h2>`);
             const grid = document.createElement('div');
             grid.className = 'grid cap-grid';
             grid.dataset.drop = 'in';
+            grid.dataset.kind = 'Hourly';
             // One shared order for the whole section, so a budgeted card can be moved past an
             // uncapped one and stay there.
             hourlyCap.forEach(c => c.classList.add('cap'));
@@ -6797,6 +6926,14 @@ async function renderGroupDetail(name) {
 // A CARVE_OUTS budget (e.g. Update Tuesday) on its own page: only the source-board tasks it
 // matches, with their estimates (the capacity) and the hours logged to them in the range the
 // dashboard was left on. Same skeleton as the group page; no picker here either.
+// Whether a carve-out's capacity is its estimates due in the range: configured "capacity": "due",
+// or in the Estimate section (its configured kind, or a shared section move from plan.kinds).
+function carveDueMode(w) {
+  const id = 'carve:' + w.name;
+  const kind = plan.status === 'in' && id in plan.kinds ? plan.kinds[id] : w.kind;
+  return w.capacity_mode === 'due' || kind === 'Estimate';
+}
+
 async function renderCarveDetail(name) {
   app.innerHTML = `
     <div class="layout">
@@ -6822,6 +6959,7 @@ async function renderCarveDetail(name) {
   function show(w) {
     const view = document.getElementById('view');
     setCrumbs([{label:'Dashboard', fn:toDash}, {label:w.name}]);
+    if (carveDueMode(w)) return showDue(w);
     const used = Number(w.hours || 0), cap = Number(w.cap || 0), left = r2(cap - used);
     view.innerHTML = summaryBar([
       // Capacity = the tasks' estimates (or a fixed lifetime budget) less what was logged before the range.
@@ -6864,6 +7002,75 @@ async function renderCarveDetail(name) {
              `<td class="hours">${used ? (p.hours / used * 100).toFixed(0) : '0'}%</td></tr>`).join('')}</tbody>
          </table>`);
     }
+    showEntries(w);
+  }
+
+  // Due-date capacity (an Estimate-section card): capacity = the estimates of every task and
+  // subtask due in the range, finished or not. The table lists them all by due date and says
+  // which ones count, and why the rest don't.
+  function showDue(w) {
+    const view = document.getElementById('view');
+    const rows = w.due_rows || [];
+    const used = Number(w.hours || 0), cap = Number(w.due_est || 0), left = r2(cap - used);
+    const counted = rows.filter(r => r.counted);
+    view.innerHTML = summaryBar([
+      { n: h2(cap) + ' h', l: 'Capacity · est. due in range' },
+      { n: h2(used) + ' h', l: 'Hours used' },
+      { n: h2(left) + ' h', l: left < 0 ? 'Over budget' : 'Remaining', neg: left < 0 },
+      { n: (cap ? (used / cap * 100).toFixed(0) : '0') + '%', l: 'Budget used' },
+      { n: counted.length, l: counted.length === 1 ? 'Task counted' : 'Tasks counted' },
+      { n: h2(r2(counted.reduce((a, r) => a + r.logged, 0))) + ' h', l: 'Logged to counted tasks' },
+      { n: w.nentries, l: w.nentries === 1 ? 'Time entry' : 'Time entries' },
+    ]) + `<div class="cap-wide">${capBar(used, cap)}</div>`;
+    const why = r => r.counted ? '<span class="badge cnt">Counted</span>'
+      : `<span class="badge none">${!r.due ? 'No due date' : r.due < dateStart ? 'Due before range'
+          : r.due > dateEnd ? 'Due after range' : 'No estimate'}</span>`;
+    // Completed work is listed only when it counts or had time logged in the range — finished
+    // tasks from earlier months would only bury this month's.
+    const shown = rows.filter(r => !r.done || r.counted || r.logged > 0);
+    // Counted first, then by due date (undated last), so the capacity's tasks lead the table.
+    const sorted = shown.slice().sort((a, b) => (b.counted - a.counted)
+      || (a.due ? 0 : 1) - (b.due ? 0 : 1) || a.due.localeCompare(b.due)
+      || (a.parent || a.name).localeCompare(b.parent || b.name) || a.name.localeCompare(b.name));
+    const body = sorted.map(r =>
+      `<tr class="parent${r.counted ? '' : ' row-dim'}">` +
+      `<td>${r.parent ? `<span class="muted">${esc(r.parent)} › </span>` : ''}${taskLink(r.gid, r.name)}</td>` +
+      `<td class="nowrap">${r.due ? esc(fmtDate(r.due)) + (r.inherited ? ' <span class="muted">(parent)</span>' : '') : '—'}</td>` +
+      `<td>${r.done ? '<span class="badge done">Completed</span>'
+                    : r.status ? `<span class="badge">${esc(r.status)}</span>` : `<span class="badge none">${NO_STATUS}</span>`}</td>` +
+      `<td class="hours">${r.est ? h2(r.est) + ' h' : '—'}</td>` +
+      `<td class="hours">${r.logged ? h2(r.logged) + ' h' : '—'}</td>` +
+      `<td>${why(r)}</td></tr>`).join('')
+      || '<tr><td colspan="6" class="muted">No open tasks, and nothing logged in this range.</td></tr>';
+    view.insertAdjacentHTML('beforeend',
+      `<h2 class="section-h">Tasks by due date</h2>
+       <table class="tasks">
+         <thead><tr><th>Task</th><th>Due</th><th>Status</th>
+           <th class="hours">Est.</th><th class="hours">Logged</th><th>Capacity</th></tr></thead>
+         <tbody>${body}
+           <tr class="parent"><td colspan="3">Counted toward capacity</td>
+             <td class="hours">${h2(cap)} h</td>
+             <td class="hours">${h2(r2(counted.reduce((a, r) => a + r.logged, 0)))} h</td><td></td></tr>
+           <tr class="parent"><td colspan="3">All listed tasks</td>
+             <td class="hours">${h2(r2(shown.reduce((a, r) => a + r.est, 0)))} h</td>
+             <td class="hours">${h2(used)} h</td><td></td></tr></tbody>
+       </table>`);
+    const people = w.people || [];
+    if (people.length) {
+      view.insertAdjacentHTML('beforeend',
+        `<h2 class="section-h">Hours logged by person</h2>
+         <table class="tasks">
+           <thead><tr><th>Logged by</th><th class="hours">Hours logged</th><th class="hours">Share</th></tr></thead>
+           <tbody>${people.map(p =>
+             `<tr class="parent"><td>${esc(p.name)}</td><td class="hours">${h2(p.hours)} h</td>` +
+             `<td class="hours">${used ? (p.hours / used * 100).toFixed(0) : '0'}%</td></tr>`).join('')}</tbody>
+         </table>`);
+    }
+    showEntries(w);
+  }
+
+  function showEntries(w) {
+    const view = document.getElementById('view');
     // Every time entry in the range, newest first, with the note the person typed when they
     // logged it. Asana only hands notes out one entry at a time, so they fill in after the table.
     const entries = w.entries || [];
@@ -6912,7 +7119,8 @@ async function renderCarveDetail(name) {
       document.getElementById('page-title').textContent = w.name;
       document.getElementById('sub').textContent =
         (w.match ? `Tasks on ${w.source_name} containing “${w.match}”` : `All tasks on ${w.source_name}`) +
-        ` · estimates of tasks open or worked on in the range, less time logged before it, ` +
+        (carveDueMode(w) ? ` · capacity = estimates of tasks due in the range, `
+                         : ` · estimates of tasks open or worked on in the range, less time logged before it, `) +
         `against hours logged ${rangeLabel(dateStart, dateEnd)}`;
       document.getElementById('dash-updated').textContent = fmtUpdated(w.updated);
       notesRefresh = refresh;

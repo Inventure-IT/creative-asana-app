@@ -731,7 +731,7 @@ async function carveOutSummary(c, start, end){
     label[t.gid] = tname;
     for (const s of subsOf(t)) label[s.gid] = `${tname} › ${s.name || '(untitled)'}`;
   }
-  const seen = new Set(), worked = new Set(), taskMin = {}, people = {}, rowsOut = [];
+  const seen = new Set(), worked = new Set(), taskMin = {}, itemMin = {}, people = {}, rowsOut = [];
   let logged = 0, nentries = 0;
   for (const [g, rows] of Object.entries(byGid))
     for (const e of rows || []){
@@ -743,6 +743,7 @@ async function carveOutSummary(c, start, end){
       worked.add(g);
       logged += m; nentries++;
       taskMin[owner[g]] = (taskMin[owner[g]] || 0) + m;
+      itemMin[g] = (itemMin[g] || 0) + m;
       people[by] = (people[by] || 0) + m;
       rowsOut.push({ gid: e.gid, tgid: g, date: entered, by, task: label[g] || '', hours: round2(m / 60) });
     }
@@ -761,6 +762,26 @@ async function carveOutSummary(c, start, end){
     taskEst[t.gid] = sum(keep.map(taskMinutes)) / 60;
   }
   const est = sum(Object.values(taskEst));
+  // Estimated hours due in the range, finished work included (mirrors carve_out_summary's due_min).
+  const inRange = d => !!d && d >= start && d <= end;
+  let dueMin = 0;
+  // Every task and subtask with its due date and whether it counts (mirrors due_rows).
+  const dueRows = [];
+  const dueRow = (i, parent, due) => {
+    const m = taskMinutes(i);
+    dueRows.push({ gid: i.gid, name: i.name || '(untitled)', parent: parent ? (parent.name || '(untitled)') : '',
+      due: due || '', inherited: !!parent && !i.due_on && !!due,
+      est: round2(m / 60), logged: round2((itemMin[i.gid] || 0) / 60),
+      done: done(i), status: statusName(i, gid), counted: inRange(due) && m > 0 });
+    return inRange(due) ? m : 0;
+  };
+  // A subtask also added to the project is listed (and counted) once, under its parent.
+  const subGids = new Set(hits.flatMap(t => subsOf(t).map(s => s.gid))), listed = new Set();
+  for (const t of hits){
+    if (!subGids.has(t.gid) && !listed.has(t.gid)){ listed.add(t.gid); dueMin += dueRow(t, null, t.due_on); }
+    for (const s of subsOf(t))
+      if (!listed.has(s.gid)){ listed.add(s.gid); dueMin += dueRow(s, t, s.due_on || t.due_on); }
+  }
   // A lifetime budget is burned by everything ever logged to the board, finished work too.
   if (budget != null) covered = new Set(hits.flatMap(t => [t, ...subsOf(t)].map(i => i.gid)));
   // Work logged to those items before the range already burned part of their estimate.
@@ -785,7 +806,7 @@ async function carveOutSummary(c, start, end){
   return { name: c.name, source: gid, source_name: PROJECT_NAMES[gid] || gid, match: c.match, kind: c.kind || null, capacity_mode: c.capacity || null, total: c.total || null,
     // Mirrors "lifetime": every hour ever tracked to the matching tasks and subtasks.
     lifetime: c.total ? round2(hits.reduce((a, t) => a + [t, ...subsOf(t)].reduce((x, i) => x + (i.actual_time_minutes || 0), 0), 0) / 60) : null,
-    cap: round2(Math.max((budget != null ? budget : est) - priorMin / 60, 0)), estimated: round2(est), budget, prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
+    cap: round2(Math.max((budget != null ? budget : est) - priorMin / 60, 0)), estimated: round2(est), due_est: round2(dueMin / 60), due_rows: dueRows, budget, prior: round2(priorMin / 60), ntasks: openN, hours: round2(logged / 60), nentries, tasks,
     people: Object.entries(people).sort((x, y) => y[1] - x[1]).map(([name, m]) => ({ name, hours: round2(m / 60) })),
     entries: rowsOut,   // newest first; notes come separately, from /api/notes
     updated: nowStr() };

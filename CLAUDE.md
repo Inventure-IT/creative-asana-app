@@ -73,9 +73,13 @@ duplicate a project list or a team roster anywhere else.
   carve-outs (empty match) aren't split. A carve-out's optional `budget` is a fixed **lifetime**
   hour budget in place of the estimates (none use one right now): capacity
   = `budget` − every hour logged before the range, so it counts down month to month; it reads the
-  board's whole history (`BUDGET_HISTORY`). A carve-out with `"capacity": "due"` (Savannah Camellia Fest 2027,
-  kind `Estimate`) instead gets its capacity on MSA Project Capacity from the estimated hours of its
-  open tasks due in the range (`dueCarve`, using `dueTaskRows` on `auditDetails`). Its `"total": 120` is display
+  board's whole history (`BUDGET_HISTORY`). A carve-out with `"capacity": "due"` or kind `Estimate` (Savannah
+  Camellia Fest 2027) instead gets its capacity on MSA Project Capacity from the estimated hours of its
+  tasks due in the range, finished ones included: `carve_out_summary` / `carveOutSummary` return
+  it as `due_est`, plus `due_rows` (every task/subtask once, with due date, estimate, logged and
+  `counted`), which the carve-out page shows as "Tasks by due date" (`carveDueMode` / `showDue`),
+  hiding completed tasks that neither count nor had time logged in the range.
+  `dueCarve` falls back to `dueTaskRows` on `auditDetails` (open tasks only) without `due_est`. Its `"total": 120` is display
   only: the card shows a separate "Total budget" bar of every hour ever tracked (`lifetime`,
   Asana's running totals; reading it fetches the board's whole history) against it.
 - `UNBILLABLE_GIDS` marks projects whose logged time is unbillable; a carve-out's tasks on
@@ -319,7 +323,12 @@ by Firestore rules allowing only verified Google accounts on that domain. Card *
 section is shared too (not per month): doc `layout/capacity` = `{ order: [card id, …] }`, applied by
 `planSort()`, saved by `planSaveOrder()`. **Capacity overrides** (the "Edit capacity" button) live in doc `settings/capacity` = `{ caps: {
 'p:<gid>' | 'grp:<group>': hours } }`; `applyCapOverrides()` lays them over the loaded rows before
-every render (configured value kept as `cfgCap`), so every tab's budgets agree. **Holidays** (Settings › Holidays) live in doc `settings/holidays` = `{ days: [{ date, name }] }`,
+every render (configured value kept as `cfgCap`), so every tab's budgets agree. **Section moves**
+(dragging a budgeted card onto another section — MSA / Estimate / Support / Hourly) live in doc
+`settings/kinds` = `{ kinds: { <card id>: kind } }` (`''` = MSA), saved by `planSaveKind()` and laid
+over the configured `kind` (kept as `cfgKind`) on that tab only; moving a card back drops the entry.
+An Estimate-section card's capacity is its open estimates due in the range (carve-outs via `dueCarve`,
+standalone projects via `dueFor`). Empty sections appear (`.sec-drop-only`) only while dragging. **Holidays** (Settings › Holidays) live in doc `settings/holidays` = `{ days: [{ date, name }] }`,
 edited by anyone signed in (atomic `arrayUnion`/`arrayRemove` to add or remove; an edit is a
 `runTransaction` swap in `planHolidayReplace`); `DEFAULT_HOLIDAYS` is only the
 starting list until that doc exists. `setHolidays()` refills the `HOLIDAYS` set `workdayProgress` reads. **Gantt plan** (Estimated Hours ›
